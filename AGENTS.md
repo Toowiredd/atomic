@@ -51,7 +51,9 @@ Phase 1 (Foundation + Data Layer) features:
     embedding.rs      # Embedding generation using sqlite-lembed
   /resources
     all-MiniLM-L6-v2.q8_0.gguf  # Bundled embedding model (~24MB, Q8_0 quantization)
-    lembed0.so                   # sqlite-lembed extension (Linux x86_64, ~2.4MB)
+    lembed0.so                   # sqlite-lembed extension (Linux x86_64)
+    lembed0-aarch64.dylib        # sqlite-lembed extension (macOS Apple Silicon)
+    lembed0-x86_64.dylib         # sqlite-lembed extension (macOS Intel)
   Cargo.toml
   tauri.conf.json
 
@@ -289,14 +291,19 @@ Content is chunked for optimal embedding generation:
 4. **Query Embedding**: Search queries are embedded the same way for semantic matching
 
 ### Resource Files
-- `lembed0.so` - sqlite-lembed extension binary (Linux x86_64, v0.0.1-alpha.8)
 - `all-MiniLM-L6-v2.q8_0.gguf` - Embedding model (Q8_0 quantization, ~24MB)
+- `lembed0.so` - sqlite-lembed extension binary (Linux x86_64, v0.0.1-alpha.8)
+- `lembed0-aarch64.dylib` - sqlite-lembed extension binary (macOS Apple Silicon, v0.0.1-alpha.8)
+- `lembed0-x86_64.dylib` - sqlite-lembed extension binary (macOS Intel, v0.0.1-alpha.8)
 
 ### Platform Support
-Currently bundled for Linux x86_64. For other platforms:
-- macOS aarch64: Download `sqlite-lembed-0.0.1-alpha.8-loadable-macos-aarch64.tar.gz`
-- macOS x86_64: Download `sqlite-lembed-0.0.1-alpha.8-loadable-macos-x86_64.tar.gz`
-- Windows: Not yet available in pre-built form
+The application supports the following platforms with bundled sqlite-lembed extensions:
+- **Linux x86_64**: Uses `lembed0.so`
+- **macOS Apple Silicon (aarch64)**: Uses `lembed0-aarch64.dylib`
+- **macOS Intel (x86_64)**: Uses `lembed0-x86_64.dylib`
+- **Windows**: Not yet supported (no pre-built binaries available)
+
+The `get_lembed_extension_filename()` function in `db.rs` automatically selects the correct extension file based on the target OS and architecture at compile time.
 
 ### Similarity Calculation
 - sqlite-vec returns Euclidean distance (lower = more similar)

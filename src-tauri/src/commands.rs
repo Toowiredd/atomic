@@ -38,7 +38,7 @@ pub fn get_all_atoms(db: State<Database>) -> Result<Vec<AtomWithTags>, String> {
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, content, source_url, created_at, updated_at FROM atoms ORDER BY updated_at DESC",
+            "SELECT id, content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending') FROM atoms ORDER BY updated_at DESC",
         )
         .map_err(|e| e.to_string())?;
 
@@ -50,6 +50,7 @@ pub fn get_all_atoms(db: State<Database>) -> Result<Vec<AtomWithTags>, String> {
                 source_url: row.get(2)?,
                 created_at: row.get(3)?,
                 updated_at: row.get(4)?,
+                embedding_status: row.get(5)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -71,7 +72,7 @@ pub fn get_atom(db: State<Database>, id: String) -> Result<AtomWithTags, String>
 
     let atom: Atom = conn
         .query_row(
-            "SELECT id, content, source_url, created_at, updated_at FROM atoms WHERE id = ?1",
+            "SELECT id, content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending') FROM atoms WHERE id = ?1",
             [&id],
             |row| {
                 Ok(Atom {
@@ -80,6 +81,7 @@ pub fn get_atom(db: State<Database>, id: String) -> Result<AtomWithTags, String>
                     source_url: row.get(2)?,
                     created_at: row.get(3)?,
                     updated_at: row.get(4)?,
+                    embedding_status: row.get(5)?,
                 })
             },
         )
@@ -100,10 +102,11 @@ pub fn create_atom(
 
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
+    let embedding_status = "pending";
 
     conn.execute(
-        "INSERT INTO atoms (id, content, source_url, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        (&id, &content, &source_url, &now, &now),
+        "INSERT INTO atoms (id, content, source_url, created_at, updated_at, embedding_status) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        (&id, &content, &source_url, &now, &now, &embedding_status),
     )
     .map_err(|e| e.to_string())?;
 
@@ -122,6 +125,7 @@ pub fn create_atom(
         source_url,
         created_at: now.clone(),
         updated_at: now,
+        embedding_status: embedding_status.to_string(),
     };
 
     let tags = get_tags_for_atom(&conn, &id)?;
@@ -139,10 +143,11 @@ pub fn update_atom(
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let now = Utc::now().to_rfc3339();
+    let embedding_status = "pending"; // Reset to pending when content changes
 
     conn.execute(
-        "UPDATE atoms SET content = ?1, source_url = ?2, updated_at = ?3 WHERE id = ?4",
-        (&content, &source_url, &now, &id),
+        "UPDATE atoms SET content = ?1, source_url = ?2, updated_at = ?3, embedding_status = ?4 WHERE id = ?5",
+        (&content, &source_url, &now, &embedding_status, &id),
     )
     .map_err(|e| e.to_string())?;
 
@@ -161,7 +166,7 @@ pub fn update_atom(
     // Get the updated atom
     let atom: Atom = conn
         .query_row(
-            "SELECT id, content, source_url, created_at, updated_at FROM atoms WHERE id = ?1",
+            "SELECT id, content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending') FROM atoms WHERE id = ?1",
             [&id],
             |row| {
                 Ok(Atom {
@@ -170,6 +175,7 @@ pub fn update_atom(
                     source_url: row.get(2)?,
                     created_at: row.get(3)?,
                     updated_at: row.get(4)?,
+                    embedding_status: row.get(5)?,
                 })
             },
         )
@@ -310,7 +316,7 @@ pub fn get_atoms_by_tag(db: State<Database>, tag_id: String) -> Result<Vec<AtomW
 
     let mut stmt = conn
         .prepare(
-            "SELECT a.id, a.content, a.source_url, a.created_at, a.updated_at 
+            "SELECT a.id, a.content, a.source_url, a.created_at, a.updated_at, COALESCE(a.embedding_status, 'pending')
              FROM atoms a
              INNER JOIN atom_tags at ON a.id = at.atom_id
              WHERE at.tag_id = ?1
@@ -326,6 +332,7 @@ pub fn get_atoms_by_tag(db: State<Database>, tag_id: String) -> Result<Vec<AtomW
                 source_url: row.get(2)?,
                 created_at: row.get(3)?,
                 updated_at: row.get(4)?,
+                embedding_status: row.get(5)?,
             })
         })
         .map_err(|e| e.to_string())?

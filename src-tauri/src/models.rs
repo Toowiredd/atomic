@@ -7,6 +7,7 @@ pub struct Atom {
     pub source_url: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub embedding_status: String, // 'pending', 'processing', 'complete', 'failed'
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

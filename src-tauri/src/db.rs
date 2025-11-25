@@ -77,6 +77,46 @@ impl Database {
         )
         .map_err(|e| format!("Failed to run migrations: {}", e))?;
 
+        // Add embedding_status column to atoms table if it doesn't exist
+        Self::add_embedding_status_column(conn)?;
+
+        // Create vec_chunks virtual table for sqlite-vec similarity search
+        Self::create_vec_chunks_table(conn)?;
+
+        Ok(())
+    }
+
+    fn add_embedding_status_column(conn: &Connection) -> Result<(), String> {
+        // Check if embedding_status column exists
+        let column_exists: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('atoms') WHERE name = 'embedding_status'")
+            .map_err(|e| format!("Failed to prepare column check: {}", e))?
+            .exists([])
+            .map_err(|e| format!("Failed to check column existence: {}", e))?;
+
+        if !column_exists {
+            conn.execute(
+                "ALTER TABLE atoms ADD COLUMN embedding_status TEXT DEFAULT 'pending'",
+                [],
+            )
+            .map_err(|e| format!("Failed to add embedding_status column: {}", e))?;
+        }
+
+        Ok(())
+    }
+
+    fn create_vec_chunks_table(conn: &Connection) -> Result<(), String> {
+        // Create vec_chunks virtual table for sqlite-vec similarity search
+        // This uses the vec0 module from sqlite-vec for vector similarity
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
+                chunk_id TEXT PRIMARY KEY,
+                embedding float[384]
+            )",
+            [],
+        )
+        .map_err(|e| format!("Failed to create vec_chunks table: {}", e))?;
+
         Ok(())
     }
 }

@@ -7,6 +7,7 @@ export interface Atom {
   source_url: string | null;
   created_at: string;
   updated_at: string;
+  embedding_status: 'pending' | 'processing' | 'complete' | 'failed';
 }
 
 export interface Tag {

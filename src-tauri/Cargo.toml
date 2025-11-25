@@ -22,4 +22,5 @@ sqlite-vec = "0.1.6"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 zerocopy = { version = "0.8", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
 

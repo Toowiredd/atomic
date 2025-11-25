@@ -1,0 +1,141 @@
+import { useMemo } from 'react';
+import { AtomGrid } from '../atoms/AtomGrid';
+import { AtomList } from '../atoms/AtomList';
+import { FAB } from '../ui/FAB';
+import { useAtomsStore } from '../../stores/atoms';
+import { useUIStore } from '../../stores/ui';
+
+export function MainView() {
+  const { atoms, isLoading } = useAtomsStore();
+  const { viewMode, setViewMode, searchQuery, setSearchQuery, openDrawer } = useUIStore();
+
+  // Filter atoms by search query
+  const filteredAtoms = useMemo(() => {
+    if (!searchQuery.trim()) return atoms;
+    const query = searchQuery.toLowerCase();
+    return atoms.filter((atom) =>
+      atom.content.toLowerCase().includes(query) ||
+      atom.tags.some((tag) => tag.name.toLowerCase().includes(query))
+    );
+  }, [atoms, searchQuery]);
+
+  const handleAtomClick = (atomId: string) => {
+    openDrawer('viewer', atomId);
+  };
+
+  const handleNewAtom = () => {
+    openDrawer('editor');
+  };
+
+  return (
+    <main className="flex-1 flex flex-col h-full bg-[#1e1e1e] overflow-hidden">
+      {/* Header */}
+      <header className="flex items-center gap-4 px-4 py-3 border-b border-[#3d3d3d]">
+        {/* Search */}
+        <div className="flex-1 max-w-md">
+          <div className="relative">
+            <svg
+              className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#888888]"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+              />
+            </svg>
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search atoms..."
+              className="w-full pl-10 pr-4 py-2 bg-[#2d2d2d] border border-[#3d3d3d] rounded-md text-[#dcddde] placeholder-[#888888] focus:outline-none focus:ring-2 focus:ring-[#7c3aed] focus:border-transparent transition-colors text-sm"
+            />
+          </div>
+        </div>
+
+        {/* View Mode Toggle */}
+        <div className="flex items-center bg-[#2d2d2d] rounded-md border border-[#3d3d3d]">
+          <button
+            onClick={() => setViewMode('grid')}
+            className={`p-2 rounded-l-md transition-colors ${
+              viewMode === 'grid'
+                ? 'bg-[#7c3aed] text-white'
+                : 'text-[#888888] hover:text-[#dcddde]'
+            }`}
+            title="Grid view"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"
+              />
+            </svg>
+          </button>
+          <button
+            onClick={() => setViewMode('list')}
+            className={`p-2 rounded-r-md transition-colors ${
+              viewMode === 'list'
+                ? 'bg-[#7c3aed] text-white'
+                : 'text-[#888888] hover:text-[#dcddde]'
+            }`}
+            title="List view"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M4 6h16M4 12h16M4 18h16"
+              />
+            </svg>
+          </button>
+        </div>
+
+        {/* Atom count */}
+        <span className="text-sm text-[#888888]">
+          {filteredAtoms.length} atom{filteredAtoms.length !== 1 ? 's' : ''}
+        </span>
+      </header>
+
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto">
+        {isLoading ? (
+          <div className="flex items-center justify-center h-full">
+            <div className="flex items-center gap-3 text-[#888888]">
+              <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle
+                  className="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  strokeWidth="4"
+                />
+                <path
+                  className="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                />
+              </svg>
+              Loading atoms...
+            </div>
+          </div>
+        ) : viewMode === 'grid' ? (
+          <AtomGrid atoms={filteredAtoms} onAtomClick={handleAtomClick} />
+        ) : (
+          <AtomList atoms={filteredAtoms} onAtomClick={handleAtomClick} />
+        )}
+      </div>
+
+      {/* FAB */}
+      <FAB onClick={handleNewAtom} title="Create new atom" />
+    </main>
+  );
+}
+

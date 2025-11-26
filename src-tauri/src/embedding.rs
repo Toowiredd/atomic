@@ -86,6 +86,10 @@ async fn process_embeddings(
         .map(|v| v == "true")
         .unwrap_or(true); // Default to true
     let api_key = settings_map.get("openrouter_api_key").cloned();
+    let tagging_model = settings_map
+        .get("tagging_model")
+        .cloned()
+        .unwrap_or_else(|| "openai/gpt-4o-mini".to_string());
 
     // Get tag tree for extraction context (if auto-tagging is enabled)
     let tag_tree_json = if auto_tagging_enabled && api_key.is_some() {
@@ -175,7 +179,7 @@ async fn process_embeddings(
         // Extract tags (if enabled and API key is set)
         if auto_tagging_enabled {
             if let Some(ref key) = api_key {
-                match extract_tags_from_chunk(&client, key, chunk_content, &tag_tree_json).await {
+                match extract_tags_from_chunk(&client, key, chunk_content, &tag_tree_json, &tagging_model).await {
                     Ok(result) => all_extraction_results.push(result),
                     Err(e) => {
                         // Log warning but continue - don't fail the whole process

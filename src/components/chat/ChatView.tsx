@@ -1,0 +1,162 @@
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { useChatStore } from '../../stores/chat';
+import { useUIStore } from '../../stores/ui';
+import { useChatEvents } from '../../hooks/useChatEvents';
+import { ChatHeader } from './ChatHeader';
+import { ChatMessage } from './ChatMessage';
+import { ChatInput } from './ChatInput';
+
+export function ChatView() {
+  const {
+    currentConversation,
+    messages,
+    isLoading,
+    isStreaming,
+    streamingContent,
+    error,
+    sendMessage,
+    goBack,
+  } = useChatStore();
+
+  const { openDrawer } = useUIStore();
+
+  const [inputValue, setInputValue] = useState('');
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const isNearBottomRef = useRef(true);
+
+  // Subscribe to chat events for streaming
+  useChatEvents(currentConversation?.id ?? null);
+
+  // Check if user is near the bottom of the scroll container
+  const checkIfNearBottom = useCallback(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return true;
+
+    const threshold = 100; // pixels from bottom to consider "at bottom"
+    const { scrollTop, scrollHeight, clientHeight } = container;
+    return scrollHeight - scrollTop - clientHeight < threshold;
+  }, []);
+
+  // Update near-bottom state on scroll
+  const handleScroll = useCallback(() => {
+    isNearBottomRef.current = checkIfNearBottom();
+  }, [checkIfNearBottom]);
+
+  // Auto-scroll to bottom only if user is already near bottom
+  useEffect(() => {
+    if (isNearBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, streamingContent]);
+
+  // Always scroll to bottom when a new message is sent (user action)
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    isNearBottomRef.current = true;
+  }, []);
+
+  const handleSend = async () => {
+    if (!inputValue.trim() || isStreaming) return;
+
+    const content = inputValue.trim();
+    setInputValue('');
+    scrollToBottom(); // Scroll to bottom when user sends a message
+    await sendMessage(content);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  // Handle viewing an atom from citation - switch drawer to viewer mode
+  const handleViewAtom = useCallback((atomId: string) => {
+    openDrawer('viewer', atomId);
+  }, [openDrawer]);
+
+  if (!currentConversation) {
+    return (
+      <div className="flex items-center justify-center h-full text-[#888888]">
+        {isLoading ? 'Loading conversation...' : 'No conversation selected'}
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full flex flex-col">
+      {/* Header with back button and scope */}
+      <ChatHeader conversation={currentConversation} onBack={goBack} />
+
+      {/* Messages area */}
+      <div
+        ref={messagesContainerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto p-4 space-y-4"
+      >
+        {messages.length === 0 && !isStreaming && (
+          <div className="flex flex-col items-center justify-center h-full gap-4 text-center">
+            <div className="w-16 h-16 rounded-full bg-[#2d2d2d] flex items-center justify-center">
+              <svg className="w-8 h-8 text-[#7c3aed]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+              </svg>
+            </div>
+            <div>
+              <p className="text-[#dcddde] font-medium mb-1">Start the conversation</p>
+              <p className="text-[#888888] text-sm max-w-sm">
+                Ask questions about your knowledge base. The AI will search through your atoms to find relevant information.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {messages.map((message) => (
+          <ChatMessage key={message.id} message={message} onViewAtom={handleViewAtom} />
+        ))}
+
+        {/* Streaming message */}
+        {isStreaming && streamingContent && (
+          <ChatMessage
+            message={{
+              id: 'streaming',
+              conversation_id: currentConversation.id,
+              role: 'assistant',
+              content: streamingContent,
+              created_at: new Date().toISOString(),
+              message_index: messages.length,
+              tool_calls: [],
+              citations: [],
+            }}
+            isStreaming
+            onViewAtom={handleViewAtom}
+          />
+        )}
+
+        {/* Error message */}
+        {error && (
+          <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
+            {error}
+          </div>
+        )}
+
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* Input area */}
+      <ChatInput
+        value={inputValue}
+        onChange={setInputValue}
+        onSend={handleSend}
+        onKeyDown={handleKeyDown}
+        disabled={isStreaming}
+        placeholder={
+          currentConversation.tags.length > 0
+            ? `Ask about ${currentConversation.tags.map(t => t.name).join(', ')}...`
+            : 'Ask anything about your knowledge base...'
+        }
+      />
+    </div>
+  );
+}

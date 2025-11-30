@@ -1,3 +1,5 @@
+mod agent;
+mod chat;
 mod chunking;
 mod commands;
 mod db;
@@ -88,6 +90,17 @@ pub fn run() {
             commands::get_atom_positions,
             commands::save_atom_positions,
             commands::get_atoms_with_embeddings,
+            // Chat commands
+            chat::create_conversation,
+            chat::get_conversations,
+            chat::get_conversation,
+            chat::update_conversation,
+            chat::delete_conversation,
+            chat::set_conversation_scope,
+            chat::add_tag_to_scope,
+            chat::remove_tag_from_scope,
+            // Agent/messaging
+            agent::send_chat_message,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

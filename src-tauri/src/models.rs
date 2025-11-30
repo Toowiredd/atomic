@@ -144,3 +144,118 @@ pub struct CreateAtomRequest {
     pub tag_ids: Vec<String>,
 }
 
+// ==================== Chat Types ====================
+
+/// Chat conversation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Conversation {
+    pub id: String,
+    pub title: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub is_archived: bool,
+}
+
+/// Conversation with its tag scope and summary info
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationWithTags {
+    #[serde(flatten)]
+    pub conversation: Conversation,
+    pub tags: Vec<Tag>,
+    pub message_count: i32,
+    pub last_message_preview: Option<String>,
+}
+
+/// Conversation with full message history
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationWithMessages {
+    #[serde(flatten)]
+    pub conversation: Conversation,
+    pub tags: Vec<Tag>,
+    pub messages: Vec<ChatMessageWithContext>,
+}
+
+/// Chat message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub id: String,
+    pub conversation_id: String,
+    pub role: String, // "user", "assistant", "system", "tool"
+    pub content: String,
+    pub created_at: String,
+    pub message_index: i32,
+}
+
+/// Message with tool calls and citations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessageWithContext {
+    #[serde(flatten)]
+    pub message: ChatMessage,
+    pub tool_calls: Vec<ChatToolCall>,
+    pub citations: Vec<ChatCitation>,
+}
+
+/// Tool call record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatToolCall {
+    pub id: String,
+    pub message_id: String,
+    pub tool_name: String,
+    pub tool_input: serde_json::Value,
+    pub tool_output: Option<serde_json::Value>,
+    pub status: String, // "pending", "running", "complete", "failed"
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+/// Citation in a chat message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCitation {
+    pub id: String,
+    pub message_id: String,
+    pub citation_index: i32,
+    pub atom_id: String,
+    pub chunk_index: Option<i32>,
+    pub excerpt: String,
+    pub relevance_score: Option<f32>,
+}
+
+/// Retrieval step for transparency UI
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalStep {
+    pub step_number: i32,
+    pub tool_name: String,
+    pub query: String,
+    pub results_count: i32,
+    pub timestamp: String,
+}
+
+// ==================== Chat Event Payloads ====================
+
+/// Streaming delta event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatStreamEvent {
+    pub conversation_id: String,
+    pub message_id: String,
+    pub event_type: String, // "delta", "tool_start", "tool_complete", "done"
+    pub content_delta: Option<String>,
+    pub tool_call: Option<ChatToolCall>,
+    pub retrieval_step: Option<RetrievalStep>,
+}
+
+/// Chat completion event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompleteEvent {
+    pub conversation_id: String,
+    pub message_id: String,
+    pub message: ChatMessageWithContext,
+}
+
+/// Chat error event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatErrorEvent {
+    pub conversation_id: String,
+    pub message_id: Option<String>,
+    pub error: String,
+}
+

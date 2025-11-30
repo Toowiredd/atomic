@@ -14,7 +14,7 @@ export function MainView() {
     semanticSearchQuery,
     retryEmbedding,
   } = useAtomsStore();
-  const { viewMode, setViewMode, searchQuery, selectedTagId, openDrawer } = useUIStore();
+  const { viewMode, setViewMode, searchQuery, selectedTagId, openDrawer, openChatDrawer } = useUIStore();
 
   // Determine what to display
   const displayAtoms = useMemo(() => {
@@ -65,6 +65,11 @@ export function MainView() {
     } catch (error) {
       console.error('Failed to retry embedding:', error);
     }
+  };
+
+  const handleOpenChat = () => {
+    // Open chat with current tag filter if one is selected
+    openChatDrawer(selectedTagId ?? undefined);
   };
 
   return (
@@ -131,6 +136,21 @@ export function MainView() {
             {displayAtoms.length} atom{displayAtoms.length !== 1 ? 's' : ''}
           </span>
         )}
+
+        {/* Spacer */}
+        <div className="flex-1" />
+
+        {/* Chat button */}
+        <button
+          onClick={handleOpenChat}
+          className="flex items-center gap-2 px-3 py-1.5 text-sm rounded-md bg-[#2d2d2d] border border-[#3d3d3d] text-[#888888] hover:text-[#dcddde] hover:border-[#7c3aed] transition-colors"
+          title="Open conversations"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+          </svg>
+          Chat
+        </button>
       </header>
 
       {/* Search results header - only show for grid/list views */}

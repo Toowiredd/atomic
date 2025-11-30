@@ -1,15 +1,16 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
-export type DrawerMode = 'editor' | 'viewer' | 'wiki';
+export type DrawerMode = 'editor' | 'viewer' | 'wiki' | 'chat';
 export type ViewMode = 'canvas' | 'grid' | 'list';
 
 interface DrawerState {
   isOpen: boolean;
   mode: DrawerMode;
   atomId: string | null;      // For editor/viewer modes
-  tagId: string | null;       // For wiki mode
+  tagId: string | null;       // For wiki and chat modes
   tagName: string | null;     // For wiki mode (display purposes)
+  conversationId: string | null;  // For chat mode
 }
 
 export interface LoadingOperation {
@@ -27,6 +28,7 @@ interface UIStore {
   setSelectedTag: (tagId: string | null) => void;
   openDrawer: (mode: DrawerMode, atomId?: string) => void;
   openWikiDrawer: (tagId: string, tagName: string) => void;
+  openChatDrawer: (tagId?: string, conversationId?: string) => void;
   closeDrawer: () => void;
   setViewMode: (mode: ViewMode) => void;
   setSearchQuery: (query: string) => void;
@@ -44,6 +46,7 @@ export const useUIStore = create<UIStore>()(
         atomId: null,
         tagId: null,
         tagName: null,
+        conversationId: null,
       },
       viewMode: 'canvas',  // Default to canvas view
       searchQuery: '',
@@ -59,6 +62,7 @@ export const useUIStore = create<UIStore>()(
             atomId: atomId || null,
             tagId: null,
             tagName: null,
+            conversationId: null,
           },
         }),
 
@@ -70,6 +74,19 @@ export const useUIStore = create<UIStore>()(
             atomId: null,
             tagId,
             tagName,
+            conversationId: null,
+          },
+        }),
+
+      openChatDrawer: (tagId?: string, conversationId?: string) =>
+        set({
+          drawerState: {
+            isOpen: true,
+            mode: 'chat',
+            atomId: null,
+            tagId: tagId || null,
+            tagName: null,
+            conversationId: conversationId || null,
           },
         }),
 

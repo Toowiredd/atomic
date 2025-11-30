@@ -231,6 +231,64 @@ impl Database {
             );
 
             CREATE INDEX IF NOT EXISTS idx_atom_positions_atom ON atom_positions(atom_id);
+
+            -- Chat conversations
+            CREATE TABLE IF NOT EXISTS conversations (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                is_archived INTEGER DEFAULT 0
+            );
+
+            -- Many-to-many: conversation tag scope (editable at any time)
+            CREATE TABLE IF NOT EXISTS conversation_tags (
+                conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                PRIMARY KEY (conversation_id, tag_id)
+            );
+
+            -- Chat messages
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                message_index INTEGER NOT NULL
+            );
+
+            -- Tool calls for transparency and debugging
+            CREATE TABLE IF NOT EXISTS chat_tool_calls (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+                tool_name TEXT NOT NULL,
+                tool_input TEXT NOT NULL,
+                tool_output TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+
+            -- Chat citations (mirrors wiki_citations pattern)
+            CREATE TABLE IF NOT EXISTS chat_citations (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+                citation_index INTEGER NOT NULL,
+                atom_id TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+                chunk_index INTEGER,
+                excerpt TEXT NOT NULL,
+                relevance_score REAL
+            );
+
+            -- Indexes for chat tables
+            CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_conversation_tags_conv ON conversation_tags(conversation_id);
+            CREATE INDEX IF NOT EXISTS idx_conversation_tags_tag ON conversation_tags(tag_id);
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation ON chat_messages(conversation_id, message_index);
+            CREATE INDEX IF NOT EXISTS idx_chat_tool_calls_message ON chat_tool_calls(message_id);
+            CREATE INDEX IF NOT EXISTS idx_chat_citations_message ON chat_citations(message_id);
+            CREATE INDEX IF NOT EXISTS idx_chat_citations_atom ON chat_citations(atom_id);
             "#,
         )
         .map_err(|e| format!("Failed to run migrations: {}", e))?;

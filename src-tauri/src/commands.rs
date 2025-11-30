@@ -730,6 +730,157 @@ pub async fn search_atoms_semantic(
     Ok(final_results)
 }
 
+/// Public helper for semantic search - can be called from agent module
+/// Takes scope_tag_ids to filter results to specific tags
+/// This is an async function that should be called from async contexts
+pub async fn search_atoms_semantic_impl(
+    db: &crate::db::Database,
+    query: &str,
+    limit: i32,
+    threshold: f32,
+    scope_tag_ids: &[String],
+) -> Result<Vec<SemanticSearchResult>, String> {
+    // Get API key from settings (quick DB access, then release lock)
+    let api_key = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let settings_map = crate::settings::get_all_settings(&conn)?;
+        settings_map
+            .get("openrouter_api_key")
+            .cloned()
+            .ok_or("OpenRouter API key not configured.")?
+    };
+
+    // Generate embedding for query using OpenRouter (async, no DB lock needed)
+    let client = reqwest::Client::new();
+    let embeddings = crate::embedding::generate_openrouter_embeddings_public(
+        &client,
+        &api_key,
+        &vec![query.to_string()],
+    )
+    .await
+    .map_err(|e| format!("Failed to generate query embedding: {}", e))?;
+
+    let query_blob = crate::embedding::f32_vec_to_blob_public(&embeddings[0]);
+
+    // Now re-acquire lock for all DB queries
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    // Search vec_chunks for similar chunks
+    let mut vec_stmt = conn
+        .prepare(
+            "SELECT chunk_id, distance
+             FROM vec_chunks
+             WHERE embedding MATCH ?1
+             ORDER BY distance
+             LIMIT ?2",
+        )
+        .map_err(|e| format!("Failed to prepare vec query: {}", e))?;
+
+    let similar_chunks: Vec<(String, f32)> = vec_stmt
+        .query_map(rusqlite::params![&query_blob, limit * 10], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(|e| format!("Failed to query similar chunks: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect similar chunks: {}", e))?;
+
+    // Map to store best similarity per atom_id
+    let mut atom_similarities: HashMap<String, (f32, String, i32)> = HashMap::new();
+
+    // Filter by threshold and deduplicate
+    for (chunk_id, distance) in similar_chunks {
+        let similarity = distance_to_similarity(distance);
+
+        if similarity < threshold {
+            continue;
+        }
+
+        // Get the parent atom_id and chunk info
+        let chunk_info: Result<(String, String, i32), _> = conn.query_row(
+            "SELECT atom_id, content, chunk_index FROM atom_chunks WHERE id = ?1",
+            [&chunk_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        );
+
+        if let Ok((parent_atom_id, chunk_content, chunk_index)) = chunk_info {
+            // Filter by scope if tags are specified
+            if !scope_tag_ids.is_empty() {
+                let has_tag: bool = conn
+                    .query_row(
+                        &format!(
+                            "SELECT EXISTS(SELECT 1 FROM atom_tags WHERE atom_id = ?1 AND tag_id IN ({}))",
+                            scope_tag_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",")
+                        ),
+                        rusqlite::params_from_iter(
+                            std::iter::once(parent_atom_id.as_str())
+                                .chain(scope_tag_ids.iter().map(|s| s.as_str()))
+                        ),
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+
+                if !has_tag {
+                    continue;
+                }
+            }
+
+            // Keep highest similarity per atom
+            let entry = atom_similarities.entry(parent_atom_id.clone());
+            match entry {
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    if similarity > e.get().0 {
+                        e.insert((similarity, chunk_content, chunk_index));
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert((similarity, chunk_content, chunk_index));
+                }
+            }
+        }
+    }
+
+    // Build results, sorted by similarity
+    let mut results: Vec<(String, f32, String, i32)> = atom_similarities
+        .into_iter()
+        .map(|(atom_id, (sim, content, idx))| (atom_id, sim, content, idx))
+        .collect();
+
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    results.truncate(limit as usize);
+
+    // Fetch full atom data for results
+    let mut final_results = Vec::new();
+    for (result_atom_id, similarity, chunk_content, chunk_index) in results {
+        let atom: Atom = conn
+            .query_row(
+                "SELECT id, content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending') FROM atoms WHERE id = ?1",
+                [&result_atom_id],
+                |row| {
+                    Ok(Atom {
+                        id: row.get(0)?,
+                        content: row.get(1)?,
+                        source_url: row.get(2)?,
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
+                        embedding_status: row.get(5)?,
+                    })
+                },
+            )
+            .map_err(|e| format!("Failed to get atom: {}", e))?;
+
+        let tags = get_tags_for_atom(&conn, &result_atom_id)?;
+
+        final_results.push(SemanticSearchResult {
+            atom: AtomWithTags { atom, tags },
+            similarity_score: similarity,
+            matching_chunk_content: chunk_content,
+            matching_chunk_index: chunk_index,
+        });
+    }
+
+    Ok(final_results)
+}
+
 /// Retry embedding generation for a failed atom
 /// Reset status to 'pending' and trigger embedding again
 #[tauri::command]

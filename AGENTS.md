@@ -3,7 +3,16 @@
 ## Project Overview
 Atomic is a Tauri v2 desktop application for note-taking with a React frontend. It features markdown editing, hierarchical tagging, AI-powered semantic search using embeddings, automatic tag extraction, wiki article synthesis using OpenRouter LLM, and an interactive canvas view for spatial atom visualization.
 
-## Current Status: Phase 5 Complete
+## Current Status: Phase 6 In Progress
+Phase 6 (Conversational AI) in progress:
+- Chat conversations with agentic RAG pipeline
+- Multi-tag scoped conversations (editable at any time)
+- Tool-calling agent with search_atoms and get_atom tools
+- Conversations list view in right drawer
+- Chat interface with markdown rendering and citations
+- Chat entry points: header button and tag hover icon
+- Streaming responses via Tauri events
+
 Phase 5 (Canvas View) is complete with:
 - Interactive, zoomable canvas view as the default view option
 - Atoms spatially arranged using D3-force simulation based on semantic similarity (temporarily disabled due to performance issues)
@@ -83,6 +92,8 @@ Phase 1 (Foundation + Data Layer) features:
     extraction.rs     # OpenRouter API integration, tag extraction logic
     wiki.rs           # Wiki article generation and update logic
     settings.rs       # Settings CRUD operations
+    chat.rs           # Conversation CRUD and scope management
+    agent.rs          # Agentic chat loop with tool calling
   /resources
     all-MiniLM-L6-v2.q8_0.gguf  # Bundled embedding model (~24MB, Q8_0 quantization)
     lembed0.so                   # sqlite-lembed extension (Linux x86_64)
@@ -98,11 +109,12 @@ Phase 1 (Foundation + Data Layer) features:
     /canvas           # CanvasView, CanvasContent, AtomNode, ConnectionLines, CanvasControls, useForceSimulation
     /tags             # TagTree, TagNode, TagChip, TagSelector
     /wiki             # WikiViewer, WikiArticleContent, WikiHeader, WikiEmptyState, WikiGenerating, CitationLink, CitationPopover
+    /chat             # ChatViewer, ConversationsList, ConversationCard, ChatView, ChatHeader, ChatMessage, ChatInput, ScopeEditor
     /search           # SemanticSearch
     /settings         # SettingsModal, SettingsButton
     /ui               # Button, Input, Modal, FAB, ContextMenu
-  /stores             # Zustand stores (atoms.ts, tags.ts, ui.ts, settings.ts, wiki.ts)
-  /hooks              # Custom hooks (useClickOutside, useKeyboard, useEmbeddingEvents)
+  /stores             # Zustand stores (atoms.ts, tags.ts, ui.ts, settings.ts, wiki.ts, chat.ts)
+  /hooks              # Custom hooks (useClickOutside, useKeyboard, useEmbeddingEvents, useChatEvents)
   /lib                # Utilities (tauri.ts, markdown.ts, date.ts, similarity.ts)
   App.tsx
   main.tsx
@@ -237,6 +249,55 @@ CREATE TABLE atom_positions (
   updated_at TEXT NOT NULL
 );
 
+-- Chat conversations
+CREATE TABLE conversations (
+  id TEXT PRIMARY KEY,
+  title TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  is_archived INTEGER DEFAULT 0
+);
+
+-- Many-to-many: conversation tag scope
+CREATE TABLE conversation_tags (
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  PRIMARY KEY (conversation_id, tag_id)
+);
+
+-- Chat messages
+CREATE TABLE chat_messages (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,  -- 'user', 'assistant', 'system', 'tool'
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  message_index INTEGER NOT NULL
+);
+
+-- Tool calls for transparency
+CREATE TABLE chat_tool_calls (
+  id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+  tool_name TEXT NOT NULL,
+  tool_input TEXT NOT NULL,
+  tool_output TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  completed_at TEXT
+);
+
+-- Chat citations
+CREATE TABLE chat_citations (
+  id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+  citation_index INTEGER NOT NULL,
+  atom_id TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+  chunk_index INTEGER,
+  excerpt TEXT NOT NULL,
+  relevance_score REAL
+);
+
 -- Temporary table for sqlite-lembed model registration (per-connection)
 -- temp.lembed_models(name TEXT, model BLOB)
 ```
@@ -245,6 +306,7 @@ CREATE TABLE atom_positions (
 - `openrouter_api_key`: User's OpenRouter API key for LLM access
 - `auto_tagging_enabled`: "true" or "false" (default: "true")
 - `tagging_model`: OpenRouter model ID for tag extraction (default: "openai/gpt-4o-mini")
+- `chat_model`: OpenRouter model ID for chat (default: "anthropic/claude-sonnet-4")
 
 ## Tauri Commands (API)
 
@@ -286,6 +348,17 @@ CREATE TABLE atom_positions (
 - `save_atom_positions(positions)` → `()` (bulk save/update positions after simulation)
 - `get_atoms_with_embeddings()` → `Vec<AtomWithEmbedding>` (atoms with average embedding vectors)
 
+### Chat Operations
+- `create_conversation(tag_ids, title?)` → `ConversationWithTags` (creates new conversation with optional tag scope)
+- `get_conversations(filter_tag_id?, limit, offset)` → `Vec<ConversationWithTags>` (list conversations)
+- `get_conversation(id)` → `Option<ConversationWithMessages>` (single conversation with full message history)
+- `update_conversation(id, title?, is_archived?)` → `Conversation` (update metadata)
+- `delete_conversation(id)` → `()` (delete conversation and all messages)
+- `set_conversation_scope(conversation_id, tag_ids)` → `ConversationWithTags` (replace all scope tags)
+- `add_tag_to_scope(conversation_id, tag_id)` → `ConversationWithTags` (add single tag to scope)
+- `remove_tag_from_scope(conversation_id, tag_id)` → `ConversationWithTags` (remove single tag from scope)
+- `send_chat_message(conversation_id, content)` → `ChatMessageWithContext` (send message, triggers agent loop)
+
 ### Utility
 - `check_sqlite_vec()` → `String` (version check)
 
@@ -303,6 +376,34 @@ Payload:
   tags_extracted: string[];      // IDs of all tags applied
   new_tags_created: string[];    // IDs of newly created tags
 }
+```
+
+### Chat Events
+Events emitted during chat agent loop:
+
+**chat-stream-delta**: Streaming content from assistant
+```typescript
+{ conversation_id: string; content: string; }
+```
+
+**chat-tool-start**: Tool execution started
+```typescript
+{ conversation_id: string; tool_call_id: string; tool_name: string; tool_input: unknown; }
+```
+
+**chat-tool-complete**: Tool execution completed
+```typescript
+{ conversation_id: string; tool_call_id: string; results_count: number; }
+```
+
+**chat-complete**: Full message completed
+```typescript
+{ conversation_id: string; message: ChatMessageWithContext; }
+```
+
+**chat-error**: Error during chat
+```typescript
+{ conversation_id: string; error: string; }
 ```
 
 ## Wiki Synthesis
@@ -499,10 +600,11 @@ Content is chunked for optimal embedding generation:
 
 ### ui.ts
 - `selectedTagId: string | null` - Currently selected tag filter
-- `drawerState: { isOpen, mode, atomId, tagId, tagName }` - Drawer state
+- `drawerState: { isOpen, mode, atomId, tagId, tagName, conversationId }` - Drawer state
 - `viewMode: 'canvas' | 'grid' | 'list'` - Atom display mode (default: 'canvas', persisted to localStorage)
 - `searchQuery: string` - Text search filter
-- Actions: `setSelectedTag`, `openDrawer`, `openWikiDrawer`, `closeDrawer`, `setViewMode`, `setSearchQuery`
+- Drawer modes: `'editor' | 'viewer' | 'wiki' | 'chat'`
+- Actions: `setSelectedTag`, `openDrawer`, `openWikiDrawer`, `openChatDrawer`, `closeDrawer`, `setViewMode`, `setSearchQuery`
 
 ### settings.ts
 - `settings: Record<string, string>` - All settings as key-value pairs
@@ -518,6 +620,19 @@ Content is chunked for optimal embedding generation:
 - `isUpdating: boolean` - Update in progress
 - `error: string | null` - Error message
 - Actions: `fetchArticle`, `fetchArticleStatus`, `generateArticle`, `updateArticle`, `deleteArticle`, `clearArticle`, `clearError`
+
+### chat.ts
+- `view: 'list' | 'conversation'` - Current chat view
+- `currentConversation: ConversationWithTags | null` - Active conversation
+- `messages: ChatMessageWithContext[]` - Messages in current conversation
+- `conversations: ConversationWithTags[]` - List of all conversations
+- `listFilterTagId: string | null` - Filter for conversations list
+- `isLoading: boolean` - Loading state
+- `isStreaming: boolean` - Streaming response in progress
+- `streamingContent: string` - Content being streamed
+- `retrievalSteps: RetrievalStep[]` - Tool calls for transparency
+- `error: string | null` - Error message
+- Actions: `showList`, `openConversation`, `goBack`, `fetchConversations`, `createConversation`, `deleteConversation`, `updateConversationTitle`, `setScope`, `addTagToScope`, `removeTagFromScope`, `sendMessage`, `cancelResponse`, `appendStreamContent`, `addRetrievalStep`, `completeMessage`, `setStreamingError`, `clearError`, `reset`
 
 ### Similarity Calculation
 - sqlite-vec returns Euclidean distance (lower = more similar)

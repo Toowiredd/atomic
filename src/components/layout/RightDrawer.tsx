@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { AtomEditor } from '../atoms/AtomEditor';
 import { AtomViewer } from '../atoms/AtomViewer';
 import { WikiViewer } from '../wiki/WikiViewer';
+import { ChatViewer } from '../chat/ChatViewer';
 import { useUIStore } from '../../stores/ui';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useKeyboard } from '../../hooks/useKeyboard';
@@ -12,7 +13,7 @@ export function RightDrawer() {
   const { drawerState, closeDrawer, openDrawer } = useUIStore();
   const drawerRef = useRef<HTMLDivElement>(null);
 
-  const { isOpen, mode, atomId, tagId, tagName } = drawerState;
+  const { isOpen, mode, atomId, tagId, tagName, conversationId } = drawerState;
 
   const [atom, setAtom] = useState<AtomWithTags | null>(null);
   const [isLoadingAtom, setIsLoadingAtom] = useState(false);
@@ -89,6 +90,8 @@ export function RightDrawer() {
           );
         }
         return <WikiViewer tagId={tagId} tagName={tagName} />;
+      case 'chat':
+        return <ChatViewer initialTagId={tagId} initialConversationId={conversationId} />;
       default:
         return null;
     }

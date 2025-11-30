@@ -12,7 +12,7 @@ interface TagNodeProps {
 
 export function TagNode({ tag, level, selectedTagId, onSelect, onContextMenu }: TagNodeProps) {
   const [isExpanded, setIsExpanded] = useState(true);
-  const { openWikiDrawer } = useUIStore();
+  const { openWikiDrawer, openChatDrawer } = useUIStore();
   const hasChildren = tag.children && tag.children.length > 0;
   const isSelected = selectedTagId === tag.id;
 
@@ -29,6 +29,11 @@ export function TagNode({ tag, level, selectedTagId, onSelect, onContextMenu }: 
   const handleWikiClick = (e: MouseEvent) => {
     e.stopPropagation();
     openWikiDrawer(tag.id, tag.name);
+  };
+
+  const handleChatClick = (e: MouseEvent) => {
+    e.stopPropagation();
+    openChatDrawer(tag.id);
   };
 
   return (
@@ -61,6 +66,16 @@ export function TagNode({ tag, level, selectedTagId, onSelect, onContextMenu }: 
           <span className="w-4" />
         )}
         <span className="flex-1 truncate text-sm">{tag.name}</span>
+        {/* Chat icon - visible on hover */}
+        <button
+          onClick={handleChatClick}
+          className="w-5 h-5 flex items-center justify-center opacity-0 group-hover:opacity-100 text-[#888888] hover:text-[#a78bfa] transition-all"
+          title="Chat with this tag"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+          </svg>
+        </button>
         {/* Article icon - visible on hover */}
         <button
           onClick={handleWikiClick}

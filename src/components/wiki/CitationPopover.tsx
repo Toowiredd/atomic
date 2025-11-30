@@ -1,9 +1,15 @@
 import { useEffect, useRef } from 'react';
-import { WikiCitation } from '../../stores/wiki';
 import { useKeyboard } from '../../hooks/useKeyboard';
 
+// Generic citation interface that works with both WikiCitation and ChatCitation
+export interface CitationForPopover {
+  citation_index: number;
+  atom_id: string;
+  excerpt: string;
+}
+
 interface CitationPopoverProps {
-  citation: WikiCitation;
+  citation: CitationForPopover;
   anchorEl: HTMLElement | null;
   onClose: () => void;
   onViewAtom: (atomId: string) => void;

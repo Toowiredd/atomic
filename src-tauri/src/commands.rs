@@ -5,7 +5,7 @@ use crate::settings;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 // Helper function to get tags for an atom
@@ -42,7 +42,7 @@ pub fn get_all_atoms(db: State<Database>) -> Result<Vec<AtomWithTags>, String> {
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending') FROM atoms ORDER BY updated_at DESC",
+            "SELECT id, content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending'), COALESCE(tagging_status, 'pending') FROM atoms ORDER BY updated_at DESC",
         )
         .map_err(|e| e.to_string())?;
 
@@ -55,6 +55,7 @@ pub fn get_all_atoms(db: State<Database>) -> Result<Vec<AtomWithTags>, String> {
                 created_at: row.get(3)?,
                 updated_at: row.get(4)?,
                 embedding_status: row.get(5)?,
+                tagging_status: row.get(6)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -75,7 +76,7 @@ pub fn get_atom_by_id(db: State<Database>, id: String) -> Result<Option<AtomWith
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let atom_result = conn.query_row(
-        "SELECT id, content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending') FROM atoms WHERE id = ?1",
+        "SELECT id, content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending'), COALESCE(tagging_status, 'pending') FROM atoms WHERE id = ?1",
         [&id],
         |row| {
             Ok(Atom {
@@ -85,6 +86,7 @@ pub fn get_atom_by_id(db: State<Database>, id: String) -> Result<Option<AtomWith
                 created_at: row.get(3)?,
                 updated_at: row.get(4)?,
                 embedding_status: row.get(5)?,
+                tagging_status: row.get(6)?,
             })
         },
     );
@@ -132,6 +134,7 @@ pub fn create_atom_impl(
         created_at: now.clone(),
         updated_at: now,
         embedding_status: embedding_status.to_string(),
+        tagging_status: "pending".to_string(),
     };
 
     let tags = get_tags_for_atom(conn, &id)?;
@@ -208,7 +211,7 @@ pub fn update_atom(
     // Get the updated atom
     let atom: Atom = conn
         .query_row(
-            "SELECT id, content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending') FROM atoms WHERE id = ?1",
+            "SELECT id, content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending'), COALESCE(tagging_status, 'pending') FROM atoms WHERE id = ?1",
             [&id],
             |row| {
                 Ok(Atom {
@@ -218,6 +221,7 @@ pub fn update_atom(
                     created_at: row.get(3)?,
                     updated_at: row.get(4)?,
                     embedding_status: row.get(5)?,
+                    tagging_status: row.get(6)?,
                 })
             },
         )
@@ -417,7 +421,7 @@ pub fn get_atoms_by_tag(db: State<Database>, tag_id: String) -> Result<Vec<AtomW
     // Query atoms with any of these tags (deduplicated)
     let placeholders = all_tag_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let query = format!(
-        "SELECT DISTINCT a.id, a.content, a.source_url, a.created_at, a.updated_at, COALESCE(a.embedding_status, 'pending')
+        "SELECT DISTINCT a.id, a.content, a.source_url, a.created_at, a.updated_at, COALESCE(a.embedding_status, 'pending'), COALESCE(a.tagging_status, 'pending')
          FROM atoms a
          INNER JOIN atom_tags at ON a.id = at.atom_id
          WHERE at.tag_id IN ({})
@@ -436,6 +440,7 @@ pub fn get_atoms_by_tag(db: State<Database>, tag_id: String) -> Result<Vec<AtomW
                 created_at: row.get(3)?,
                 updated_at: row.get(4)?,
                 embedding_status: row.get(5)?,
+                tagging_status: row.get(6)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -571,7 +576,7 @@ pub fn find_similar_atoms(
     for (result_atom_id, similarity, chunk_content, chunk_index) in results {
         let atom: Atom = conn
             .query_row(
-                "SELECT id, SUBSTR(content, 1, 150) as content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending') FROM atoms WHERE id = ?1",
+                "SELECT id, SUBSTR(content, 1, 150) as content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending'), COALESCE(tagging_status, 'pending') FROM atoms WHERE id = ?1",
                 [&result_atom_id],
                 |row| {
                     Ok(Atom {
@@ -581,6 +586,7 @@ pub fn find_similar_atoms(
                         created_at: row.get(3)?,
                         updated_at: row.get(4)?,
                         embedding_status: row.get(5)?,
+                        tagging_status: row.get(6)?,
                     })
                 },
             )
@@ -702,7 +708,7 @@ pub async fn search_atoms_semantic(
     for (result_atom_id, similarity, chunk_content, chunk_index) in results {
         let atom: Atom = conn
             .query_row(
-                "SELECT id, content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending') FROM atoms WHERE id = ?1",
+                "SELECT id, content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending'), COALESCE(tagging_status, 'pending') FROM atoms WHERE id = ?1",
                 [&result_atom_id],
                 |row| {
                     Ok(Atom {
@@ -712,6 +718,7 @@ pub async fn search_atoms_semantic(
                         created_at: row.get(3)?,
                         updated_at: row.get(4)?,
                         embedding_status: row.get(5)?,
+                        tagging_status: row.get(6)?,
                     })
                 },
             )
@@ -853,7 +860,7 @@ pub async fn search_atoms_semantic_impl(
     for (result_atom_id, similarity, chunk_content, chunk_index) in results {
         let atom: Atom = conn
             .query_row(
-                "SELECT id, content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending') FROM atoms WHERE id = ?1",
+                "SELECT id, content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending'), COALESCE(tagging_status, 'pending') FROM atoms WHERE id = ?1",
                 [&result_atom_id],
                 |row| {
                     Ok(Atom {
@@ -863,6 +870,7 @@ pub async fn search_atoms_semantic_impl(
                         created_at: row.get(3)?,
                         updated_at: row.get(4)?,
                         embedding_status: row.get(5)?,
+                        tagging_status: row.get(6)?,
                     })
                 },
             )
@@ -917,6 +925,39 @@ pub fn retry_embedding(
     Ok(())
 }
 
+/// Reset atoms stuck in 'processing' state back to 'pending'
+/// Call this on app startup to recover from interrupted sessions
+#[tauri::command]
+pub fn reset_stuck_processing(db: State<Database>) -> Result<i32, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    // Reset embedding_status from 'processing' to 'pending'
+    let embedding_reset = conn
+        .execute(
+            "UPDATE atoms SET embedding_status = 'pending' WHERE embedding_status = 'processing'",
+            [],
+        )
+        .map_err(|e| format!("Failed to reset stuck embeddings: {}", e))?;
+
+    // Reset tagging_status from 'processing' to 'pending'
+    let tagging_reset = conn
+        .execute(
+            "UPDATE atoms SET tagging_status = 'pending' WHERE tagging_status = 'processing'",
+            [],
+        )
+        .map_err(|e| format!("Failed to reset stuck tagging: {}", e))?;
+
+    let total = (embedding_reset + tagging_reset) as i32;
+    if total > 0 {
+        eprintln!(
+            "Reset {} stuck atoms (embedding: {}, tagging: {})",
+            total, embedding_reset, tagging_reset
+        );
+    }
+
+    Ok(total)
+}
+
 /// Trigger embedding generation for all atoms with 'pending' status
 /// Uses async batch processing with semaphore to prevent thread exhaustion
 #[tauri::command]
@@ -925,11 +966,15 @@ pub async fn process_pending_embeddings(
     db: State<'_, Database>,
     shared_db: State<'_, SharedDatabase>,
 ) -> Result<i32, String> {
-    // Fetch pending atoms and immediately mark them as 'processing' to prevent
-    // race conditions from duplicate calls (e.g., React StrictMode double-invocation)
+    // Atomically fetch and mark pending atoms as 'processing' in a single statement
+    // This prevents race conditions from duplicate calls (e.g., React StrictMode)
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT id, content FROM atoms WHERE embedding_status = 'pending'")
+        .prepare(
+            "UPDATE atoms SET embedding_status = 'processing'
+             WHERE embedding_status = 'pending'
+             RETURNING id, content"
+        )
         .map_err(|e| format!("Failed to prepare query: {}", e))?;
     let pending_atoms: Vec<(String, String)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -937,25 +982,16 @@ pub async fn process_pending_embeddings(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("Failed to collect pending atoms: {}", e))?;
     drop(stmt);
-
-    // Mark all selected atoms as 'processing' immediately to prevent duplicate processing
-    // This is done synchronously before spawning the async task
-    for (atom_id, _) in &pending_atoms {
-        conn.execute(
-            "UPDATE atoms SET embedding_status = 'processing' WHERE id = ?1",
-            [atom_id],
-        )
-        .ok(); // Ignore individual update failures
-    }
     drop(conn);
 
     let count = pending_atoms.len() as i32;
 
-    // Process batch asynchronously
+    // Process batch asynchronously (with tagging)
     tokio::spawn(crate::embedding::process_embedding_batch(
         app_handle,
         Arc::clone(&shared_db),
         pending_atoms,
+        false, // don't skip tagging - normal flow
     ));
 
     Ok(count)
@@ -977,6 +1013,45 @@ pub fn get_embedding_status(db: State<Database>, atom_id: String) -> Result<Stri
     Ok(status)
 }
 
+/// Trigger tag extraction for all atoms with completed embeddings but pending tagging
+/// Uses async batch processing with semaphore to prevent thread exhaustion
+#[tauri::command]
+pub async fn process_pending_tagging(
+    app_handle: tauri::AppHandle,
+    db: State<'_, Database>,
+    shared_db: State<'_, SharedDatabase>,
+) -> Result<i32, String> {
+    // Atomically fetch and mark pending tagging atoms as 'processing' in a single statement
+    // This prevents race conditions from duplicate calls (e.g., React StrictMode)
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "UPDATE atoms SET tagging_status = 'processing'
+             WHERE embedding_status = 'complete'
+             AND tagging_status = 'pending'
+             RETURNING id",
+        )
+        .map_err(|e| format!("Failed to prepare query: {}", e))?;
+    let pending_atoms: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .map_err(|e| format!("Failed to query pending tagging atoms: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect pending tagging atoms: {}", e))?;
+    drop(stmt);
+    drop(conn);
+
+    let count = pending_atoms.len() as i32;
+
+    // Process batch asynchronously
+    tokio::spawn(crate::embedding::process_tagging_batch(
+        app_handle,
+        Arc::clone(&shared_db),
+        pending_atoms,
+    ));
+
+    Ok(count)
+}
+
 // Settings commands
 
 #[tauri::command]
@@ -986,12 +1061,20 @@ pub fn get_settings(db: State<Database>) -> Result<HashMap<String, String>, Stri
 }
 
 #[tauri::command]
-pub fn set_setting(db: State<Database>, key: String, value: String) -> Result<(), String> {
+pub async fn set_setting(
+    app_handle: AppHandle,
+    db: State<'_, Database>,
+    shared_db: State<'_, SharedDatabase>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     // Check if this setting change affects embedding dimensions
     // This includes: provider, embedding_model, ollama_embedding_model
     let dimension_affecting_keys = ["provider", "embedding_model", "ollama_embedding_model"];
+
+    let mut dimension_changed = false;
 
     if dimension_affecting_keys.contains(&key.as_str()) {
         let (will_change, new_dim) = crate::db::will_dimension_change(&conn, &key, &value);
@@ -1003,10 +1086,67 @@ pub fn set_setting(db: State<Database>, key: String, value: String) -> Result<()
                 current_dim, new_dim, key
             );
             crate::db::recreate_vec_chunks_with_dimension(&conn, new_dim)?;
+            dimension_changed = true;
         }
     }
 
-    settings::set_setting(&conn, &key, &value)
+    settings::set_setting(&conn, &key, &value)?;
+
+    // If dimension changed, emit event and trigger re-embedding
+    if dimension_changed {
+        // Count how many atoms need re-embedding
+        let pending_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM atoms WHERE embedding_status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        eprintln!(
+            "Dimension changed - {} atoms marked as pending, emitting event and triggering re-embedding",
+            pending_count
+        );
+
+        // Emit event to notify frontend that atoms need to be re-fetched
+        let _ = app_handle.emit(
+            "embeddings-reset",
+            serde_json::json!({
+                "pending_count": pending_count,
+                "reason": format!("{} changed", key)
+            }),
+        );
+
+        // Get pending atoms and trigger re-embedding
+        if pending_count > 0 {
+            let mut stmt = conn
+                .prepare(
+                    "UPDATE atoms SET embedding_status = 'processing'
+                     WHERE embedding_status IN ('pending', 'processing')
+                     RETURNING id, content",
+                )
+                .map_err(|e| e.to_string())?;
+
+            let pending_atoms: Vec<(String, String)> = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+
+            drop(stmt);
+            drop(conn);
+
+            // Spawn embedding batch processing (skip tagging - tags are preserved)
+            tokio::spawn(crate::embedding::process_embedding_batch(
+                app_handle,
+                Arc::clone(&shared_db),
+                pending_atoms,
+                true, // skip tagging - re-embedding only, tags preserved
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -1286,10 +1426,10 @@ pub fn get_atoms_with_embeddings(db: State<Database>) -> Result<Vec<AtomWithEmbe
     // First get all atoms with tags
     let mut stmt = conn
         .prepare(
-            "SELECT id, content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending') FROM atoms ORDER BY updated_at DESC",
+            "SELECT id, content, source_url, created_at, updated_at, COALESCE(embedding_status, 'pending'), COALESCE(tagging_status, 'pending') FROM atoms ORDER BY updated_at DESC",
         )
         .map_err(|e| e.to_string())?;
-    
+
     let atoms: Vec<Atom> = stmt
         .query_map([], |row| {
             Ok(Atom {
@@ -1299,6 +1439,7 @@ pub fn get_atoms_with_embeddings(db: State<Database>) -> Result<Vec<AtomWithEmbe
                 created_at: row.get(3)?,
                 updated_at: row.get(4)?,
                 embedding_status: row.get(5)?,
+                tagging_status: row.get(6)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -1546,7 +1687,7 @@ pub fn get_atom_neighborhood(
         let atom: Atom = conn
             .query_row(
                 "SELECT id, content, source_url, created_at, updated_at,
-                        COALESCE(embedding_status, 'pending')
+                        COALESCE(embedding_status, 'pending'), COALESCE(tagging_status, 'pending')
                  FROM atoms WHERE id = ?1",
                 [aid],
                 |row| {
@@ -1557,6 +1698,7 @@ pub fn get_atom_neighborhood(
                         created_at: row.get(3)?,
                         updated_at: row.get(4)?,
                         embedding_status: row.get(5)?,
+                        tagging_status: row.get(6)?,
                     })
                 },
             )
@@ -1841,5 +1983,32 @@ pub async fn get_ollama_embedding_models_cmd(
 #[tauri::command]
 pub async fn get_ollama_llm_models_cmd(host: String) -> Result<Vec<AvailableModel>, String> {
     get_ollama_llm_models(&host).await
+}
+
+/// Verify that a provider is properly configured
+/// Returns true if the selected provider has all required settings
+/// - OpenRouter: requires non-empty API key
+/// - Ollama: requires host (has default, so just checks provider type for now)
+#[tauri::command]
+pub fn verify_provider_configured(db: State<Database>) -> Result<bool, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let settings = settings::get_all_settings(&conn)?;
+    let config = ProviderConfig::from_settings(&settings);
+
+    match config.provider_type {
+        ProviderType::OpenRouter => {
+            // Check if API key exists and is non-empty
+            Ok(config.openrouter_api_key.is_some()
+                && !config
+                    .openrouter_api_key
+                    .as_ref()
+                    .map(|k| k.is_empty())
+                    .unwrap_or(true))
+        }
+        ProviderType::Ollama => {
+            // Check if host is configured (has default "http://localhost:11434")
+            Ok(!config.ollama_host.is_empty())
+        }
+    }
 }
 

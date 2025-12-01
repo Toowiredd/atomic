@@ -8,6 +8,7 @@ pub struct Atom {
     pub created_at: String,
     pub updated_at: String,
     pub embedding_status: String, // 'pending', 'processing', 'complete', 'failed'
+    pub tagging_status: String,   // 'pending', 'processing', 'complete', 'failed', 'skipped'
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,14 +54,22 @@ pub struct SemanticSearchResult {
     pub matching_chunk_index: i32,
 }
 
-/// Payload for embedding-complete event
+/// Payload for embedding-complete event (embedding only, no tags)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingCompletePayload {
     pub atom_id: String,
     pub status: String, // "complete" or "failed"
     pub error: Option<String>,
-    pub tags_extracted: Vec<String>,      // IDs of all tags applied
-    pub new_tags_created: Vec<String>,    // IDs of newly created tags
+}
+
+/// Payload for tagging-complete event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaggingCompletePayload {
+    pub atom_id: String,
+    pub status: String, // "complete", "failed", or "skipped"
+    pub error: Option<String>,
+    pub tags_extracted: Vec<String>,   // IDs of all tags applied
+    pub new_tags_created: Vec<String>, // IDs of newly created tags
 }
 
 /// Chunk data for internal use

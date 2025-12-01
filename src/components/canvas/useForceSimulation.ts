@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import * as d3 from 'd3-force';
 import { AtomWithTags } from '../../stores/atoms';
-// import { cosineSimilarity } from '../../lib/similarity'; // Disabled with similarity force
 import { Connection } from './ConnectionLines';
 
 export interface SimulationNode extends d3.SimulationNodeDatum {
@@ -166,52 +165,6 @@ export function useForceSimulation({
 
   return { nodes, isSimulating };
 }
-
-// PERFORMANCE: Similarity force disabled for large datasets (500+ atoms)
-// This force was causing O(n²) complexity with expensive cosine similarity calculations
-// Keeping code commented for future optimization or re-enablement
-/*
-function createSimilarityForce(
-  embeddings: Map<string, number[]>,
-  threshold: number = 0.7
-) {
-  let nodes: SimulationNode[] = [];
-
-  function force(alpha: number) {
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const embA = embeddings.get(nodes[i].id);
-        const embB = embeddings.get(nodes[j].id);
-        if (!embA || !embB) continue;
-
-        const similarity = cosineSimilarity(embA, embB);
-        if (similarity > threshold) {
-          // Attractive force proportional to similarity above threshold
-          const strength = (similarity - threshold) * alpha * 0.5;
-          const dx = (nodes[j].x ?? 0) - (nodes[i].x ?? 0);
-          const dy = (nodes[j].y ?? 0) - (nodes[i].y ?? 0);
-          const distance = Math.sqrt(dx * dx + dy * dy) || 1;
-
-          // Move nodes toward each other
-          const moveX = (dx / distance) * strength * 50;
-          const moveY = (dy / distance) * strength * 50;
-
-          if (nodes[i].x !== undefined) nodes[i].x += moveX;
-          if (nodes[i].y !== undefined) nodes[i].y += moveY;
-          if (nodes[j].x !== undefined) nodes[j].x -= moveX;
-          if (nodes[j].y !== undefined) nodes[j].y -= moveY;
-        }
-      }
-    }
-  }
-
-  force.initialize = (n: SimulationNode[]) => {
-    nodes = n;
-  };
-
-  return force;
-}
-*/
 
 // Helper to build connections from atoms
 export function buildConnections(atoms: AtomWithTags[]): Connection[] {

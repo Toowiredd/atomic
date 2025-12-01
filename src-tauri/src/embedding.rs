@@ -5,7 +5,7 @@ use crate::extraction::{
     extract_tags_from_chunk, get_or_create_tag, get_tag_tree_for_llm, link_tags_to_atom,
     tag_names_to_ids,
 };
-use crate::models::EmbeddingCompletePayload;
+use crate::models::{EmbeddingCompletePayload, TaggingCompletePayload};
 use crate::providers::models::{fetch_and_return_capabilities, get_cached_capabilities_sync, save_capabilities_cache};
 use crate::providers::traits::EmbeddingConfig;
 use crate::providers::{create_embedding_provider, ProviderConfig, ProviderType};
@@ -19,9 +19,14 @@ use uuid::Uuid;
 
 // Limit concurrent embedding tasks to prevent thread exhaustion
 const MAX_CONCURRENT_EMBEDDINGS: usize = 1;
+const MAX_CONCURRENT_TAGGING: usize = 1;
 
 static EMBEDDING_SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| {
     Semaphore::new(MAX_CONCURRENT_EMBEDDINGS)
+});
+
+static TAGGING_SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| {
+    Semaphore::new(MAX_CONCURRENT_TAGGING)
 });
 
 /// Generate embeddings via provider abstraction (batch support)
@@ -66,154 +71,45 @@ pub fn f32_vec_to_blob_public(vec: &[f32]) -> Vec<u8> {
         .collect()
 }
 
-/// Process embeddings for a SINGLE atom (used by create_atom/update_atom)
-/// This maintains the old behavior: spawns dedicated thread + runtime
-/// Fine for 1-2 atoms, but use process_embedding_batch for bulk operations
+/// Process ONLY embedding generation for an atom (no tag extraction)
+/// This is the fast phase - just embedding API calls
 ///
-/// This spawns a background task that:
-/// 1. Sets embedding_status to 'processing'
-/// 2. Chunks the content
-/// 3. Generates real embeddings for each chunk using sqlite-lembed
-/// 4. Extracts tags using OpenRouter LLM (if enabled)
-/// 5. Stores chunks and embeddings in database
-/// 6. Links extracted tags to the atom
-/// 7. Sets embedding_status to 'complete' or 'failed'
-/// 8. Emits 'embedding-complete' event with tag info
-pub fn spawn_embedding_task_single(
-    app_handle: AppHandle,
-    db: Arc<Database>,
-    atom_id: String,
-    content: String,
-) {
-    std::thread::spawn(move || {
-        // Create a tokio runtime for async operations
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-        
-        let result = rt.block_on(process_embeddings(&db, &atom_id, &content));
-
-        let payload = match result {
-            Ok((tags_extracted, new_tags_created)) => EmbeddingCompletePayload {
-                atom_id: atom_id.clone(),
-                status: "complete".to_string(),
-                error: None,
-                tags_extracted,
-                new_tags_created,
-            },
-            Err(e) => {
-                // Update status to failed
-                if let Ok(conn) = db.conn.lock() {
-                    let _ = conn.execute(
-                        "UPDATE atoms SET embedding_status = 'failed' WHERE id = ?1",
-                        [&atom_id],
-                    );
-                }
-                EmbeddingCompletePayload {
-                    atom_id: atom_id.clone(),
-                    status: "failed".to_string(),
-                    error: Some(e),
-                    tags_extracted: Vec::new(),
-                    new_tags_created: Vec::new(),
-                }
-            }
-        };
-
-        // Emit event to frontend
-        let _ = app_handle.emit("embedding-complete", payload);
-    });
-}
-
-/// Process embeddings for multiple atoms concurrently with semaphore-based limiting
-/// Used by process_pending_embeddings for bulk operations
-pub async fn process_embedding_batch(
-    app_handle: AppHandle,
-    db: Arc<Database>,
-    atoms: Vec<(String, String)>,
-) {
-    let mut tasks = Vec::with_capacity(atoms.len());
-
-    for (atom_id, content) in atoms {
-        let app_handle = app_handle.clone();
-        let db = Arc::clone(&db);
-
-        let task = tokio::spawn(async move {
-            // Acquire semaphore permit - blocks if 15 tasks already running
-            let _permit = EMBEDDING_SEMAPHORE.acquire().await
-                .expect("Semaphore closed unexpectedly");
-
-            // Process with permit held (auto-released on drop)
-            let result = process_embeddings(&db, &atom_id, &content).await;
-
-            // Build payload and emit event (same as current behavior)
-            let payload = match result {
-                Ok((tags_extracted, new_tags_created)) => EmbeddingCompletePayload {
-                    atom_id: atom_id.clone(),
-                    status: "complete".to_string(),
-                    error: None,
-                    tags_extracted,
-                    new_tags_created,
-                },
-                Err(e) => {
-                    // Update status to failed
-                    if let Ok(conn) = db.conn.lock() {
-                        let _ = conn.execute(
-                            "UPDATE atoms SET embedding_status = 'failed' WHERE id = ?1",
-                            [&atom_id],
-                        );
-                    }
-                    EmbeddingCompletePayload {
-                        atom_id: atom_id.clone(),
-                        status: "failed".to_string(),
-                        error: Some(e),
-                        tags_extracted: Vec::new(),
-                        new_tags_created: Vec::new(),
-                    }
-                }
-            };
-
-            let _ = app_handle.emit("embedding-complete", payload);
-        });
-
-        tasks.push(task);
-    }
-
-    // Wait for all tasks to complete
-    for task in tasks {
-        let _ = task.await;
-    }
-}
-
-async fn process_embeddings(
+/// Steps:
+/// 1. Set embedding_status to 'processing'
+/// 2. Delete existing chunks
+/// 3. Chunk content
+/// 4. Generate embeddings via provider
+/// 5. Store chunks and embeddings
+/// 6. Compute semantic edges
+/// 7. Set embedding_status to 'complete'
+pub async fn process_embedding_only(
     db: &Database,
     atom_id: &str,
     content: &str,
-) -> Result<(Vec<String>, Vec<String>), String> {
-    // Scope to ensure connection is dropped before any async operations
-    let (auto_tagging_enabled, provider_config, chunks) = {
+) -> Result<(), String> {
+    // Scope for initial DB operations
+    let (provider_config, chunks) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
-        // Set status to processing
+        // Set embedding status to processing
         conn.execute(
             "UPDATE atoms SET embedding_status = 'processing' WHERE id = ?1",
             [atom_id],
         )
         .map_err(|e| e.to_string())?;
 
-        // Get settings for auto-tagging and embeddings
+        // Get settings for embeddings
         let settings_map = settings::get_all_settings(&conn)?;
-        let auto_tagging_enabled = settings_map
-            .get("auto_tagging_enabled")
-            .map(|v| v == "true")
-            .unwrap_or(true); // Default to true
-
-        // Build provider config from settings
         let provider_config = ProviderConfig::from_settings(&settings_map);
 
         // Validate provider configuration
-        if provider_config.provider_type == ProviderType::OpenRouter && provider_config.openrouter_api_key.is_none() {
+        if provider_config.provider_type == ProviderType::OpenRouter
+            && provider_config.openrouter_api_key.is_none()
+        {
             return Err("OpenRouter API key not configured. Please set it in Settings.".to_string());
         }
 
-        // First, get existing chunk IDs for this atom to delete from vec_chunks
+        // Delete existing chunks for this atom
         let existing_chunk_ids: Vec<String> = {
             let mut stmt = conn
                 .prepare("SELECT id FROM atom_chunks WHERE atom_id = ?1")
@@ -226,44 +122,183 @@ async fn process_embeddings(
             ids
         };
 
-        // Delete existing vec_chunks entries for this atom's chunks
         for chunk_id in &existing_chunk_ids {
             conn.execute("DELETE FROM vec_chunks WHERE chunk_id = ?1", [chunk_id])
-                .ok(); // Ignore errors if chunk doesn't exist in vec_chunks
+                .ok();
         }
-
-        // Delete existing chunks for this atom
         conn.execute("DELETE FROM atom_chunks WHERE atom_id = ?1", [atom_id])
             .map_err(|e| e.to_string())?;
 
-        // Chunk the content
+        // Chunk content
         let chunks = chunk_content(content);
 
         if chunks.is_empty() {
-            // No chunks to process, mark as complete
+            // No chunks to process, mark embedding as complete, tagging as skipped
             conn.execute(
-                "UPDATE atoms SET embedding_status = 'complete' WHERE id = ?1",
+                "UPDATE atoms SET embedding_status = 'complete', tagging_status = 'skipped' WHERE id = ?1",
+                [atom_id],
+            )
+            .map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+
+        (provider_config, chunks)
+    }; // Connection dropped here
+
+    // Generate all embeddings in one batch (async, no lock)
+    let chunk_texts: Vec<String> = chunks.iter().map(|s| s.to_string()).collect();
+    let embeddings = generate_embeddings_with_config(&provider_config, &chunk_texts)
+        .await
+        .map_err(|e| format!("Failed to generate embeddings: {}", e))?;
+
+    // Store chunks and embeddings
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+        for (index, chunk_content) in chunks.iter().enumerate() {
+            let chunk_id = Uuid::new_v4().to_string();
+            let embedding_blob = f32_vec_to_blob_public(&embeddings[index]);
+
+            // Insert into atom_chunks
+            conn.execute(
+                "INSERT INTO atom_chunks (id, atom_id, chunk_index, content, embedding) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![&chunk_id, atom_id, index as i32, chunk_content, &embedding_blob],
+            )
+            .map_err(|e| format!("Failed to insert chunk: {}", e))?;
+
+            // Insert into vec_chunks for similarity search
+            conn.execute(
+                "INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?1, ?2)",
+                rusqlite::params![&chunk_id, &embedding_blob],
+            )
+            .map_err(|e| format!("Failed to insert vec_chunk: {}", e))?;
+        }
+
+        // Compute semantic edges for this atom
+        match compute_semantic_edges_for_atom(&conn, atom_id, 0.5, 15) {
+            Ok(edge_count) => {
+                if edge_count > 0 {
+                    eprintln!("Created {} semantic edges for atom {}", edge_count, atom_id);
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to compute semantic edges for atom {}: {}", atom_id, e);
+            }
+        }
+
+        // Set embedding status to complete
+        conn.execute(
+            "UPDATE atoms SET embedding_status = 'complete' WHERE id = ?1",
+            [atom_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+/// Process ONLY tag extraction for an atom (no embedding)
+/// Assumes atom_chunks already exist with content
+///
+/// Steps:
+/// 1. Check embedding_status is 'complete' (skip if not)
+/// 2. Set tagging_status to 'processing'
+/// 3. Check auto_tagging_enabled (skip if disabled)
+/// 4. Read chunks from atom_chunks table
+/// 5. Extract tags via LLM for each chunk
+/// 6. Run consolidation pass for multi-chunk atoms
+/// 7. Set tagging_status to 'complete'
+pub async fn process_tagging_only(
+    db: &Database,
+    atom_id: &str,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    // Get settings and validate state
+    let (auto_tagging_enabled, provider_config, tagging_model, chunks) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+        // Check embedding status - can't tag without complete embeddings
+        let embedding_status: String = conn
+            .query_row(
+                "SELECT COALESCE(embedding_status, 'pending') FROM atoms WHERE id = ?1",
+                [atom_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Atom not found: {}", e))?;
+
+        if embedding_status != "complete" {
+            conn.execute(
+                "UPDATE atoms SET tagging_status = 'skipped' WHERE id = ?1",
                 [atom_id],
             )
             .map_err(|e| e.to_string())?;
             return Ok((Vec::new(), Vec::new()));
         }
 
-        (auto_tagging_enabled, provider_config, chunks)
-    }; // Connection dropped here
+        // Set tagging status to processing
+        conn.execute(
+            "UPDATE atoms SET tagging_status = 'processing' WHERE id = ?1",
+            [atom_id],
+        )
+        .map_err(|e| e.to_string())?;
 
-    // Get tagging model from provider config
-    let tagging_model = provider_config.llm_model().to_string();
+        // Get settings
+        let settings_map = settings::get_all_settings(&conn)?;
+        let auto_tagging_enabled = settings_map
+            .get("auto_tagging_enabled")
+            .map(|v| v == "true")
+            .unwrap_or(true);
 
-    // Load model capabilities for parameter filtering (OpenRouter only)
-    // Ollama doesn't have a capability API, so we skip this for Ollama
-    let supported_params: Option<Vec<String>> = if auto_tagging_enabled
-        && provider_config.provider_type == ProviderType::OpenRouter
-    {
-        // Create HTTP client for OpenRouter API
+        if !auto_tagging_enabled {
+            conn.execute(
+                "UPDATE atoms SET tagging_status = 'skipped' WHERE id = ?1",
+                [atom_id],
+            )
+            .map_err(|e| e.to_string())?;
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let provider_config = ProviderConfig::from_settings(&settings_map);
+
+        // Validate provider for LLM
+        if provider_config.provider_type == ProviderType::OpenRouter
+            && provider_config.openrouter_api_key.is_none()
+        {
+            conn.execute(
+                "UPDATE atoms SET tagging_status = 'skipped' WHERE id = ?1",
+                [atom_id],
+            )
+            .map_err(|e| e.to_string())?;
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let tagging_model = provider_config.llm_model().to_string();
+
+        // Get chunks from database (already created during embedding)
+        let mut stmt = conn
+            .prepare("SELECT content FROM atom_chunks WHERE atom_id = ?1 ORDER BY chunk_index")
+            .map_err(|e| format!("Failed to prepare chunk query: {}", e))?;
+        let chunks: Vec<String> = stmt
+            .query_map([atom_id], |row| row.get(0))
+            .map_err(|e| format!("Failed to query chunks: {}", e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to collect chunks: {}", e))?;
+
+        if chunks.is_empty() {
+            conn.execute(
+                "UPDATE atoms SET tagging_status = 'skipped' WHERE id = ?1",
+                [atom_id],
+            )
+            .map_err(|e| e.to_string())?;
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        (auto_tagging_enabled, provider_config, tagging_model, chunks)
+    }; // Connection dropped
+
+    // Load model capabilities for OpenRouter
+    let supported_params: Option<Vec<String>> = if provider_config.provider_type == ProviderType::OpenRouter {
         let client = Client::new();
 
-        // Step 1: Check cache (sync, with lock)
         let (cached, is_stale) = {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             match get_cached_capabilities_sync(&conn) {
@@ -274,13 +309,11 @@ async fn process_embeddings(
                 Ok(None) => (None, true),
                 Err(_) => (None, true),
             }
-        }; // Lock dropped here
+        };
 
-        // Step 2: Fetch fresh if needed (async, no lock)
         let capabilities = if is_stale {
             match fetch_and_return_capabilities(&client).await {
                 Ok(fresh_cache) => {
-                    // Step 3: Save to DB (sync, with new connection)
                     if let Ok(conn) = db.new_connection() {
                         let _ = save_capabilities_cache(&conn, &fresh_cache);
                     }
@@ -297,119 +330,79 @@ async fn process_embeddings(
         None
     };
 
-    // Track all tag IDs and new tag IDs across all chunks
+    // Track all tags
     let mut all_tag_ids: Vec<String> = Vec::new();
     let mut all_new_tag_ids: Vec<String> = Vec::new();
 
-    // Generate all embeddings via provider in one batch
-    let chunk_texts: Vec<String> = chunks.iter().map(|s| s.to_string()).collect();
-    let embeddings = generate_embeddings_with_config(&provider_config, &chunk_texts)
-        .await
-        .map_err(|e| format!("Failed to generate embeddings: {}", e))?;
-
-    // Process each chunk with its embedding SEQUENTIALLY
-    // Each chunk sees the tags extracted from previous chunks
+    // Process each chunk for tag extraction
     for (index, chunk_content) in chunks.iter().enumerate() {
         // Get fresh tag tree that includes tags from previous chunks
-        let tag_tree_json = if auto_tagging_enabled {
+        let tag_tree_json = {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             get_tag_tree_for_llm(&conn)?
-        } else {
-            String::new()
         };
 
-        // Database operations in scope to ensure lock is dropped before async operations
+        match extract_tags_from_chunk(
+            &provider_config,
+            chunk_content,
+            &tag_tree_json,
+            &tagging_model,
+            supported_params.clone(),
+        )
+        .await
         {
-            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            Ok(result) => {
+                let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                let mut chunk_tag_ids = Vec::new();
 
-            let chunk_id = Uuid::new_v4().to_string();
-
-            // Convert OpenRouter embedding (f32 vec) to binary blob
-            let embedding_blob = f32_vec_to_blob_public(&embeddings[index]);
-
-            // Insert into atom_chunks
-            conn.execute(
-                "INSERT INTO atom_chunks (id, atom_id, chunk_index, content, embedding) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![&chunk_id, atom_id, index as i32, chunk_content, &embedding_blob],
-            )
-            .map_err(|e| format!("Failed to insert chunk: {}", e))?;
-
-            // Insert into vec_chunks for similarity search
-            conn.execute(
-                "INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?1, ?2)",
-                rusqlite::params![&chunk_id, &embedding_blob],
-            )
-            .map_err(|e| format!("Failed to insert vec_chunk: {}", e))?;
-        } // Connection dropped here
-
-        // Extract tags with current tag tree (includes tags from previous chunks)
-        if auto_tagging_enabled {
-            match extract_tags_from_chunk(&provider_config, chunk_content, &tag_tree_json, &tagging_model, supported_params.clone()).await {
-                Ok(result) => {
-                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-
-                    // Process each tag: find or create
-                    let mut chunk_tag_ids = Vec::new();
-
-                    for tag_application in result.tags {
-                        // Skip invalid tag names
-                        let trimmed_name = tag_application.name.trim();
-                        if trimmed_name.is_empty() || trimmed_name.eq_ignore_ascii_case("null") {
-                            eprintln!("Skipping invalid tag name: '{}'", tag_application.name);
-                            continue;
-                        }
-
-                        // Look up tag by name (case-insensitive), create if doesn't exist
-                        match get_or_create_tag(&conn, &tag_application.name, &tag_application.parent_name) {
-                            Ok(tag_id) => chunk_tag_ids.push(tag_id),
-                            Err(e) => eprintln!("Failed to get/create tag '{}': {}", tag_application.name, e),
-                        }
+                for tag_application in result.tags {
+                    let trimmed_name = tag_application.name.trim();
+                    if trimmed_name.is_empty() || trimmed_name.eq_ignore_ascii_case("null") {
+                        continue;
                     }
 
-                    // Link all tags to atom
-                    if !chunk_tag_ids.is_empty() {
-                        link_tags_to_atom(&conn, atom_id, &chunk_tag_ids)?;
+                    match get_or_create_tag(&conn, &tag_application.name, &tag_application.parent_name) {
+                        Ok(tag_id) => chunk_tag_ids.push(tag_id),
+                        Err(e) => eprintln!("Failed to get/create tag '{}': {}", tag_application.name, e),
                     }
-
-                    // Track for event payload
-                    all_tag_ids.extend(chunk_tag_ids.clone());
-                    all_new_tag_ids.extend(chunk_tag_ids);
-                },
-                Err(e) => {
-                    // Log warning but continue - don't fail the whole process
-                    eprintln!("Tag extraction failed for chunk {}: {}", index, e);
                 }
+
+                if !chunk_tag_ids.is_empty() {
+                    link_tags_to_atom(&conn, atom_id, &chunk_tag_ids)?;
+                }
+
+                all_tag_ids.extend(chunk_tag_ids.clone());
+                all_new_tag_ids.extend(chunk_tag_ids);
+            }
+            Err(e) => {
+                eprintln!("Tag extraction failed for chunk {}: {}", index, e);
             }
         }
     }
 
-    // CONSOLIDATION PASS (only for multi-chunk atoms)
+    // Consolidation pass for multi-chunk atoms
     if chunks.len() > 1 && auto_tagging_enabled && !all_tag_ids.is_empty() {
-        // Deduplicate tag IDs before consolidation
         all_tag_ids.sort();
         all_tag_ids.dedup();
 
-        // Build tag info string (sync operation with lock)
         let tag_info = {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             build_tag_info_for_consolidation(&conn, &all_tag_ids)?
-        }; // Lock dropped here
+        };
 
-        // Call consolidation (async operation without lock)
-        match consolidate_atom_tags(&provider_config, tag_info, &tagging_model, supported_params.clone()).await {
+        match consolidate_atom_tags(&provider_config, tag_info, &tagging_model, supported_params).await {
             Ok(consolidation) => {
-                // Re-acquire connection for consolidation operations
                 let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
-                // TRANSLATION LAYER: Names → IDs
                 let lookup_result = tag_names_to_ids(&conn, &consolidation.tags_to_remove)?;
                 if !lookup_result.missing_names.is_empty() {
-                    eprintln!("Warning: Consolidation recommended removing non-existent tags: {:?}",
-                        lookup_result.missing_names);
+                    eprintln!(
+                        "Warning: Consolidation recommended removing non-existent tags: {:?}",
+                        lookup_result.missing_names
+                    );
                 }
                 let remove_ids = lookup_result.found_ids;
 
-                // Remove tags from atom
                 for tag_id in &remove_ids {
                     conn.execute(
                         "DELETE FROM atom_tags WHERE atom_id = ?1 AND tag_id = ?2",
@@ -417,7 +410,6 @@ async fn process_embeddings(
                     )
                     .map_err(|e| e.to_string())?;
 
-                    // Check if tag is used elsewhere
                     let usage_count: i64 = conn
                         .query_row(
                             "SELECT COUNT(*) FROM atom_tags WHERE tag_id = ?1",
@@ -426,9 +418,7 @@ async fn process_embeddings(
                         )
                         .map_err(|e| e.to_string())?;
 
-                    // Delete tag entirely if unused
                     if usage_count == 0 {
-                        // Check if tag has a wiki article
                         let has_wiki: bool = conn
                             .query_row(
                                 "SELECT 1 FROM wiki_articles WHERE tag_id = ?1",
@@ -442,20 +432,15 @@ async fn process_embeddings(
                         } else {
                             conn.execute("DELETE FROM tags WHERE id = ?1", [tag_id])
                                 .map_err(|e| e.to_string())?;
-
-                            // Clean up orphaned parents
                             cleanup_orphaned_parents(&conn, tag_id)?;
                         }
                     }
                 }
 
-                // Create new broader tags
                 let mut new_tag_ids = Vec::new();
                 for tag_application in consolidation.tags_to_add {
-                    // Skip invalid tag names
                     let trimmed_name = tag_application.name.trim();
                     if trimmed_name.is_empty() || trimmed_name.eq_ignore_ascii_case("null") {
-                        eprintln!("Skipping invalid consolidation tag name: '{}'", tag_application.name);
                         continue;
                     }
 
@@ -465,57 +450,285 @@ async fn process_embeddings(
                     }
                 }
 
-                // Link new tags to atom
                 if !new_tag_ids.is_empty() {
                     link_tags_to_atom(&conn, atom_id, &new_tag_ids)?;
                 }
 
-                // Update tracking for event payload
                 all_tag_ids.retain(|id| !remove_ids.contains(id));
+                let added_count = new_tag_ids.len();
                 all_tag_ids.extend(new_tag_ids.clone());
-                all_new_tag_ids.extend(new_tag_ids.clone());
+                all_new_tag_ids.extend(new_tag_ids);
 
-                eprintln!("Tag consolidation complete for atom {}: removed {}, added {}",
-                    atom_id, remove_ids.len(), new_tag_ids.len());
+                eprintln!(
+                    "Tag consolidation complete for atom {}: removed {}, added {}",
+                    atom_id,
+                    remove_ids.len(),
+                    added_count
+                );
             }
             Err(e) => {
                 eprintln!("Tag consolidation failed for atom {}: {}", atom_id, e);
-                // Don't fail the whole process - consolidation is optional
             }
         }
     }
 
-    // Re-acquire connection for final operations
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-
-    // Compute semantic edges for this atom
-    // Use threshold of 0.5 to capture more relationships, max 15 edges per atom
-    match compute_semantic_edges_for_atom(&conn, atom_id, 0.5, 15) {
-        Ok(edge_count) => {
-            if edge_count > 0 {
-                eprintln!("Created {} semantic edges for atom {}", edge_count, atom_id);
-            }
-        }
-        Err(e) => {
-            // Log warning but don't fail the embedding process
-            eprintln!("Warning: Failed to compute semantic edges for atom {}: {}", atom_id, e);
-        }
+    // Set tagging status to complete
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE atoms SET tagging_status = 'complete' WHERE id = ?1",
+            [atom_id],
+        )
+        .map_err(|e| e.to_string())?;
     }
 
-    // Set status to complete
-    conn.execute(
-        "UPDATE atoms SET embedding_status = 'complete' WHERE id = ?1",
-        [atom_id],
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Deduplicate tag IDs for the event payload
     all_tag_ids.sort();
     all_tag_ids.dedup();
     all_new_tag_ids.sort();
     all_new_tag_ids.dedup();
 
     Ok((all_tag_ids, all_new_tag_ids))
+}
+
+/// Process tagging for multiple atoms concurrently with semaphore-based limiting
+/// Used by process_pending_tagging for bulk operations
+pub async fn process_tagging_batch(
+    app_handle: AppHandle,
+    db: Arc<Database>,
+    atom_ids: Vec<String>,
+) {
+    let mut tasks = Vec::with_capacity(atom_ids.len());
+
+    for atom_id in atom_ids {
+        let app_handle = app_handle.clone();
+        let db = Arc::clone(&db);
+
+        let task = tokio::spawn(async move {
+            // Acquire semaphore permit
+            let _permit = TAGGING_SEMAPHORE
+                .acquire()
+                .await
+                .expect("Semaphore closed unexpectedly");
+
+            let result = process_tagging_only(&db, &atom_id).await;
+
+            let payload = match result {
+                Ok((tags_extracted, new_tags_created)) => TaggingCompletePayload {
+                    atom_id: atom_id.clone(),
+                    status: "complete".to_string(),
+                    error: None,
+                    tags_extracted,
+                    new_tags_created,
+                },
+                Err(e) => {
+                    if let Ok(conn) = db.conn.lock() {
+                        let _ = conn.execute(
+                            "UPDATE atoms SET tagging_status = 'failed' WHERE id = ?1",
+                            [&atom_id],
+                        );
+                    }
+                    TaggingCompletePayload {
+                        atom_id: atom_id.clone(),
+                        status: "failed".to_string(),
+                        error: Some(e),
+                        tags_extracted: Vec::new(),
+                        new_tags_created: Vec::new(),
+                    }
+                }
+            };
+
+            let _ = app_handle.emit("tagging-complete", payload);
+        });
+
+        tasks.push(task);
+    }
+
+    // Wait for all tasks to complete
+    for task in tasks {
+        let _ = task.await;
+    }
+}
+
+/// Process embeddings and tagging for a SINGLE atom (used by create_atom/update_atom)
+/// This spawns a background task that runs embedding first, then tagging.
+///
+/// Phase 1 (Embedding):
+/// 1. Sets embedding_status to 'processing'
+/// 2. Chunks the content
+/// 3. Generates embeddings via provider
+/// 4. Stores chunks and embeddings in database
+/// 5. Computes semantic edges
+/// 6. Sets embedding_status to 'complete' or 'failed'
+/// 7. Emits 'embedding-complete' event
+///
+/// Phase 2 (Tagging - only if embedding succeeded):
+/// 1. Sets tagging_status to 'processing'
+/// 2. Extracts tags using LLM (if enabled)
+/// 3. Links extracted tags to the atom
+/// 4. Runs consolidation for multi-chunk atoms
+/// 5. Sets tagging_status to 'complete', 'skipped', or 'failed'
+/// 6. Emits 'tagging-complete' event with tag info
+pub fn spawn_embedding_task_single(
+    app_handle: AppHandle,
+    db: Arc<Database>,
+    atom_id: String,
+    content: String,
+) {
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+
+        // Phase 1: Embedding only
+        let embedding_result = rt.block_on(process_embedding_only(&db, &atom_id, &content));
+
+        let embedding_payload = match &embedding_result {
+            Ok(()) => EmbeddingCompletePayload {
+                atom_id: atom_id.clone(),
+                status: "complete".to_string(),
+                error: None,
+            },
+            Err(e) => {
+                if let Ok(conn) = db.conn.lock() {
+                    let _ = conn.execute(
+                        "UPDATE atoms SET embedding_status = 'failed', tagging_status = 'skipped' WHERE id = ?1",
+                        [&atom_id],
+                    );
+                }
+                EmbeddingCompletePayload {
+                    atom_id: atom_id.clone(),
+                    status: "failed".to_string(),
+                    error: Some(e.clone()),
+                }
+            }
+        };
+        let _ = app_handle.emit("embedding-complete", embedding_payload);
+
+        // Phase 2: Tagging only (if embedding succeeded)
+        if embedding_result.is_ok() {
+            let tagging_result = rt.block_on(process_tagging_only(&db, &atom_id));
+
+            let tagging_payload = match tagging_result {
+                Ok((tags_extracted, new_tags_created)) => TaggingCompletePayload {
+                    atom_id: atom_id.clone(),
+                    status: "complete".to_string(),
+                    error: None,
+                    tags_extracted,
+                    new_tags_created,
+                },
+                Err(e) => {
+                    if let Ok(conn) = db.conn.lock() {
+                        let _ = conn.execute(
+                            "UPDATE atoms SET tagging_status = 'failed' WHERE id = ?1",
+                            [&atom_id],
+                        );
+                    }
+                    TaggingCompletePayload {
+                        atom_id: atom_id.clone(),
+                        status: "failed".to_string(),
+                        error: Some(e),
+                        tags_extracted: Vec::new(),
+                        new_tags_created: Vec::new(),
+                    }
+                }
+            };
+            let _ = app_handle.emit("tagging-complete", tagging_payload);
+        }
+    });
+}
+
+/// Process embeddings for multiple atoms with semaphore-based limiting
+/// After ALL embeddings complete, runs tagging for successfully embedded atoms (unless skip_tagging is true)
+/// This ensures fast embedding phase completes first, then slower tagging runs
+/// Set skip_tagging=true when re-embedding due to model/provider change (tags are preserved)
+pub async fn process_embedding_batch(
+    app_handle: AppHandle,
+    db: Arc<Database>,
+    atoms: Vec<(String, String)>,
+    skip_tagging: bool,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc as StdArc;
+
+    // Track successfully embedded atom IDs for tagging phase
+    let successful_ids: StdArc<std::sync::Mutex<Vec<String>>> =
+        StdArc::new(std::sync::Mutex::new(Vec::new()));
+    let total_count = atoms.len();
+    let completed_count = StdArc::new(AtomicUsize::new(0));
+
+    // Phase 1: All embeddings
+    eprintln!("Starting embedding phase for {} atoms...", total_count);
+    let mut tasks = Vec::with_capacity(atoms.len());
+
+    for (atom_id, content) in atoms {
+        let app_handle = app_handle.clone();
+        let db = Arc::clone(&db);
+        let successful_ids = StdArc::clone(&successful_ids);
+        let completed_count = StdArc::clone(&completed_count);
+
+        let task = tokio::spawn(async move {
+            // Acquire semaphore permit
+            let _permit = EMBEDDING_SEMAPHORE
+                .acquire()
+                .await
+                .expect("Semaphore closed unexpectedly");
+
+            // Process embedding only (no tagging yet)
+            let result = process_embedding_only(&db, &atom_id, &content).await;
+
+            let payload = match &result {
+                Ok(()) => {
+                    // Track successful embedding for tagging phase
+                    if let Ok(mut ids) = successful_ids.lock() {
+                        ids.push(atom_id.clone());
+                    }
+                    EmbeddingCompletePayload {
+                        atom_id: atom_id.clone(),
+                        status: "complete".to_string(),
+                        error: None,
+                    }
+                }
+                Err(e) => {
+                    if let Ok(conn) = db.conn.lock() {
+                        let _ = conn.execute(
+                            "UPDATE atoms SET embedding_status = 'failed', tagging_status = 'skipped' WHERE id = ?1",
+                            [&atom_id],
+                        );
+                    }
+                    EmbeddingCompletePayload {
+                        atom_id: atom_id.clone(),
+                        status: "failed".to_string(),
+                        error: Some(e.clone()),
+                    }
+                }
+            };
+
+            let count = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
+            eprintln!("Embedding {}/{} complete: {}", count, total_count, atom_id);
+            let _ = app_handle.emit("embedding-complete", payload);
+        });
+
+        tasks.push(task);
+    }
+
+    // Wait for all embedding tasks to complete
+    for task in tasks {
+        let _ = task.await;
+    }
+
+    // Phase 2: All tagging (after all embeddings complete) - unless skip_tagging is true
+    if skip_tagging {
+        eprintln!("Embedding phase complete. Skipping tagging phase (re-embedding only).");
+    } else {
+        let atoms_to_tag: Vec<String> = successful_ids.lock()
+            .map(|ids| ids.clone())
+            .unwrap_or_default();
+
+        if !atoms_to_tag.is_empty() {
+            eprintln!("Embedding phase complete. Starting tagging phase for {} atoms...", atoms_to_tag.len());
+            process_tagging_batch(app_handle, db, atoms_to_tag).await;
+        } else {
+            eprintln!("Embedding phase complete. No atoms to tag.");
+        }
+    }
 }
 
 /// Convert distance to similarity score (0-1 scale)

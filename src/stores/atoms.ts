@@ -8,6 +8,7 @@ export interface Atom {
   created_at: string;
   updated_at: string;
   embedding_status: 'pending' | 'processing' | 'complete' | 'failed';
+  tagging_status: 'pending' | 'processing' | 'complete' | 'failed' | 'skipped';
 }
 
 export interface Tag {
@@ -28,6 +29,7 @@ export interface SemanticSearchResult {
   created_at: string;
   updated_at: string;
   embedding_status: 'pending' | 'processing' | 'complete' | 'failed';
+  tagging_status: 'pending' | 'processing' | 'complete' | 'failed' | 'skipped';
   tags: Tag[];
   similarity_score: number;
   matching_chunk_content: string;
@@ -41,6 +43,7 @@ export interface SimilarAtomResult {
   created_at: string;
   updated_at: string;
   embedding_status: 'pending' | 'processing' | 'complete' | 'failed';
+  tagging_status: 'pending' | 'processing' | 'complete' | 'failed' | 'skipped';
   tags: Tag[];
   similarity_score: number;
   matching_chunk_content: string;

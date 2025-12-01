@@ -225,6 +225,9 @@ impl Database {
         // Add embedding_status column to atoms table if it doesn't exist
         Self::add_embedding_status_column(conn)?;
 
+        // Add tagging_status column to atoms table if it doesn't exist
+        Self::add_tagging_status_column(conn)?;
+
         // Create vec_chunks virtual table for sqlite-vec similarity search
         Self::create_vec_chunks_table(conn)?;
 
@@ -256,6 +259,49 @@ impl Database {
             [],
         )
         .map_err(|e| format!("Failed to create embedding_status index: {}", e))?;
+
+        Ok(())
+    }
+
+    fn add_tagging_status_column(conn: &Connection) -> Result<(), String> {
+        // Check if tagging_status column exists
+        let column_exists: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('atoms') WHERE name = 'tagging_status'")
+            .map_err(|e| format!("Failed to prepare column check: {}", e))?
+            .exists([])
+            .map_err(|e| format!("Failed to check column existence: {}", e))?;
+
+        if !column_exists {
+            // Add column with default 'pending'
+            conn.execute(
+                "ALTER TABLE atoms ADD COLUMN tagging_status TEXT DEFAULT 'pending'",
+                [],
+            )
+            .map_err(|e| format!("Failed to add tagging_status column: {}", e))?;
+
+            // For existing atoms, set tagging_status based on embedding_status:
+            // - 'complete' embedding -> 'complete' tagging (already tagged)
+            // - 'failed' embedding -> 'skipped' tagging (can't tag without embedding)
+            // - 'pending'/'processing' -> 'pending' (needs both)
+            conn.execute(
+                "UPDATE atoms SET tagging_status = 'complete' WHERE embedding_status = 'complete'",
+                [],
+            )
+            .map_err(|e| format!("Failed to update existing atom tagging status: {}", e))?;
+
+            conn.execute(
+                "UPDATE atoms SET tagging_status = 'skipped' WHERE embedding_status = 'failed'",
+                [],
+            )
+            .map_err(|e| format!("Failed to update failed atom tagging status: {}", e))?;
+        }
+
+        // Create index for tagging_status
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_atoms_tagging_status ON atoms(tagging_status)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create tagging_status index: {}", e))?;
 
         Ok(())
     }
@@ -346,7 +392,8 @@ pub fn will_dimension_change(
     (current_dim != new_dim, new_dim)
 }
 
-/// Recreate vec_chunks table with a new dimension and reset all atom embedding status
+/// Recreate vec_chunks table with a new dimension and reset embedding status
+/// Tags are preserved - only embeddings need to be regenerated
 pub fn recreate_vec_chunks_with_dimension(conn: &Connection, dimension: usize) -> Result<(), String> {
     // Drop existing vec_chunks table
     conn.execute("DROP TABLE IF EXISTS vec_chunks", [])
@@ -360,13 +407,25 @@ pub fn recreate_vec_chunks_with_dimension(conn: &Connection, dimension: usize) -
     conn.execute(&create_sql, [])
         .map_err(|e| format!("Failed to create vec_chunks table: {}", e))?;
 
-    // Reset all atom embedding status to pending so they get re-embedded
+    // Reset ONLY embedding status to pending (need to re-embed)
     conn.execute("UPDATE atoms SET embedding_status = 'pending'", [])
         .map_err(|e| format!("Failed to reset atom embedding status: {}", e))?;
+
+    // Set tagging_status to 'skipped' - existing tags are preserved, no re-tagging needed
+    conn.execute("UPDATE atoms SET tagging_status = 'skipped'", [])
+        .map_err(|e| format!("Failed to update atom tagging status: {}", e))?;
 
     // Clear all existing chunk data since it's invalid with new dimensions
     conn.execute("DELETE FROM atom_chunks", [])
         .map_err(|e| format!("Failed to clear atom_chunks: {}", e))?;
+
+    // Clear semantic edges since they depend on embeddings
+    conn.execute("DELETE FROM semantic_edges", [])
+        .map_err(|e| format!("Failed to clear semantic_edges: {}", e))?;
+
+    // Clear canvas positions since they were based on old embedding similarities
+    conn.execute("DELETE FROM atom_positions", [])
+        .map_err(|e| format!("Failed to clear atom_positions: {}", e))?;
 
     Ok(())
 }

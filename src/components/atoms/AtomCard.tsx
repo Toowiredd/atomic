@@ -11,27 +11,17 @@ interface AtomCardProps {
   onRetryEmbedding?: () => void;  // For retry action
 }
 
-function EmbeddingStatusIndicator({
-  status,
+function ProcessingStatusIndicator({
+  embeddingStatus,
+  taggingStatus,
   onRetry,
 }: {
-  status: AtomWithTags['embedding_status'];
+  embeddingStatus: AtomWithTags['embedding_status'];
+  taggingStatus: AtomWithTags['tagging_status'];
   onRetry?: () => void;
 }) {
-  if (status === 'complete') {
-    return null;
-  }
-
-  if (status === 'pending' || status === 'processing') {
-    return (
-      <div
-        className="absolute top-2 right-2 w-2.5 h-2.5 bg-amber-500 rounded-full animate-pulse"
-        title={status === 'pending' ? 'Embedding pending' : 'Embedding in progress'}
-      />
-    );
-  }
-
-  if (status === 'failed') {
+  // Show failed state if embedding failed
+  if (embeddingStatus === 'failed') {
     return (
       <button
         onClick={(e) => {
@@ -50,6 +40,43 @@ function EmbeddingStatusIndicator({
           />
         </svg>
       </button>
+    );
+  }
+
+  // Determine if still processing (either embedding or tagging not complete)
+  const isEmbedding = embeddingStatus === 'pending' || embeddingStatus === 'processing';
+  const isTagging = taggingStatus === 'pending' || taggingStatus === 'processing';
+  const taggingFailed = taggingStatus === 'failed';
+
+  // Both complete (or tagging skipped) - no indicator needed
+  if (embeddingStatus === 'complete' && (taggingStatus === 'complete' || taggingStatus === 'skipped')) {
+    return null;
+  }
+
+  // Show amber indicator for pending/processing states
+  if (isEmbedding || isTagging) {
+    let title = 'Processing...';
+    if (isEmbedding) {
+      title = embeddingStatus === 'pending' ? 'Embedding pending' : 'Embedding in progress';
+    } else if (isTagging) {
+      title = taggingStatus === 'pending' ? 'Tag extraction pending' : 'Tag extraction in progress';
+    }
+
+    return (
+      <div
+        className="absolute top-2 right-2 w-2.5 h-2.5 bg-amber-500 rounded-full animate-pulse"
+        title={title}
+      />
+    );
+  }
+
+  // Tagging failed (but embedding succeeded) - show warning but less critical
+  if (taggingFailed) {
+    return (
+      <div
+        className="absolute top-2 right-2 w-2.5 h-2.5 bg-orange-500 rounded-full"
+        title="Tag extraction failed - atom is still searchable"
+      />
     );
   }
 
@@ -79,8 +106,9 @@ export function AtomCard({
         onClick={onClick}
         className="relative flex items-center gap-4 p-4 bg-[#2d2d2d] border border-[#3d3d3d] rounded-lg cursor-pointer hover:border-[#4d4d4d] hover:bg-[#333333] transition-all duration-150"
       >
-        <EmbeddingStatusIndicator
-          status={atom.embedding_status}
+        <ProcessingStatusIndicator
+          embeddingStatus={atom.embedding_status}
+          taggingStatus={atom.tagging_status}
           onRetry={onRetryEmbedding}
         />
         <div className="flex-1 min-w-0">
@@ -114,8 +142,9 @@ export function AtomCard({
       onClick={onClick}
       className="relative flex flex-col p-4 bg-[#2d2d2d] border border-[#3d3d3d] rounded-lg cursor-pointer hover:border-[#4d4d4d] hover:bg-[#333333] transition-all duration-150 h-full"
     >
-      <EmbeddingStatusIndicator
-        status={atom.embedding_status}
+      <ProcessingStatusIndicator
+        embeddingStatus={atom.embedding_status}
+        taggingStatus={atom.tagging_status}
         onRetry={onRetryEmbedding}
       />
       <div className="flex-1 min-h-0">

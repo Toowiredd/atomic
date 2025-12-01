@@ -2,7 +2,7 @@ use crate::providers::traits::LlmConfig;
 use crate::providers::types::{GenerationParams, Message, StructuredOutputSchema};
 use crate::providers::{create_llm_provider, ProviderConfig};
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 // Extraction result types
 #[derive(Debug, Clone, Deserialize)]
@@ -31,7 +31,6 @@ pub struct TagLookupResult {
 const TAG_CONSOLIDATION_PROMPT: &str = r#"You are reviewing tags applied to a complete document to consolidate overly specific tags into broader ones.
 
 IMPORTANT - TAG IDENTIFICATION:
-- Each tag is shown by its name only (e.g., "AI Consciousness")
 - Tag names are case-insensitive
 - Each tag name is globally unique across the entire system
 - When removing tags, use the exact tag name as shown
@@ -57,9 +56,10 @@ const SYSTEM_PROMPT: &str = r#"You are a knowledge management assistant that cat
 
 IMPORTANT:
 - Return ALL tags that apply to this text
-- Each tag has a name and optional parent_name
+- Each tag has a name and optional parent_name. 
 - Tag names are case-insensitive and globally unique
 - Use existing tags from the hierarchy when applicable
+- Always prefer adding specific tags to existing categories rather than adding them as top-level tags.
 
 HIERARCHY STRUCTURE:
 - Level 1: Categories (e.g., "Topics", "People", "Locations", "Organizations", "Events")
@@ -74,7 +74,7 @@ EXAMPLES:
 Guidelines:
 - Use existing tags from the provided hierarchy when possible
 - Create new tags only when needed
-- Be specific but not overly granular
+- Prefer broad tags like "John Smith" rather than overly specific tags such as "Early Life of John Smith"
 - Only include tags you're confident are relevant"#;
 
 /// Extract tags from a single chunk using LLM provider
@@ -178,15 +178,9 @@ pub async fn extract_tags_from_chunk(
     Err(last_error)
 }
 
-/// Get simplified tag tree for LLM (names only, no IDs)
+/// Get simplified tag tree for LLM (tree format like `tree` CLI)
 /// This exposes only tag names to the LLM without internal database IDs
 pub fn get_tag_tree_for_llm(conn: &Connection) -> Result<String, String> {
-    #[derive(Serialize)]
-    struct TagNodeSimple {
-        name: String,
-        children: Vec<TagNodeSimple>,
-    }
-
     // Get all tags
     let mut stmt = conn
         .prepare("SELECT id, name, parent_id FROM tags ORDER BY name")
@@ -199,29 +193,59 @@ pub fn get_tag_tree_for_llm(conn: &Connection) -> Result<String, String> {
         .map_err(|e| format!("Failed to collect tags: {}", e))?;
 
     if tags.is_empty() {
-        return Ok(r#"{"tags": []}"#.to_string());
+        return Ok("(no existing tags)".to_string());
     }
 
-    // Build tree structure with names only
-    fn build_tree(tags: &[(String, String, Option<String>)], parent_id: Option<&str>) -> Vec<TagNodeSimple> {
+    // Build tree string in `tree` CLI format
+    fn get_children(tags: &[(String, String, Option<String>)], parent_id: Option<&str>) -> Vec<(String, String)> {
         tags.iter()
             .filter(|(_, _, pid)| pid.as_deref() == parent_id)
-            .map(|(id, name, _)| TagNodeSimple {
-                name: name.clone(),
-                children: build_tree(tags, Some(id)),
-            })
+            .map(|(id, name, _)| (id.clone(), name.clone()))
             .collect()
     }
 
-    let tree = build_tree(&tags, None);
+    fn build_tree_string(
+        tags: &[(String, String, Option<String>)],
+        parent_id: Option<&str>,
+        prefix: &str,
+        is_root: bool,
+    ) -> String {
+        let children = get_children(tags, parent_id);
+        let mut result = String::new();
 
-    #[derive(Serialize)]
-    struct TagTreeWrapper {
-        tags: Vec<TagNodeSimple>,
+        for (i, (id, name)) in children.iter().enumerate() {
+            let is_last_child = i == children.len() - 1;
+
+            if is_root {
+                // Root level tags have no prefix
+                result.push_str(name);
+                result.push('\n');
+            } else {
+                // Child tags use tree characters
+                let connector = if is_last_child { "└── " } else { "├── " };
+                result.push_str(prefix);
+                result.push_str(connector);
+                result.push_str(name);
+                result.push('\n');
+            }
+
+            // Recurse for children
+            let new_prefix = if is_root {
+                "".to_string()
+            } else if is_last_child {
+                format!("{}    ", prefix)
+            } else {
+                format!("{}│   ", prefix)
+            };
+
+            result.push_str(&build_tree_string(tags, Some(id), &new_prefix, false));
+        }
+
+        result
     }
 
-    serde_json::to_string_pretty(&TagTreeWrapper { tags: tree })
-        .map_err(|e| format!("Failed to serialize tag tree: {}", e))
+    let tree_string = build_tree_string(&tags, None, "", true);
+    Ok(tree_string.trim_end().to_string())
 }
 
 /// Link tags to an atom (append to existing tags)

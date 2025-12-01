@@ -342,9 +342,10 @@ function ConnectionStatus({ status, error }: { status: 'checking' | 'connected' 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
+  isSetupMode?: boolean; // When true, modal cannot be closed without valid config
 }
 
-export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
+export function SettingsModal({ isOpen, onClose, isSetupMode = false }: SettingsModalProps) {
   const { settings, fetchSettings, setSetting, testOpenRouterConnection } = useSettingsStore();
 
   // Provider selection
@@ -441,7 +442,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      // Don't allow escape to close in setup mode
+      if (e.key === 'Escape' && !isSetupMode) {
         onClose();
       }
     };
@@ -455,10 +457,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       document.removeEventListener('keydown', handleEscape);
       document.body.style.overflow = '';
     };
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, isSetupMode]);
 
   const handleOverlayClick = (e: React.MouseEvent) => {
-    if (e.target === overlayRef.current) {
+    // Don't allow overlay click to close in setup mode
+    if (e.target === overlayRef.current && !isSetupMode) {
       onClose();
     }
   };
@@ -481,9 +484,23 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     }
   };
 
+  // Check if provider is properly configured (for setup mode validation)
+  const isProviderVerified = provider === 'openrouter'
+    ? testResult === 'success'
+    : ollamaStatus === 'connected';
+
+  // In setup mode, save is only allowed when provider is verified
+  const canSave = isSetupMode ? isProviderVerified : true;
+
   const handleSave = async () => {
+    // In setup mode, require verified connection
+    if (isSetupMode && !isProviderVerified) {
+      return;
+    }
+
     setIsSaving(true);
     try {
+      // Backend handles dimension change detection and triggers re-embedding automatically
       await setSetting('provider', provider);
 
       if (provider === 'openrouter') {
@@ -499,6 +516,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       }
 
       await setSetting('auto_tagging_enabled', autoTaggingEnabled ? 'true' : 'false');
+
       onClose();
     } catch (e) {
       console.error('Failed to save settings:', e);
@@ -535,15 +553,26 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       <div className="bg-[#252525] rounded-lg shadow-xl border border-[#3d3d3d] w-full max-w-md mx-4 max-h-[90vh] flex flex-col animate-in fade-in zoom-in-95 duration-200">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-[#3d3d3d]">
-          <h2 className="text-lg font-semibold text-[#dcddde]">Settings</h2>
-          <button
-            onClick={onClose}
-            className="text-[#888888] hover:text-[#dcddde] transition-colors"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+          <div>
+            <h2 className="text-lg font-semibold text-[#dcddde]">
+              {isSetupMode ? 'Welcome to Atomic' : 'Settings'}
+            </h2>
+            {isSetupMode && (
+              <p className="text-sm text-[#888888] mt-1">
+                Configure an AI provider to get started
+              </p>
+            )}
+          </div>
+          {!isSetupMode && (
+            <button
+              onClick={onClose}
+              className="text-[#888888] hover:text-[#dcddde] transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          )}
         </div>
 
         {/* Content */}
@@ -856,11 +885,13 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
         {/* Footer */}
         <div className="flex justify-end gap-3 px-6 py-4 border-t border-[#3d3d3d]">
-          <Button variant="secondary" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button onClick={handleSave} disabled={isSaving}>
-            {isSaving ? 'Saving...' : 'Save'}
+          {!isSetupMode && (
+            <Button variant="secondary" onClick={onClose}>
+              Cancel
+            </Button>
+          )}
+          <Button onClick={handleSave} disabled={isSaving || !canSave}>
+            {isSaving ? 'Saving...' : isSetupMode ? 'Get Started' : 'Save'}
           </Button>
         </div>
       </div>

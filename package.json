@@ -16,7 +16,9 @@
     "release:minor": "node scripts/build-release.js --bump-minor --clean --tag",
     "release:major": "node scripts/build-release.js --bump-major --clean --tag",
     "db:reset": "node scripts/reset-database.js",
-    "db:reset:force": "node scripts/reset-database.js --force --backup"
+    "db:reset:force": "node scripts/reset-database.js --force --backup",
+    "db:drop": "node scripts/drop-database.js",
+    "db:drop:force": "node scripts/drop-database.js --force --backup"
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.5.0",

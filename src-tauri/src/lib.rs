@@ -79,7 +79,9 @@ pub fn run() {
             commands::find_similar_atoms,
             commands::search_atoms_semantic,
             commands::retry_embedding,
+            commands::reset_stuck_processing,
             commands::process_pending_embeddings,
+            commands::process_pending_tagging,
             commands::get_embedding_status,
             commands::get_settings,
             commands::set_setting,
@@ -106,6 +108,8 @@ pub fn run() {
             commands::get_ollama_models,
             commands::get_ollama_embedding_models_cmd,
             commands::get_ollama_llm_models_cmd,
+            // Setup command
+            commands::verify_provider_configured,
             // Chat commands
             chat::create_conversation,
             chat::get_conversations,

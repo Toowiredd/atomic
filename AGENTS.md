@@ -3,8 +3,7 @@
 ## Project Overview
 Atomic is a Tauri v2 desktop application for note-taking with a React frontend. It features markdown editing, hierarchical tagging, AI-powered semantic search using embeddings, automatic tag extraction, wiki article synthesis using OpenRouter LLM, and an interactive canvas view for spatial atom visualization.
 
-## Current Status: Phase 6 In Progress
-Phase 6 (Conversational AI) in progress:
+Phase 6 (complete):
 - Chat conversations with agentic RAG pipeline
 - Multi-tag scoped conversations (editable at any time)
 - Tool-calling agent with search_atoms and get_atom tools

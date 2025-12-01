@@ -11,7 +11,7 @@ interface TagNodeProps {
 }
 
 export function TagNode({ tag, level, selectedTagId, onSelect, onContextMenu }: TagNodeProps) {
-  const [isExpanded, setIsExpanded] = useState(true);
+  const [isExpanded, setIsExpanded] = useState(false);
   const { openWikiDrawer, openChatDrawer } = useUIStore();
   const hasChildren = tag.children && tag.children.length > 0;
   const isSelected = selectedTagId === tag.id;

@@ -1,4 +1,5 @@
-import { useState, MouseEvent } from 'react';
+import { useState, useRef, useMemo, useEffect, MouseEvent } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { TagNode } from './TagNode';
 import { ContextMenu } from '../ui/ContextMenu';
 import { Modal } from '../ui/Modal';
@@ -8,10 +9,74 @@ import { useTagsStore, TagWithCount } from '../../stores/tags';
 import { useUIStore } from '../../stores/ui';
 import { useAtomsStore } from '../../stores/atoms';
 
+interface FlattenedTag {
+  tag: TagWithCount;
+  level: number;
+}
+
+function flattenVisibleTags(
+  tags: TagWithCount[],
+  expandedTagIds: Record<string, boolean>,
+  level: number = 0
+): FlattenedTag[] {
+  const result: FlattenedTag[] = [];
+  for (const tag of tags) {
+    result.push({ tag, level });
+    if (tag.children.length > 0 && expandedTagIds[tag.id]) {
+      const children = flattenVisibleTags(tag.children, expandedTagIds, level + 1);
+      for (let i = 0; i < children.length; i++) {
+        result.push(children[i]);
+      }
+    }
+  }
+  return result;
+}
+
 export function TagTree() {
-  const { tags, createTag, updateTag, deleteTag } = useTagsStore();
-  const { selectedTagId, setSelectedTag, openCommandPalette } = useUIStore();
-  const { fetchAtoms, fetchAtomsByTag } = useAtomsStore();
+  const tags = useTagsStore(s => s.tags);
+  const createTag = useTagsStore(s => s.createTag);
+  const updateTag = useTagsStore(s => s.updateTag);
+  const deleteTag = useTagsStore(s => s.deleteTag);
+  const selectedTagId = useUIStore(s => s.selectedTagId);
+  const setSelectedTag = useUIStore(s => s.setSelectedTag);
+  const openCommandPalette = useUIStore(s => s.openCommandPalette);
+  const expandedTagIds = useUIStore(s => s.expandedTagIds);
+  const fetchAtoms = useAtomsStore(s => s.fetchAtoms);
+  const fetchAtomsByTag = useAtomsStore(s => s.fetchAtomsByTag);
+
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  const flatTags = useMemo(
+    () => flattenVisibleTags(tags, expandedTagIds),
+    [tags, expandedTagIds]
+  );
+
+  const tagIndexMap = useMemo(() => {
+    const map = new Map<string, number>();
+    for (let i = 0; i < flatTags.length; i++) {
+      map.set(flatTags[i].tag.id, i);
+    }
+    return map;
+  }, [flatTags]);
+
+  const virtualizer = useVirtualizer({
+    count: flatTags.length,
+    getScrollElement: () => scrollContainerRef.current,
+    estimateSize: () => 32,
+    overscan: 20,
+  });
+
+  // Scroll to selected tag
+  useEffect(() => {
+    if (selectedTagId) {
+      const index = tagIndexMap.get(selectedTagId);
+      if (index !== undefined) {
+        setTimeout(() => {
+          virtualizer.scrollToIndex(index, { align: 'auto', behavior: 'smooth' });
+        }, 50);
+      }
+    }
+  }, [selectedTagId, tagIndexMap, virtualizer]);
 
   const [contextMenu, setContextMenu] = useState<{
     position: { x: number; y: number } | null;
@@ -127,62 +192,80 @@ export function TagTree() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex-1 overflow-y-auto scrollbar-hidden">
-        {/* All Atoms option */}
-        <div
-          className={`flex items-center gap-2 px-3 py-2 cursor-pointer transition-colors ${
-            selectedTagId === null
-              ? 'bg-[var(--color-accent)]/20 text-[var(--color-text-primary)]'
-              : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-card)] hover:text-[var(--color-text-primary)]'
-          }`}
-          onClick={() => handleSelectTag(null)}
+      {/* All Atoms option */}
+      <div
+        className={`flex items-center gap-2 px-3 py-2 cursor-pointer transition-colors shrink-0 ${
+          selectedTagId === null
+            ? 'bg-[var(--color-accent)]/20 text-[var(--color-text-primary)]'
+            : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-card)] hover:text-[var(--color-text-primary)]'
+        }`}
+        onClick={() => handleSelectTag(null)}
+      >
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+        </svg>
+        <span className="flex-1 text-sm font-medium">All Atoms</span>
+      </div>
+
+      {/* Tags header with search button */}
+      <div className="flex items-center justify-between px-3 py-2 shrink-0">
+        <span className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase tracking-wider">
+          Tags
+        </span>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            openCommandPalette('#');
+          }}
+          className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
+          title="Search tags"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
           </svg>
-          <span className="flex-1 text-sm font-medium">All Atoms</span>
-        </div>
+        </button>
+      </div>
 
-        {/* Tags header with search button */}
-        <div className="flex items-center justify-between px-3 py-2">
-          <span className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase tracking-wider">
-            Tags
-          </span>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              openCommandPalette('#');
-            }}
-            className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
-            title="Search tags"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-            </svg>
-          </button>
-        </div>
-
-        {/* Tag tree */}
+      {/* Virtualized tag list */}
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto scrollbar-hidden">
         {tags.length === 0 ? (
           <div className="px-3 py-4 text-sm text-[var(--color-text-tertiary)] text-center">
             No tags yet
           </div>
         ) : (
-          tags.map((tag) => (
-            <TagNode
-              key={tag.id}
-              tag={tag}
-              level={0}
-              selectedTagId={selectedTagId}
-              onSelect={handleSelectTag}
-              onContextMenu={handleContextMenu}
-            />
-          ))
+          <div
+            style={{ height: `${virtualizer.getTotalSize()}px`, position: 'relative' }}
+          >
+            {virtualizer.getVirtualItems().map((virtualItem) => {
+              const { tag, level } = flatTags[virtualItem.index];
+              return (
+                <div
+                  key={tag.id}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    height: `${virtualItem.size}px`,
+                    transform: `translateY(${virtualItem.start}px)`,
+                  }}
+                >
+                  <TagNode
+                    tag={tag}
+                    level={level}
+                    selectedTagId={selectedTagId}
+                    onSelect={handleSelectTag}
+                    onContextMenu={handleContextMenu}
+                  />
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
 
       {/* New Tag button */}
-      <div className="p-3 border-t border-[var(--color-border)]">
+      <div className="p-3 border-t border-[var(--color-border)] shrink-0">
         <Button
           variant="ghost"
           size="sm"
@@ -268,4 +351,3 @@ export function TagTree() {
     </div>
   );
 }
-

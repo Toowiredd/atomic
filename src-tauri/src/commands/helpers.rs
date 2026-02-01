@@ -1,6 +1,42 @@
 //! Shared helper functions used across command modules
 
 use crate::models::Tag;
+use std::collections::HashMap;
+
+/// Bulk fetch all atom-tag relationships in a single query.
+/// Returns a map from atom_id to Vec<Tag>.
+pub fn get_all_atom_tags_map(conn: &rusqlite::Connection) -> Result<HashMap<String, Vec<Tag>>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT at.atom_id, t.id, t.name, t.parent_id, t.created_at
+             FROM atom_tags at
+             INNER JOIN tags t ON at.tag_id = t.id",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let mut map: HashMap<String, Vec<Tag>> = HashMap::new();
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                Tag {
+                    id: row.get(1)?,
+                    name: row.get(2)?,
+                    parent_id: row.get(3)?,
+                    created_at: row.get(4)?,
+                },
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    for row in rows {
+        let (atom_id, tag) = row.map_err(|e| e.to_string())?;
+        map.entry(atom_id).or_default().push(tag);
+    }
+
+    Ok(map)
+}
 
 /// Helper function to get tags for an atom
 pub fn get_tags_for_atom(conn: &rusqlite::Connection, atom_id: &str) -> Result<Vec<Tag>, String> {

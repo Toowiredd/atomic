@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tauri::State;
 use uuid::Uuid;
 
-use super::helpers::get_tags_for_atom;
+use super::helpers::{get_all_atom_tags_map, get_tags_for_atom};
 
 #[tauri::command]
 pub fn get_all_atoms(db: State<Database>) -> Result<Vec<AtomWithTags>, String> {
@@ -36,11 +36,15 @@ pub fn get_all_atoms(db: State<Database>) -> Result<Vec<AtomWithTags>, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
 
-    let mut result = Vec::new();
-    for atom in atoms {
-        let tags = get_tags_for_atom(&conn, &atom.id)?;
-        result.push(AtomWithTags { atom, tags });
-    }
+    let tag_map = get_all_atom_tags_map(&conn)?;
+
+    let result: Vec<AtomWithTags> = atoms
+        .into_iter()
+        .map(|atom| {
+            let tags = tag_map.get(&atom.id).cloned().unwrap_or_default();
+            AtomWithTags { atom, tags }
+        })
+        .collect();
 
     Ok(result)
 }

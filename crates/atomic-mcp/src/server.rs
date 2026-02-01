@@ -43,7 +43,7 @@ impl AtomicMcpServer {
         let conn = self
             .db
             .new_connection()
-            .map_err(|e| ErrorData::internal_error(e, None))?;
+            .map_err(|e| ErrorData::internal_error(format!("{}", e), None))?;
 
         // Escape query for FTS5
         let escaped_query: String = params.query
@@ -69,7 +69,7 @@ impl AtomicMcpServer {
             .prepare(
                 "SELECT DISTINCT ac.atom_id, a.content, ac.content as chunk_content
                  FROM atom_chunks_fts fts
-                 JOIN atom_chunks ac ON fts.chunk_id = ac.id
+                 JOIN atom_chunks ac ON fts.id = ac.id
                  JOIN atoms a ON ac.atom_id = a.id
                  WHERE atom_chunks_fts MATCH ?1
                  ORDER BY bm25(atom_chunks_fts)
@@ -113,7 +113,7 @@ impl AtomicMcpServer {
         let conn = self
             .db
             .new_connection()
-            .map_err(|e| ErrorData::internal_error(e, None))?;
+            .map_err(|e| ErrorData::internal_error(format!("{}", e), None))?;
 
         let atom_result: Result<(String, String, String, String), rusqlite::Error> = conn
             .query_row(
@@ -175,7 +175,7 @@ impl AtomicMcpServer {
         let conn = self
             .db
             .new_connection()
-            .map_err(|e| ErrorData::internal_error(e, None))?;
+            .map_err(|e| ErrorData::internal_error(format!("{}", e), None))?;
 
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();

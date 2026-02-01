@@ -5,7 +5,7 @@ use crate::models::{Atom, AtomPosition, AtomWithEmbedding, AtomWithTags};
 use chrono::Utc;
 use tauri::State;
 
-use super::helpers::{get_average_embedding, get_tags_for_atom};
+use super::helpers::{get_all_atom_tags_map, get_average_embedding};
 
 /// Get all stored atom positions from the database
 #[tauri::command]
@@ -79,9 +79,11 @@ pub fn get_atoms_with_embeddings(db: State<Database>) -> Result<Vec<AtomWithEmbe
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
 
+    let tag_map = get_all_atom_tags_map(&conn)?;
+
     let mut result = Vec::new();
     for atom in atoms {
-        let tags = get_tags_for_atom(&conn, &atom.id)?;
+        let tags = tag_map.get(&atom.id).cloned().unwrap_or_default();
 
         // Get average embedding for this atom
         let embedding = get_average_embedding(&conn, &atom.id)?;

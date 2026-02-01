@@ -6,7 +6,7 @@ use chrono::Utc;
 use tauri::State;
 use uuid::Uuid;
 
-use super::helpers::get_tags_for_atom;
+use super::helpers::get_all_atom_tags_map;
 
 #[tauri::command]
 pub fn get_all_tags(db: State<Database>) -> Result<Vec<TagWithCount>, String> {
@@ -216,11 +216,15 @@ pub fn get_atoms_by_tag(db: State<Database>, tag_id: String) -> Result<Vec<AtomW
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
 
-    let mut result = Vec::new();
-    for atom in atoms {
-        let tags = get_tags_for_atom(&conn, &atom.id)?;
-        result.push(AtomWithTags { atom, tags });
-    }
+    let tag_map = get_all_atom_tags_map(&conn)?;
+
+    let result: Vec<AtomWithTags> = atoms
+        .into_iter()
+        .map(|atom| {
+            let tags = tag_map.get(&atom.id).cloned().unwrap_or_default();
+            AtomWithTags { atom, tags }
+        })
+        .collect();
 
     Ok(result)
 }

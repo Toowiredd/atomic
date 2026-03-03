@@ -66,6 +66,23 @@ export interface SuggestedArticle {
   score: number;
 }
 
+export interface WikiVersionSummary {
+  id: string;
+  version_number: number;
+  atom_count: number;
+  created_at: string;
+}
+
+export interface WikiArticleVersion {
+  id: string;
+  tag_id: string;
+  content: string;
+  citations: WikiCitation[];
+  atom_count: number;
+  version_number: number;
+  created_at: string;
+}
+
 type WikiView = 'list' | 'article';
 
 interface WikiStore {
@@ -87,6 +104,10 @@ interface WikiStore {
   articleStatus: WikiArticleStatus | null;
   relatedTags: RelatedTag[];
   wikiLinks: WikiLink[];
+
+  // Version history
+  versions: WikiVersionSummary[];
+  selectedVersion: WikiArticleVersion | null;
 
   // Loading states
   isLoading: boolean;
@@ -110,6 +131,9 @@ interface WikiStore {
   generateArticle: (tagId: string, tagName: string) => Promise<void>;
   updateArticle: (tagId: string, tagName: string) => Promise<void>;
   deleteArticle: (tagId: string) => Promise<void>;
+  fetchVersions: (tagId: string) => Promise<void>;
+  selectVersion: (versionId: string) => Promise<void>;
+  clearSelectedVersion: () => void;
   clearArticle: () => void;
   clearError: () => void;
   reset: () => void;
@@ -134,6 +158,8 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
   articleStatus: null,
   relatedTags: [],
   wikiLinks: [],
+  versions: [],
+  selectedVersion: null,
   isLoading: false,
   isGenerating: false,
   isUpdating: false,
@@ -171,6 +197,8 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
       articleStatus: null,
       relatedTags: [],
       wikiLinks: [],
+      versions: [],
+      selectedVersion: null,
       error: null,
     });
   },
@@ -184,14 +212,17 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
       articleStatus: null,
       relatedTags: [],
       wikiLinks: [],
+      versions: [],
+      selectedVersion: null,
       isLoading: true,
       error: null,
     });
-    // Fetch article, status, related tags, and wiki links
+    // Fetch article, status, related tags, wiki links, and versions
     get().fetchArticle(tagId);
     get().fetchArticleStatus(tagId);
     get().fetchRelatedTags(tagId);
     get().fetchWikiLinks(tagId);
+    get().fetchVersions(tagId);
   },
 
   // Open article view and immediately start generating (for new wikis)
@@ -204,6 +235,8 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
       articleStatus: null,
       relatedTags: [],
       wikiLinks: [],
+      versions: [],
+      selectedVersion: null,
       isLoading: false,
       isGenerating: true,
       error: null,
@@ -223,6 +256,8 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
       articleStatus: null,
       relatedTags: [],
       wikiLinks: [],
+      versions: [],
+      selectedVersion: null,
       error: null,
     });
     // Refresh list in case changes were made
@@ -267,14 +302,15 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
   },
 
   generateArticle: async (tagId: string, tagName: string) => {
-    set({ isGenerating: true, error: null });
+    set({ isGenerating: true, error: null, selectedVersion: null });
     try {
       const article = await getTransport().invoke<WikiArticleWithCitations>('generate_wiki_article', { tagId, tagName });
       set({ currentArticle: article, isGenerating: false });
-      // Refresh status, related tags, and wiki links after generation
+      // Refresh status, related tags, wiki links, and versions after generation
       get().fetchArticleStatus(tagId);
       get().fetchRelatedTags(tagId);
       get().fetchWikiLinks(tagId);
+      get().fetchVersions(tagId);
       // Also refresh the list to include the new article
       get().fetchAllArticles();
     } catch (error) {
@@ -283,14 +319,15 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
   },
 
   updateArticle: async (tagId: string, tagName: string) => {
-    set({ isUpdating: true, error: null });
+    set({ isUpdating: true, error: null, selectedVersion: null });
     try {
       const article = await getTransport().invoke<WikiArticleWithCitations>('update_wiki_article', { tagId, tagName });
       set({ currentArticle: article, isUpdating: false });
-      // Refresh status, related tags, and wiki links after update
+      // Refresh status, related tags, wiki links, and versions after update
       get().fetchArticleStatus(tagId);
       get().fetchRelatedTags(tagId);
       get().fetchWikiLinks(tagId);
+      get().fetchVersions(tagId);
       // Also refresh the list
       get().fetchAllArticles();
     } catch (error) {
@@ -301,7 +338,7 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
   deleteArticle: async (tagId: string) => {
     try {
       await getTransport().invoke('delete_wiki_article', { tagId });
-      set({ currentArticle: null, articleStatus: null, relatedTags: [], wikiLinks: [] });
+      set({ currentArticle: null, articleStatus: null, relatedTags: [], wikiLinks: [], versions: [], selectedVersion: null });
       // Refresh the list
       get().fetchAllArticles();
     } catch (error) {
@@ -309,8 +346,30 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
     }
   },
 
+  fetchVersions: async (tagId: string) => {
+    try {
+      const versions = await getTransport().invoke<WikiVersionSummary[]>('get_wiki_versions', { tagId });
+      set({ versions });
+    } catch (error) {
+      console.error('Failed to fetch wiki versions:', error);
+    }
+  },
+
+  selectVersion: async (versionId: string) => {
+    try {
+      const version = await getTransport().invoke<WikiArticleVersion | null>('get_wiki_version', { versionId });
+      set({ selectedVersion: version });
+    } catch (error) {
+      console.error('Failed to fetch wiki version:', error);
+    }
+  },
+
+  clearSelectedVersion: () => {
+    set({ selectedVersion: null });
+  },
+
   clearArticle: () => {
-    set({ currentArticle: null, articleStatus: null, relatedTags: [], wikiLinks: [], error: null });
+    set({ currentArticle: null, articleStatus: null, relatedTags: [], wikiLinks: [], versions: [], selectedVersion: null, error: null });
   },
 
   clearError: () => {
@@ -330,6 +389,8 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
       articleStatus: null,
       relatedTags: [],
       wikiLinks: [],
+      versions: [],
+      selectedVersion: null,
       isLoading: false,
       isGenerating: false,
       isUpdating: false,

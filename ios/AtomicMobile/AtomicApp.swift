@@ -35,6 +35,8 @@ struct SetupView: View {
     @State private var tokenInput = ""
     @State private var isTesting = false
     @State private var testError: String?
+    @State private var showQRScanner = false
+    @State private var scannedPayload: QRPayload?
 
     var body: some View {
         ZStack {
@@ -50,6 +52,37 @@ struct SetupView: View {
                         .font(.subheadline)
                         .foregroundStyle(Theme.textSecondary)
                 }
+
+                // QR Code scan button
+                Button {
+                    showQRScanner = true
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "qrcode.viewfinder")
+                            .font(.title2)
+                        Text("Scan QR Code")
+                            .fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                }
+                .background(Theme.accent, in: RoundedRectangle(cornerRadius: 12))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 24)
+
+                // Divider
+                HStack(spacing: 12) {
+                    Rectangle()
+                        .fill(Theme.textSecondary.opacity(0.3))
+                        .frame(height: 1)
+                    Text("or enter manually")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                    Rectangle()
+                        .fill(Theme.textSecondary.opacity(0.3))
+                        .frame(height: 1)
+                }
+                .padding(.horizontal, 24)
 
                 VStack(spacing: 16) {
                     VStack(alignment: .leading, spacing: 6) {
@@ -103,8 +136,8 @@ struct SetupView: View {
                             .padding(.vertical, 14)
                     }
                 }
-                .background(Theme.accent, in: RoundedRectangle(cornerRadius: 12))
-                .foregroundStyle(.white)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
+                .foregroundStyle(Theme.textPrimary)
                 .padding(.horizontal, 24)
                 .disabled(urlInput.isEmpty || tokenInput.isEmpty || isTesting)
             }
@@ -113,6 +146,17 @@ struct SetupView: View {
         .onAppear {
             urlInput = serverURL
             tokenInput = apiToken
+        }
+        .sheet(isPresented: $showQRScanner) {
+            QRScannerView(scannedPayload: $scannedPayload)
+        }
+        .onChange(of: scannedPayload?.url) {
+            if let payload = scannedPayload {
+                urlInput = payload.url
+                tokenInput = payload.token
+                scannedPayload = nil
+                Task { await connect() }
+            }
         }
     }
 

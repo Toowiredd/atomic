@@ -69,6 +69,18 @@ pub trait LlmProvider: Send + Sync {
         messages: &[Message],
         config: &LlmConfig,
     ) -> Result<CompletionResponse, ProviderError>;
+
+    /// Generate a completion with tool definitions (non-streaming).
+    /// Default implementation ignores tools and falls back to `complete()`.
+    async fn complete_with_tools(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        config: &LlmConfig,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let _ = tools;
+        self.complete(messages, config).await
+    }
 }
 
 /// Callback type for streaming deltas

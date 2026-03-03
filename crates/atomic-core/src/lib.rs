@@ -1096,6 +1096,46 @@ impl AtomicCore {
 
     // ==================== Wiki Operations ====================
 
+    /// Build a WikiStrategyContext from current settings
+    fn build_wiki_strategy_context(
+        &self,
+        tag_id: &str,
+        tag_name: &str,
+    ) -> Result<(wiki::WikiStrategy, wiki::WikiStrategyContext), AtomicCoreError> {
+        const MAX_CROSS_LINK_TAGS: usize = 50;
+        let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        let settings_map = settings::get_all_settings(&conn)?;
+        let config = ProviderConfig::from_settings(&settings_map);
+        let model = match config.provider_type {
+            ProviderType::Ollama => config.llm_model().to_string(),
+            ProviderType::OpenRouter => settings_map
+                .get("wiki_model")
+                .cloned()
+                .unwrap_or_else(|| "anthropic/claude-sonnet-4.5".to_string()),
+        };
+        let strategy = wiki::WikiStrategy::from_string(
+            settings_map.get("wiki_strategy").map(|s| s.as_str()).unwrap_or("centroid"),
+        );
+        let related = wiki::get_related_tags(&conn, tag_id, MAX_CROSS_LINK_TAGS)
+            .unwrap_or_default();
+        let linkable_article_names: Vec<(String, String)> = related
+            .into_iter()
+            .filter(|t| t.has_article)
+            .map(|t| (t.tag_id, t.tag_name))
+            .collect();
+        eprintln!("[wiki] Strategy: {:?}, model: {}, cross-link articles: {}", strategy, model, linkable_article_names.len());
+
+        let ctx = wiki::WikiStrategyContext {
+            db: std::sync::Arc::clone(&self.db),
+            provider_config: config,
+            wiki_model: model,
+            tag_id: tag_id.to_string(),
+            tag_name: tag_name.to_string(),
+            linkable_article_names,
+        };
+        Ok((strategy, ctx))
+    }
+
     /// Generate a wiki article for a tag
     pub async fn generate_wiki(
         &self,
@@ -1104,50 +1144,17 @@ impl AtomicCore {
     ) -> Result<WikiArticleWithCitations, AtomicCoreError> {
         eprintln!("[wiki] === Generating article for '{}' (tag_id={}) ===", tag_name, tag_id);
 
-        // Get settings and related tags with existing articles for cross-linking
-        const MAX_CROSS_LINK_TAGS: usize = 50;
-        let (provider_config, wiki_model, linkable_article_names) = {
-            let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
-            let settings_map = settings::get_all_settings(&conn)?;
-            let config = ProviderConfig::from_settings(&settings_map);
-            let model = settings_map
-                .get("wiki_model")
-                .cloned()
-                .unwrap_or_else(|| "anthropic/claude-sonnet-4.5".to_string());
-            let related = wiki::get_related_tags(&conn, tag_id, MAX_CROSS_LINK_TAGS)
-                .unwrap_or_default();
-            let article_names: Vec<(String, String)> = related
-                .into_iter()
-                .filter(|t| t.has_article)
-                .map(|t| (t.tag_id, t.tag_name))
-                .collect();
-            eprintln!("[wiki] Model: {}, related articles for cross-linking: {}", model, article_names.len());
-            (config, model, article_names)
-        };
+        let (strategy, ctx) = self.build_wiki_strategy_context(tag_id, tag_name)?;
 
-        // Prepare sources using centroid similarity
-        eprintln!("[wiki] Preparing sources (centroid similarity)...");
-        let input = wiki::prepare_wiki_generation(&self.db, &provider_config, tag_id, tag_name)
+        let result = wiki::strategy_generate(&strategy, &ctx)
             .await
             .map_err(|e| AtomicCoreError::Wiki(e))?;
-        eprintln!("[wiki] Found {} chunks from {} atoms", input.chunks.len(), input.atom_count);
-
-        // Generate content with cross-linking context
-        eprintln!("[wiki] Calling LLM...");
-        let result = wiki::generate_wiki_content(
-            &provider_config,
-            &input,
-            &wiki_model,
-            &linkable_article_names,
-        )
-        .await
-        .map_err(|e| AtomicCoreError::Wiki(e))?;
 
         // Extract wiki links from generated content
         let wiki_links = wiki::extract_wiki_links(
             &result.article.id,
             &result.article.content,
-            &linkable_article_names,
+            &ctx.linkable_article_names,
         );
         eprintln!("[wiki] Extracted {} wiki links, {} citations", wiki_links.len(), result.citations.len());
 
@@ -1159,6 +1166,47 @@ impl AtomicCore {
         }
 
         eprintln!("[wiki] === Article saved successfully ===");
+        Ok(result)
+    }
+
+    /// Update an existing wiki article with new content
+    pub async fn update_wiki(
+        &self,
+        tag_id: &str,
+        tag_name: &str,
+    ) -> Result<WikiArticleWithCitations, AtomicCoreError> {
+        eprintln!("[wiki] === Updating article for '{}' (tag_id={}) ===", tag_name, tag_id);
+
+        let existing = self.get_wiki(tag_id)?
+            .ok_or_else(|| AtomicCoreError::Wiki("No existing article to update".to_string()))?;
+
+        let (strategy, ctx) = self.build_wiki_strategy_context(tag_id, tag_name)?;
+
+        let result = wiki::strategy_update(&strategy, &ctx, &existing)
+            .await
+            .map_err(|e| AtomicCoreError::Wiki(e))?;
+
+        // If no update needed, return existing article
+        let result = match result {
+            Some(r) => r,
+            None => return Ok(existing),
+        };
+
+        // Extract wiki links from updated content
+        let wiki_links = wiki::extract_wiki_links(
+            &result.article.id,
+            &result.article.content,
+            &ctx.linkable_article_names,
+        );
+
+        // Save to database
+        {
+            let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+            wiki::save_wiki_article(&conn, &result.article, &result.citations, &wiki_links)
+                .map_err(|e| AtomicCoreError::Wiki(e))?;
+        }
+
+        eprintln!("[wiki] === Article updated successfully ===");
         Ok(result)
     }
 
@@ -1190,6 +1238,18 @@ impl AtomicCore {
     pub fn get_wiki_links(&self, tag_id: &str) -> Result<Vec<WikiLink>, AtomicCoreError> {
         let conn = self.db.read_conn()?;
         wiki::load_wiki_links(&conn, tag_id).map_err(|e| AtomicCoreError::Wiki(e))
+    }
+
+    /// List version history for a wiki article
+    pub fn list_wiki_versions(&self, tag_id: &str) -> Result<Vec<WikiVersionSummary>, AtomicCoreError> {
+        let conn = self.db.read_conn()?;
+        wiki::list_wiki_versions(&conn, tag_id).map_err(|e| AtomicCoreError::Wiki(e))
+    }
+
+    /// Get a specific wiki article version
+    pub fn get_wiki_version(&self, version_id: &str) -> Result<Option<WikiArticleVersion>, AtomicCoreError> {
+        let conn = self.db.read_conn()?;
+        wiki::get_wiki_version(&conn, version_id).map_err(|e| AtomicCoreError::Wiki(e))
     }
 
     // ==================== Embedding Management ====================

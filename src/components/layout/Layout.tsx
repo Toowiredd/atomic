@@ -4,6 +4,7 @@ import { MainView } from './MainView';
 import { RightDrawer } from './RightDrawer';
 import { LoadingIndicator } from '../ui/LoadingIndicator';
 import { SettingsModal } from '../settings/SettingsModal';
+import { OnboardingWizard } from '../onboarding';
 import { CommandPalette } from '../command-palette';
 import { useAtomsStore } from '../../stores/atoms';
 import { useTagsStore } from '../../stores/tags';
@@ -127,15 +128,11 @@ export function Layout() {
     );
   }
 
-  // Show setup modal if required
+  // Show onboarding wizard if setup is required
   if (isSetupRequired) {
     return (
       <div className={`flex h-screen overflow-hidden bg-[var(--color-bg-main)] ${isTauri() ? 'pt-[28px]' : ''}`}>
-        <SettingsModal
-          isOpen={true}
-          onClose={handleSetupComplete}
-          isSetupMode={true}
-        />
+        <OnboardingWizard onComplete={handleSetupComplete} />
       </div>
     );
   }

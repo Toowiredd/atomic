@@ -200,6 +200,14 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'GET',
     path: (a) => `/api/wiki/suggestions?limit=${a.limit ?? 10}`,
   },
+  get_wiki_versions: {
+    method: 'GET',
+    path: (a) => `/api/wiki/${encodeURIComponent(a.tagId as string)}/versions`,
+  },
+  get_wiki_version: {
+    method: 'GET',
+    path: (a) => `/api/wiki/versions/${encodeURIComponent(a.versionId as string)}`,
+  },
   recompute_all_tag_embeddings: {
     method: 'POST',
     path: '/api/wiki/recompute-tag-embeddings',

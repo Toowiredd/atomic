@@ -233,6 +233,15 @@ pub async fn complete(
     complete_internal(provider, messages, &[], config, false).await
 }
 
+pub async fn complete_with_tools(
+    provider: &OpenRouterProvider,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    config: &LlmConfig,
+) -> Result<CompletionResponse, ProviderError> {
+    complete_internal(provider, messages, tools, config, false).await
+}
+
 async fn complete_internal(
     provider: &OpenRouterProvider,
     messages: &[Message],

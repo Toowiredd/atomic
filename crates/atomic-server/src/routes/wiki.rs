@@ -56,103 +56,9 @@ pub async fn update_wiki(
     body: web::Json<GenerateWikiBody>,
 ) -> HttpResponse {
     let tag_id = path.into_inner();
-
-    const MAX_CROSS_LINK_TAGS: usize = 50;
-    let db = state.core.database();
-    let (provider_config, wiki_model, existing, update_input, linkable_article_names) = {
-        let conn = match db.conn.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return HttpResponse::InternalServerError()
-                    .json(serde_json::json!({"error": e.to_string()}));
-            }
-        };
-        let settings_map = match atomic_core::settings::get_all_settings(&conn) {
-            Ok(s) => s,
-            Err(e) => {
-                return HttpResponse::InternalServerError()
-                    .json(serde_json::json!({"error": e.to_string()}));
-            }
-        };
-        let provider_config = atomic_core::ProviderConfig::from_settings(&settings_map);
-        let wiki_model = match provider_config.provider_type {
-            atomic_core::ProviderType::Ollama => provider_config.llm_model().to_string(),
-            atomic_core::ProviderType::OpenRouter => settings_map
-                .get("wiki_model")
-                .cloned()
-                .unwrap_or_else(|| "anthropic/claude-sonnet-4.5".to_string()),
-        };
-        let existing = match atomic_core::wiki::load_wiki_article(&conn, &tag_id) {
-            Ok(e) => e,
-            Err(e) => {
-                return HttpResponse::InternalServerError()
-                    .json(serde_json::json!({"error": e}));
-            }
-        };
-        let update_input = if let Some(ref ex) = existing {
-            match atomic_core::wiki::prepare_wiki_update(
-                &conn,
-                &tag_id,
-                &body.tag_name,
-                &ex.article,
-                &ex.citations,
-            ) {
-                Ok(input) => input,
-                Err(e) => {
-                    return HttpResponse::InternalServerError()
-                        .json(serde_json::json!({"error": e}));
-                }
-            }
-        } else {
-            None
-        };
-        let related = atomic_core::wiki::get_related_tags(&conn, &tag_id, MAX_CROSS_LINK_TAGS)
-            .unwrap_or_default();
-        let article_names: Vec<(String, String)> = related
-            .into_iter()
-            .filter(|t| t.has_article)
-            .map(|t| (t.tag_id, t.tag_name))
-            .collect();
-        (provider_config, wiki_model, existing, update_input, article_names)
-    };
-
-    let existing = match existing {
-        Some(e) => e,
-        None => {
-            return HttpResponse::NotFound()
-                .json(serde_json::json!({"error": "No existing article to update"}));
-        }
-    };
-
-    let input = match update_input {
-        Some(input) => input,
-        None => return HttpResponse::Ok().json(existing),
-    };
-
-    match atomic_core::wiki::update_wiki_content(&provider_config, &input, &wiki_model, &linkable_article_names).await {
-        Ok(result) => {
-            let wiki_links = atomic_core::wiki::extract_wiki_links(
-                &result.article.id,
-                &result.article.content,
-                &linkable_article_names,
-            );
-            let conn = match db.conn.lock() {
-                Ok(c) => c,
-                Err(e) => {
-                    return HttpResponse::InternalServerError()
-                        .json(serde_json::json!({"error": e.to_string()}));
-                }
-            };
-            if let Err(e) =
-                atomic_core::wiki::save_wiki_article(&conn, &result.article, &result.citations, &wiki_links)
-            {
-                return HttpResponse::InternalServerError()
-                    .json(serde_json::json!({"error": e}));
-            }
-            HttpResponse::Ok().json(result)
-        }
-        Err(e) => HttpResponse::InternalServerError()
-            .json(serde_json::json!({"error": e})),
+    match state.core.update_wiki(&tag_id, &body.tag_name).await {
+        Ok(article) => HttpResponse::Ok().json(article),
+        Err(e) => crate::error::error_response(e),
     }
 }
 
@@ -196,6 +102,18 @@ pub async fn get_wiki_suggestions(
     let limit = query.limit.unwrap_or(10);
     let core = state.core.clone();
     blocking_ok(move || core.get_suggested_wiki_articles(limit)).await
+}
+
+pub async fn list_wiki_versions(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    let tag_id = path.into_inner();
+    let core = state.core.clone();
+    blocking_ok(move || core.list_wiki_versions(&tag_id)).await
+}
+
+pub async fn get_wiki_version(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    let version_id = path.into_inner();
+    let core = state.core.clone();
+    blocking_ok(move || core.get_wiki_version(&version_id)).await
 }
 
 pub async fn recompute_all_tag_embeddings(state: web::Data<AppState>) -> HttpResponse {

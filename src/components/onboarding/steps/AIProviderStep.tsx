@@ -1,0 +1,258 @@
+import { useEffect, useCallback } from 'react';
+import { Button } from '../../ui/Button';
+import { CustomSelect } from '../../ui/CustomSelect';
+import { SearchableSelect } from '../../ui/SearchableSelect';
+import { ConnectionStatus } from '../../ui/ConnectionStatus';
+import { useSettingsStore } from '../../../stores/settings';
+import {
+  getAvailableLlmModels,
+  testOllamaConnection,
+  getOllamaModels,
+  type AvailableModel,
+} from '../../../lib/api';
+import type { OnboardingState, OnboardingAction } from '../useOnboardingState';
+
+interface AIProviderStepProps {
+  state: OnboardingState;
+  dispatch: React.Dispatch<OnboardingAction>;
+}
+
+export function AIProviderStep({ state, dispatch }: AIProviderStepProps) {
+  const testOpenRouterConnection = useSettingsStore(s => s.testOpenRouterConnection);
+
+  // Load OpenRouter models when provider is openrouter and we have a key
+  useEffect(() => {
+    if (state.provider === 'openrouter' && state.testResult === 'success' && state.availableModels.length === 0) {
+      dispatch({ type: 'SET_LOADING_MODELS', value: true });
+      getAvailableLlmModels()
+        .then(models => dispatch({ type: 'SET_AVAILABLE_MODELS', models }))
+        .catch(err => console.error('Failed to load models:', err))
+        .finally(() => dispatch({ type: 'SET_LOADING_MODELS', value: false }));
+    }
+  }, [state.provider, state.testResult, state.availableModels.length, dispatch]);
+
+  // Check Ollama connection when provider is ollama
+  const checkOllamaConnection = useCallback(async (host: string) => {
+    dispatch({ type: 'SET_OLLAMA_STATUS', status: 'checking' });
+    try {
+      const connected = await testOllamaConnection(host);
+      if (connected) {
+        dispatch({ type: 'SET_OLLAMA_STATUS', status: 'connected' });
+        dispatch({ type: 'SET_LOADING_OLLAMA_MODELS', value: true });
+        const models = await getOllamaModels(host);
+        dispatch({ type: 'SET_OLLAMA_MODELS', models });
+        dispatch({ type: 'SET_LOADING_OLLAMA_MODELS', value: false });
+      } else {
+        dispatch({ type: 'SET_OLLAMA_STATUS', status: 'disconnected', error: 'Could not connect to Ollama' });
+      }
+    } catch (e) {
+      dispatch({ type: 'SET_OLLAMA_STATUS', status: 'disconnected', error: String(e) });
+      dispatch({ type: 'SET_LOADING_OLLAMA_MODELS', value: false });
+    }
+  }, [dispatch]);
+
+  useEffect(() => {
+    if (state.provider === 'ollama') {
+      checkOllamaConnection(state.ollamaHost);
+    }
+  }, [state.provider, state.ollamaHost, checkOllamaConnection]);
+
+  const handleTestConnection = async () => {
+    if (!state.apiKey.trim()) return;
+    dispatch({ type: 'SET_TESTING', value: true });
+    dispatch({ type: 'SET_TEST_RESULT', result: null });
+    try {
+      await testOpenRouterConnection(state.apiKey);
+      dispatch({ type: 'SET_TEST_RESULT', result: 'success' });
+    } catch (e) {
+      dispatch({ type: 'SET_TEST_RESULT', result: 'error', error: String(e) });
+    } finally {
+      dispatch({ type: 'SET_TESTING', value: false });
+    }
+  };
+
+  // Ollama model lists
+  const ollamaEmbeddingModels: AvailableModel[] = state.ollamaModels
+    .filter(m => m.is_embedding)
+    .map(m => ({ id: m.id, name: m.name }));
+
+  const ollamaLlmModels: AvailableModel[] = state.ollamaModels
+    .filter(m => !m.is_embedding)
+    .map(m => ({ id: m.id, name: m.name }));
+
+  return (
+    <div className="space-y-5 px-2">
+      <div className="text-center mb-4">
+        <h2 className="text-xl font-bold text-[var(--color-text-primary)] mb-1">AI Provider</h2>
+        <p className="text-sm text-[var(--color-text-secondary)]">
+          Choose between cloud (OpenRouter) or local (Ollama) AI models
+        </p>
+      </div>
+
+      {/* Provider selector */}
+      <div className="space-y-2">
+        <label className="block text-sm font-medium text-[var(--color-text-primary)]">Provider</label>
+        <CustomSelect
+          value={state.provider}
+          onChange={(v) => dispatch({ type: 'SET_PROVIDER', value: v as 'openrouter' | 'ollama' })}
+          options={[
+            { value: 'openrouter', label: 'OpenRouter (Cloud)' },
+            { value: 'ollama', label: 'Ollama (Local)' },
+          ]}
+        />
+      </div>
+
+      {state.provider === 'openrouter' ? (
+        <>
+          {/* API Key */}
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-[var(--color-text-primary)]">API Key</label>
+            <div className="flex gap-2">
+              <input
+                type="password"
+                value={state.apiKey}
+                onChange={(e) => dispatch({ type: 'SET_API_KEY', value: e.target.value })}
+                placeholder="sk-or-..."
+                className="flex-1 px-3 py-2 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-md text-[var(--color-text-primary)] placeholder-[var(--color-text-secondary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] focus:border-transparent transition-colors duration-150 text-sm"
+              />
+              <Button variant="secondary" onClick={handleTestConnection} disabled={!state.apiKey.trim() || state.isTesting}>
+                {state.isTesting ? 'Testing...' : 'Test'}
+              </Button>
+            </div>
+            {state.testResult === 'success' && (
+              <p className="text-sm text-green-500">Connected successfully</p>
+            )}
+            {state.testResult === 'error' && (
+              <p className="text-sm text-red-500">{state.testError}</p>
+            )}
+            <p className="text-xs text-[var(--color-text-secondary)]">
+              Get an API key from <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-[var(--color-accent)] hover:underline">openrouter.ai/keys</a>
+            </p>
+          </div>
+
+          {/* Model configuration - only show after successful test */}
+          {state.testResult === 'success' && (
+            <div className="space-y-3 p-4 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-lg">
+              <h3 className="text-sm font-medium text-[var(--color-text-primary)]">Model Configuration</h3>
+
+              <div className="space-y-2">
+                <label className="block text-xs text-[var(--color-text-secondary)]">Embedding Model</label>
+                <CustomSelect
+                  value={state.embeddingModel}
+                  onChange={(v) => dispatch({ type: 'SET_EMBEDDING_MODEL', value: v })}
+                  options={[
+                    { value: 'openai/text-embedding-3-small', label: 'text-embedding-3-small (recommended)' },
+                    { value: 'openai/text-embedding-3-large', label: 'text-embedding-3-large' },
+                  ]}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-xs text-[var(--color-text-secondary)]">Tagging Model</label>
+                <SearchableSelect
+                  value={state.taggingModel}
+                  onChange={(v) => dispatch({ type: 'SET_TAGGING_MODEL', value: v })}
+                  options={state.availableModels}
+                  isLoading={state.isLoadingModels}
+                  placeholder="Select tagging model..."
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-xs text-[var(--color-text-secondary)]">Wiki Model</label>
+                <SearchableSelect
+                  value={state.wikiModel}
+                  onChange={(v) => dispatch({ type: 'SET_WIKI_MODEL', value: v })}
+                  options={state.availableModels}
+                  isLoading={state.isLoadingModels}
+                  placeholder="Select wiki model..."
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-xs text-[var(--color-text-secondary)]">Chat Model</label>
+                <SearchableSelect
+                  value={state.chatModel}
+                  onChange={(v) => dispatch({ type: 'SET_CHAT_MODEL', value: v })}
+                  options={state.availableModels}
+                  isLoading={state.isLoadingModels}
+                  placeholder="Select chat model..."
+                />
+              </div>
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          {/* Ollama configuration */}
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-[var(--color-text-primary)]">Ollama Server URL</label>
+            <input
+              type="text"
+              value={state.ollamaHost}
+              onChange={(e) => dispatch({ type: 'SET_OLLAMA_HOST', value: e.target.value })}
+              placeholder="http://127.0.0.1:11434"
+              className="w-full px-3 py-2 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-md text-[var(--color-text-primary)] placeholder-[var(--color-text-secondary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] focus:border-transparent transition-colors duration-150 text-sm"
+            />
+            <ConnectionStatus status={state.ollamaStatus} error={state.ollamaError} />
+          </div>
+
+          {state.ollamaStatus === 'connected' && (
+            <div className="space-y-3 p-4 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-lg">
+              <h3 className="text-sm font-medium text-[var(--color-text-primary)]">Model Configuration</h3>
+
+              <div className="space-y-2">
+                <label className="block text-xs text-[var(--color-text-secondary)]">Embedding Model</label>
+                <SearchableSelect
+                  value={state.embeddingModel}
+                  onChange={(v) => dispatch({ type: 'SET_EMBEDDING_MODEL', value: v })}
+                  options={ollamaEmbeddingModels}
+                  isLoading={state.isLoadingOllamaModels}
+                  placeholder="Select embedding model..."
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-xs text-[var(--color-text-secondary)]">LLM Model (tagging, wiki, chat)</label>
+                <SearchableSelect
+                  value={state.taggingModel}
+                  onChange={(v) => {
+                    dispatch({ type: 'SET_TAGGING_MODEL', value: v });
+                    dispatch({ type: 'SET_WIKI_MODEL', value: v });
+                    dispatch({ type: 'SET_CHAT_MODEL', value: v });
+                  }}
+                  options={ollamaLlmModels}
+                  isLoading={state.isLoadingOllamaModels}
+                  placeholder="Select LLM model..."
+                />
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Auto-tagging toggle */}
+      <div className="flex items-center justify-between p-3 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-lg">
+        <div>
+          <p className="text-sm font-medium text-[var(--color-text-primary)]">Automatic Tag Extraction</p>
+          <p className="text-xs text-[var(--color-text-secondary)]">Use AI to automatically extract and assign tags to new atoms</p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={state.autoTaggingEnabled}
+          onClick={() => dispatch({ type: 'SET_AUTO_TAGGING', value: !state.autoTaggingEnabled })}
+          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+            state.autoTaggingEnabled ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-bg-hover)]'
+          }`}
+        >
+          <span
+            className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+              state.autoTaggingEnabled ? 'translate-x-5' : 'translate-x-0'
+            }`}
+          />
+        </button>
+      </div>
+    </div>
+  );
+}

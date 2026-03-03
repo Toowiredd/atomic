@@ -18,6 +18,7 @@ pub const DEFAULT_SETTINGS: &[(&str, &str)] = &[
     ("embedding_model", "openai/text-embedding-3-small"),
     ("tagging_model", "openai/gpt-4o-mini"),
     ("wiki_model", "anthropic/claude-sonnet-4.5"),
+    ("wiki_strategy", "centroid"),
     ("chat_model", "anthropic/claude-sonnet-4.5"),
     ("auto_tagging_enabled", "true"),
 ];

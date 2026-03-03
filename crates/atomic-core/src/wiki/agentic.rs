@@ -1,0 +1,566 @@
+//! Agentic wiki generation strategy
+//!
+//! Uses an AI agent with search tools to curate source material,
+//! then synthesizes the article from the agent's selected chunks.
+
+use crate::chunking::count_tokens;
+use crate::db::Database;
+use crate::models::{ChunkWithContext, WikiArticleWithCitations};
+use crate::providers::types::{CompletionResponse, Message, ToolDefinition};
+use crate::providers::{get_llm_provider, LlmConfig};
+use crate::search::{search_chunks, ChunkResult, SearchMode, SearchOptions};
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use super::{
+    count_atoms_with_tags, get_tag_hierarchy, synthesize_article, WikiStrategyContext,
+    MAX_WIKI_SOURCE_TOKENS,
+};
+
+// ==================== Constants ====================
+
+const MAX_RESEARCH_ITERATIONS: usize = 15;
+const DEFAULT_SEARCH_LIMIT: i32 = 15;
+
+// ==================== Research State ====================
+
+struct ResearchContext {
+    /// All chunks returned by searches, indexed by position (session ID = C{index+1})
+    returned_chunks: Vec<ChunkResult>,
+    /// Set of chunk_ids already returned (for filtering future searches)
+    seen_chunk_ids: HashSet<String>,
+    /// Indices into returned_chunks that the agent selected
+    selected_indices: HashSet<usize>,
+    /// Conversation messages for the agent
+    messages: Vec<Message>,
+    /// Running token count of selected chunks
+    selected_tokens: usize,
+}
+
+impl ResearchContext {
+    fn new(system_prompt: String, user_prompt: String) -> Self {
+        Self {
+            returned_chunks: Vec::new(),
+            seen_chunk_ids: HashSet::new(),
+            selected_indices: HashSet::new(),
+            messages: vec![
+                Message::system(system_prompt),
+                Message::user(user_prompt),
+            ],
+            selected_tokens: 0,
+        }
+    }
+
+    /// Get the selected chunks as ChunkWithContext for synthesis
+    fn selected_chunks(&self) -> Vec<ChunkWithContext> {
+        let mut chunks: Vec<(usize, ChunkWithContext)> = self
+            .selected_indices
+            .iter()
+            .filter_map(|&idx| {
+                self.returned_chunks.get(idx).map(|cr| {
+                    (
+                        idx,
+                        ChunkWithContext {
+                            atom_id: cr.atom_id.clone(),
+                            chunk_index: cr.chunk_index,
+                            content: cr.content.clone(),
+                            similarity_score: cr.score,
+                        },
+                    )
+                })
+            })
+            .collect();
+        // Sort by selection order (index in returned_chunks)
+        chunks.sort_by_key(|(idx, _)| *idx);
+        chunks.into_iter().map(|(_, c)| c).collect()
+    }
+}
+
+// ==================== Tool Definitions ====================
+
+fn research_tools() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition::new(
+            "search",
+            "Search the knowledge base for chunks relevant to the wiki article. \
+             Use diverse queries to explore different facets of the topic. \
+             Returns chunks with session IDs (C1, C2, ...) that you can select.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query to find relevant content"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results to return (default: 15, max: 30)",
+                        "default": 15
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        ),
+        ToolDefinition::new(
+            "select",
+            "Select specific chunks by their session IDs to include as source material. \
+             Only select chunks that contain substantive, citable information for the article.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "chunk_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Session IDs of chunks to select, e.g. [\"C1\", \"C4\", \"C7\"]"
+                    }
+                },
+                "required": ["chunk_ids"],
+                "additionalProperties": false
+            }),
+        ),
+        ToolDefinition::new(
+            "done",
+            "Signal that research is complete. Call this when you have gathered \
+             comprehensive source material for the article.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        ),
+    ]
+}
+
+// ==================== Tool Handlers ====================
+
+async fn handle_search(
+    rc: &mut ResearchContext,
+    db: &Database,
+    scope_tag_ids: &[String],
+    args: &serde_json::Value,
+) -> String {
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(DEFAULT_SEARCH_LIMIT as i64)
+        .min(30) as i32;
+
+    if query.is_empty() {
+        return "Error: query is required".to_string();
+    }
+
+    eprintln!("[wiki/agentic] search(\"{}\" limit={})", query, limit);
+
+    let options = SearchOptions::new(&query, SearchMode::Hybrid, limit)
+        .with_scope(scope_tag_ids.to_vec());
+
+    let results = match search_chunks(db, options).await {
+        Ok(r) => r,
+        Err(e) => return format!("Search error: {}", e),
+    };
+
+    // Filter out already-seen chunks
+    let new_results: Vec<ChunkResult> = results
+        .into_iter()
+        .filter(|r| !rc.seen_chunk_ids.contains(&r.chunk_id))
+        .collect();
+
+    if new_results.is_empty() {
+        eprintln!("[wiki/agentic]   → 0 new results");
+        return "No new results found for this query.".to_string();
+    }
+
+    let start_idx = rc.returned_chunks.len();
+    eprintln!("[wiki/agentic]   → {} new results (C{}–C{})", new_results.len(), start_idx + 1, start_idx + new_results.len());
+    let mut output = String::new();
+
+    for (i, chunk) in new_results.into_iter().enumerate() {
+        let session_id = format!("C{}", start_idx + i + 1);
+        output.push_str(&format!(
+            "{} (score: {:.2}, atom: {})\n{}\n\n",
+            session_id,
+            chunk.score,
+            &chunk.atom_id[..8.min(chunk.atom_id.len())],
+            chunk.content
+        ));
+        rc.seen_chunk_ids.insert(chunk.chunk_id.clone());
+        rc.returned_chunks.push(chunk);
+    }
+
+    output
+}
+
+fn handle_select(rc: &mut ResearchContext, args: &serde_json::Value) -> String {
+    let chunk_ids = match args.get("chunk_ids").and_then(|v| v.as_array()) {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+        None => return "Error: chunk_ids array is required".to_string(),
+    };
+
+    if chunk_ids.is_empty() {
+        return "Error: chunk_ids must not be empty".to_string();
+    }
+
+    eprintln!("[wiki/agentic] select({})", chunk_ids.join(", "));
+
+    let mut newly_selected = 0;
+    let mut errors = Vec::new();
+
+    for id_str in &chunk_ids {
+        // Parse "C3" → index 2
+        let idx = match id_str
+            .strip_prefix('C')
+            .or_else(|| id_str.strip_prefix('c'))
+            .and_then(|n| n.parse::<usize>().ok())
+        {
+            Some(n) if n >= 1 && n <= rc.returned_chunks.len() => n - 1,
+            _ => {
+                errors.push(format!("{} is not a valid session ID", id_str));
+                continue;
+            }
+        };
+
+        if rc.selected_indices.contains(&idx) {
+            continue; // Already selected, skip silently
+        }
+
+        let tokens = count_tokens(&rc.returned_chunks[idx].content);
+        rc.selected_indices.insert(idx);
+        rc.selected_tokens += tokens;
+        newly_selected += 1;
+    }
+
+    let mut msg = format!(
+        "Selected {} new chunks (total selected: {}, ~{} tokens)",
+        newly_selected,
+        rc.selected_indices.len(),
+        rc.selected_tokens
+    );
+
+    if !errors.is_empty() {
+        msg.push_str(&format!("\nWarnings: {}", errors.join("; ")));
+    }
+
+    if rc.selected_tokens > MAX_WIKI_SOURCE_TOKENS {
+        msg.push_str(&format!(
+            "\nNote: selected tokens ({}) exceed budget ({}). Consider being more selective.",
+            rc.selected_tokens, MAX_WIKI_SOURCE_TOKENS
+        ));
+    }
+
+    msg
+}
+
+fn handle_done(rc: &ResearchContext) -> String {
+    format!(
+        "Research complete. Selected {} chunks (~{} tokens) from {} total returned.",
+        rc.selected_indices.len(),
+        rc.selected_tokens,
+        rc.returned_chunks.len()
+    )
+}
+
+// ==================== Research Loop ====================
+
+async fn run_research(
+    rc: &mut ResearchContext,
+    db: &Database,
+    scope_tag_ids: &[String],
+    provider_config: &crate::providers::ProviderConfig,
+    model: &str,
+) -> Result<(), String> {
+    let tools = research_tools();
+    let llm_config = LlmConfig::new(model);
+    let provider = get_llm_provider(provider_config).map_err(|e| e.to_string())?;
+
+    for iteration in 0..MAX_RESEARCH_ITERATIONS {
+        eprintln!(
+            "[wiki/agentic] Research iteration {}/{} ({} selected, ~{} tokens)",
+            iteration + 1,
+            MAX_RESEARCH_ITERATIONS,
+            rc.selected_indices.len(),
+            rc.selected_tokens
+        );
+
+        let response: CompletionResponse = provider
+            .complete_with_tools(&rc.messages, &tools, &llm_config)
+            .await
+            .map_err(|e| format!("Research LLM call failed: {}", e))?;
+
+        // Check for tool calls
+        let tool_calls = match response.tool_calls {
+            Some(ref tcs) if !tcs.is_empty() => tcs.clone(),
+            _ => {
+                // No tool calls — agent is done (or just sent text)
+                if !response.content.is_empty() {
+                    eprintln!("[wiki/agentic] Agent sent text without tools, ending research");
+                }
+                break;
+            }
+        };
+
+        // Add assistant message with tool calls
+        rc.messages.push(Message {
+            role: crate::providers::types::MessageRole::Assistant,
+            content: if response.content.is_empty() {
+                None
+            } else {
+                Some(response.content.clone())
+            },
+            tool_calls: Some(tool_calls.clone()),
+            tool_call_id: None,
+            name: None,
+        });
+
+        let mut research_done = false;
+
+        for tc in &tool_calls {
+            let name = tc.get_name().unwrap_or("");
+            let args: serde_json::Value = tc
+                .get_arguments()
+                .and_then(|a| serde_json::from_str(a).ok())
+                .unwrap_or(serde_json::json!({}));
+
+            let result = match name {
+                "search" => handle_search(rc, db, scope_tag_ids, &args).await,
+                "select" => handle_select(rc, &args),
+                "done" => {
+                    research_done = true;
+                    handle_done(rc)
+                }
+                _ => format!("Unknown tool: {}", name),
+            };
+
+            rc.messages
+                .push(Message::tool_result(tc.id.clone(), result));
+        }
+
+        if research_done {
+            eprintln!("[wiki/agentic] Agent called done, ending research");
+            break;
+        }
+
+        // Safety: stop if selected tokens exceed budget
+        if rc.selected_tokens > MAX_WIKI_SOURCE_TOKENS * 2 {
+            eprintln!(
+                "[wiki/agentic] Selected tokens ({}) far exceed budget, stopping research",
+                rc.selected_tokens
+            );
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+// ==================== Budget Enforcement ====================
+
+/// Trim selected chunks to fit within the token budget.
+/// Takes chunks in order (agent's selection order) until the budget is hit.
+fn trim_to_budget(chunks: Vec<ChunkWithContext>) -> Vec<ChunkWithContext> {
+    let mut total_tokens = 0;
+    let mut trimmed = Vec::new();
+    for chunk in chunks {
+        let tokens = count_tokens(&chunk.content);
+        if total_tokens + tokens > MAX_WIKI_SOURCE_TOKENS && !trimmed.is_empty() {
+            break;
+        }
+        total_tokens += tokens;
+        trimmed.push(chunk);
+    }
+    trimmed
+}
+
+// ==================== Research Prompts ====================
+
+fn research_system_prompt(tag_name: &str) -> String {
+    format!(
+        r#"You are a research agent curating source material for a wiki article about "{tag_name}".
+
+Your job is to search the knowledge base, review results, and select the best chunks to use as sources for the article. You have three tools:
+
+- **search(query, limit)**: Search for relevant content. Use diverse queries to explore different facets of the topic. Each search returns new results with session IDs (C1, C2, ...). Previously returned chunks are automatically filtered out.
+- **select(chunk_ids)**: Accept specific chunks as source material by their session IDs (e.g. ["C1", "C4", "C7"]). Only select chunks that contain substantive, citable information.
+- **done()**: Signal that you have gathered comprehensive source material.
+
+Guidelines:
+- Make at least 3-5 searches with different angles/queries to get broad coverage
+- Review each result critically — select only chunks with substantive, unique information
+- Skip chunks that are redundant, low-quality, vague, or off-topic
+- Aim for comprehensive coverage of the topic's key aspects
+- Call done() when you have sufficient material for a well-sourced article
+- You do NOT write the article — you only curate the sources"#
+    )
+}
+
+fn research_user_prompt_generate(tag_name: &str) -> String {
+    format!(
+        "Find and curate source material for a wiki article about \"{}\". \
+         Search for content covering different aspects of this topic, \
+         review the results, and select the best chunks.",
+        tag_name
+    )
+}
+
+fn research_user_prompt_update(tag_name: &str, existing_article: &str) -> String {
+    format!(
+        "Find and curate source material for updating the wiki article about \"{tag_name}\". \
+         The existing article is shown below — focus on finding NEW information, \
+         filling gaps, or correcting outdated content.\n\n\
+         EXISTING ARTICLE:\n{existing_article}\n\n\
+         Search for content that adds new perspectives or information not already covered."
+    )
+}
+
+// ==================== Public API ====================
+
+/// Generate a wiki article using the agentic research strategy.
+pub(crate) async fn generate(
+    ctx: &WikiStrategyContext,
+) -> Result<WikiArticleWithCitations, String> {
+    eprintln!("[wiki/agentic] Starting agentic research for \"{}\"...", ctx.tag_name);
+
+    // Get scope tag IDs and atom count
+    let (scope_tag_ids, atom_count) = {
+        let conn = ctx.db.conn.lock().map_err(|e| e.to_string())?;
+        let tag_ids = get_tag_hierarchy(&conn, &ctx.tag_id)?;
+        let count = count_atoms_with_tags(&conn, &tag_ids)?;
+        (tag_ids, count)
+    };
+
+    if atom_count == 0 {
+        return Err("No content found for this tag".to_string());
+    }
+
+    // Open a separate DB connection for async search
+    let search_db = Arc::new(
+        Database::open(&ctx.db.db_path)
+            .map_err(|e| format!("Failed to create search DB connection: {}", e))?,
+    );
+
+    // Run research
+    let mut rc = ResearchContext::new(
+        research_system_prompt(&ctx.tag_name),
+        research_user_prompt_generate(&ctx.tag_name),
+    );
+
+    run_research(
+        &mut rc,
+        &search_db,
+        &scope_tag_ids,
+        &ctx.provider_config,
+        &ctx.wiki_model,
+    )
+    .await?;
+
+    let raw_chunks = rc.selected_chunks();
+    eprintln!(
+        "[wiki/agentic] Research complete: {} chunks selected (~{} tokens)",
+        raw_chunks.len(),
+        rc.selected_tokens
+    );
+
+    if raw_chunks.is_empty() {
+        return Err("Agent did not select any source chunks".to_string());
+    }
+
+    let chunks = trim_to_budget(raw_chunks);
+    if chunks.len() < rc.selected_indices.len() {
+        eprintln!(
+            "[wiki/agentic] Trimmed to {} chunks to fit token budget",
+            chunks.len()
+        );
+    }
+
+    // Synthesize article from selected chunks
+    eprintln!("[wiki/agentic] Synthesizing article...");
+    synthesize_article(
+        &ctx.provider_config,
+        &ctx.tag_id,
+        &ctx.tag_name,
+        &chunks,
+        atom_count,
+        &ctx.wiki_model,
+        &ctx.linkable_article_names,
+    )
+    .await
+}
+
+/// Update an existing wiki article using the agentic research strategy.
+/// Re-runs full research with existing article as context, then full re-synthesis.
+pub(crate) async fn update(
+    ctx: &WikiStrategyContext,
+    existing: &WikiArticleWithCitations,
+) -> Result<Option<WikiArticleWithCitations>, String> {
+    eprintln!("[wiki/agentic] Starting agentic update for \"{}\"...", ctx.tag_name);
+
+    let (scope_tag_ids, atom_count) = {
+        let conn = ctx.db.conn.lock().map_err(|e| e.to_string())?;
+        let tag_ids = get_tag_hierarchy(&conn, &ctx.tag_id)?;
+        let count = count_atoms_with_tags(&conn, &tag_ids)?;
+        (tag_ids, count)
+    };
+
+    let search_db = Arc::new(
+        Database::open(&ctx.db.db_path)
+            .map_err(|e| format!("Failed to create search DB connection: {}", e))?,
+    );
+
+    let mut rc = ResearchContext::new(
+        research_system_prompt(&ctx.tag_name),
+        research_user_prompt_update(&ctx.tag_name, &existing.article.content),
+    );
+
+    run_research(
+        &mut rc,
+        &search_db,
+        &scope_tag_ids,
+        &ctx.provider_config,
+        &ctx.wiki_model,
+    )
+    .await?;
+
+    let raw_chunks = rc.selected_chunks();
+    eprintln!(
+        "[wiki/agentic] Update research complete: {} chunks selected (~{} tokens)",
+        raw_chunks.len(),
+        rc.selected_tokens
+    );
+
+    if raw_chunks.is_empty() {
+        eprintln!("[wiki/agentic] No chunks selected, no update needed");
+        return Ok(None);
+    }
+
+    let chunks = trim_to_budget(raw_chunks);
+    if chunks.len() < rc.selected_indices.len() {
+        eprintln!(
+            "[wiki/agentic] Trimmed to {} chunks to fit token budget",
+            chunks.len()
+        );
+    }
+
+    eprintln!("[wiki/agentic] Synthesizing updated article...");
+    let result = synthesize_article(
+        &ctx.provider_config,
+        &ctx.tag_id,
+        &ctx.tag_name,
+        &chunks,
+        atom_count,
+        &ctx.wiki_model,
+        &ctx.linkable_article_names,
+    )
+    .await?;
+
+    Ok(Some(result))
+}

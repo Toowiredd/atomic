@@ -27,6 +27,11 @@ export function WikiListViewer() {
   const reset = useWikiStore(s => s.reset);
   const clearError = useWikiStore(s => s.clearError);
 
+  const versions = useWikiStore(s => s.versions);
+  const selectedVersion = useWikiStore(s => s.selectedVersion);
+  const selectVersion = useWikiStore(s => s.selectVersion);
+  const clearSelectedVersion = useWikiStore(s => s.clearSelectedVersion);
+
   const closeDrawer = useUIStore(s => s.closeDrawer);
   const openDrawer = useUIStore(s => s.openDrawer);
   const initializedRef = useRef(false);
@@ -247,26 +252,38 @@ export function WikiListViewer() {
     );
   }
 
+  // Determine what content to display
+  const displayArticle = selectedVersion
+    ? { content: selectedVersion.content, id: selectedVersion.id, tag_id: selectedVersion.tag_id, created_at: selectedVersion.created_at, updated_at: selectedVersion.created_at, atom_count: selectedVersion.atom_count }
+    : currentArticle.article;
+  const displayCitations = selectedVersion
+    ? selectedVersion.citations
+    : currentArticle.citations;
+
   // Article view - Article exists, show content with back button
   return (
     <div className="flex flex-col h-full bg-[var(--color-bg-panel)]">
       <WikiHeader
         tagName={currentTagName || ''}
-        updatedAt={currentArticle.article.updated_at}
-        sourceCount={currentArticle.citations.length}
-        newAtomsAvailable={articleStatus?.new_atoms_available || 0}
+        updatedAt={selectedVersion ? selectedVersion.created_at : currentArticle.article.updated_at}
+        sourceCount={displayCitations.length}
+        newAtomsAvailable={selectedVersion ? 0 : (articleStatus?.new_atoms_available || 0)}
         onUpdate={handleUpdate}
         onRegenerate={handleRegenerate}
         onClose={closeDrawer}
         isUpdating={isUpdating}
         onBack={goBack}
+        versions={versions}
+        onSelectVersion={selectVersion}
+        isViewingVersion={!!selectedVersion}
+        onReturnToCurrent={clearSelectedVersion}
       />
       <div className="flex-1 overflow-y-auto">
         <WikiArticleContent
-          article={currentArticle.article}
-          citations={currentArticle.citations}
-          wikiLinks={wikiLinks}
-          relatedTags={relatedTags}
+          article={displayArticle}
+          citations={displayCitations}
+          wikiLinks={selectedVersion ? [] : wikiLinks}
+          relatedTags={selectedVersion ? [] : relatedTags}
           onViewAtom={handleViewAtom}
           onNavigateToArticle={(tagId, tagName) => openArticle(tagId, tagName)}
         />

@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { Button } from '../ui/Button';
+import { CustomSelect } from '../ui/CustomSelect';
+import { SearchableSelect } from '../ui/SearchableSelect';
+import { ConnectionStatus } from '../ui/ConnectionStatus';
 import { useSettingsStore } from '../../stores/settings';
 import { useAtomsStore } from '../../stores/atoms';
 import { useTagsStore } from '../../stores/tags';
@@ -34,335 +37,6 @@ import { getTransport, switchTransport, switchToLocal, isDesktopApp, isLocalServ
 import { pickDirectory } from '../../lib/platform';
 import { formatRelativeDate } from '../../lib/date';
 
-interface SelectOption {
-  value: string;
-  label: string;
-}
-
-interface CustomSelectProps {
-  value: string;
-  onChange: (value: string) => void;
-  options: SelectOption[];
-}
-
-function CustomSelect({ value, onChange, options }: CustomSelectProps) {
-  const [isOpen, setIsOpen] = useState(false);
-  const selectRef = useRef<HTMLDivElement>(null);
-
-  const selectedOption = options.find(opt => opt.value === value);
-
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (selectRef.current && !selectRef.current.contains(e.target as Node)) {
-        setIsOpen(false);
-      }
-    };
-
-    if (isOpen) {
-      document.addEventListener('mousedown', handleClickOutside);
-    }
-
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
-  }, [isOpen]);
-
-  return (
-    <div ref={selectRef} className="relative">
-      <button
-        type="button"
-        onClick={() => setIsOpen(!isOpen)}
-        className="w-full px-3 py-2 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-md text-[var(--color-text-primary)] text-left text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] focus:border-transparent transition-colors duration-150 flex items-center justify-between"
-      >
-        <span>{selectedOption?.label || value}</span>
-        <svg
-          className={`w-4 h-4 text-[var(--color-text-secondary)] transition-transform ${isOpen ? 'rotate-180' : ''}`}
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-        </svg>
-      </button>
-
-      {isOpen && (
-        <div className="absolute z-10 w-full mt-1 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-md shadow-lg overflow-hidden">
-          {options.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              onClick={() => {
-                onChange(option.value);
-                setIsOpen(false);
-              }}
-              className={`w-full px-3 py-2 text-left text-sm transition-colors ${
-                option.value === value
-                  ? 'bg-[var(--color-accent)] text-white'
-                  : 'text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
-              }`}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Fuzzy search function - checks if search chars appear in order in target
-function fuzzyMatch(search: string, target: string): { match: boolean; score: number } {
-  const searchLower = search.toLowerCase();
-  const targetLower = target.toLowerCase();
-
-  if (!search) return { match: true, score: 1 };
-
-  // Exact match gets highest score
-  if (targetLower.includes(searchLower)) {
-    return { match: true, score: 2 + (1 - searchLower.length / targetLower.length) };
-  }
-
-  // Fuzzy match - chars must appear in order
-  let searchIdx = 0;
-  let consecutiveBonus = 0;
-  let lastMatchIdx = -2;
-
-  for (let i = 0; i < targetLower.length && searchIdx < searchLower.length; i++) {
-    if (targetLower[i] === searchLower[searchIdx]) {
-      if (i === lastMatchIdx + 1) consecutiveBonus += 0.1;
-      lastMatchIdx = i;
-      searchIdx++;
-    }
-  }
-
-  if (searchIdx === searchLower.length) {
-    return { match: true, score: 1 + consecutiveBonus };
-  }
-
-  return { match: false, score: 0 };
-}
-
-interface SearchableSelectProps {
-  value: string;
-  onChange: (value: string) => void;
-  options: AvailableModel[];
-  isLoading?: boolean;
-  placeholder?: string;
-}
-
-function SearchableSelect({ value, onChange, options, isLoading, placeholder = 'Select...' }: SearchableSelectProps) {
-  const [isOpen, setIsOpen] = useState(false);
-  const [search, setSearch] = useState('');
-  const [highlightedIndex, setHighlightedIndex] = useState(0);
-  const selectRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-
-  // Find selected option
-  const selectedOption = options.find(opt => opt.id === value);
-
-  // Filter and sort options by fuzzy match
-  const filteredOptions = options
-    .map(opt => ({
-      ...opt,
-      ...fuzzyMatch(search, `${opt.name} ${opt.id}`)
-    }))
-    .filter(opt => opt.match)
-    .sort((a, b) => b.score - a.score);
-
-  // Reset highlight when filtered options change
-  useEffect(() => {
-    setHighlightedIndex(0);
-  }, [search]);
-
-  // Scroll highlighted item into view
-  useEffect(() => {
-    if (isOpen && listRef.current) {
-      const highlighted = listRef.current.querySelector('[data-highlighted="true"]');
-      if (highlighted) {
-        highlighted.scrollIntoView({ block: 'nearest' });
-      }
-    }
-  }, [highlightedIndex, isOpen]);
-
-  // Handle click outside
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (selectRef.current && !selectRef.current.contains(e.target as Node)) {
-        setIsOpen(false);
-        setSearch('');
-      }
-    };
-
-    if (isOpen) {
-      document.addEventListener('mousedown', handleClickOutside);
-    }
-
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
-  }, [isOpen]);
-
-  // Handle keyboard navigation
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (!isOpen) {
-      if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
-        e.preventDefault();
-        setIsOpen(true);
-      }
-      return;
-    }
-
-    switch (e.key) {
-      case 'ArrowDown':
-        e.preventDefault();
-        setHighlightedIndex(prev => Math.min(prev + 1, filteredOptions.length - 1));
-        break;
-      case 'ArrowUp':
-        e.preventDefault();
-        setHighlightedIndex(prev => Math.max(prev - 1, 0));
-        break;
-      case 'Enter':
-        e.preventDefault();
-        if (filteredOptions[highlightedIndex]) {
-          onChange(filteredOptions[highlightedIndex].id);
-          setIsOpen(false);
-          setSearch('');
-        }
-        break;
-      case 'Escape':
-        e.preventDefault();
-        setIsOpen(false);
-        setSearch('');
-        break;
-    }
-  }, [isOpen, filteredOptions, highlightedIndex, onChange]);
-
-  const handleOpen = () => {
-    setIsOpen(true);
-    setSearch('');
-    setTimeout(() => inputRef.current?.focus(), 0);
-  };
-
-  return (
-    <div ref={selectRef} className="relative">
-      {/* Selected value / trigger button */}
-      <button
-        type="button"
-        onClick={handleOpen}
-        onKeyDown={handleKeyDown}
-        className="w-full px-3 py-2 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-md text-[var(--color-text-primary)] text-left text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] focus:border-transparent transition-colors duration-150 flex items-center justify-between"
-      >
-        <span className={selectedOption ? '' : 'text-[var(--color-text-secondary)]'}>
-          {isLoading ? 'Loading models...' : (selectedOption?.name || value || placeholder)}
-        </span>
-        <svg
-          className={`w-4 h-4 text-[var(--color-text-secondary)] transition-transform ${isOpen ? 'rotate-180' : ''}`}
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-        </svg>
-      </button>
-
-      {/* Dropdown */}
-      {isOpen && (
-        <div className="absolute z-10 w-full mt-1 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-md shadow-lg overflow-hidden">
-          {/* Search input */}
-          <div className="p-2 border-b border-[var(--color-border)]">
-            <input
-              ref={inputRef}
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Search models..."
-              autoComplete="off"
-              autoCorrect="off"
-              autoCapitalize="off"
-              spellCheck={false}
-              className="w-full px-2 py-1.5 bg-[var(--color-bg-main)] border border-[var(--color-border)] rounded text-[var(--color-text-primary)] text-sm placeholder-[var(--color-text-secondary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
-            />
-          </div>
-
-          {/* Options list */}
-          <div ref={listRef} className="max-h-60 overflow-y-auto">
-            {isLoading ? (
-              <div className="px-3 py-4 text-center text-sm text-[var(--color-text-secondary)]">
-                <svg className="w-5 h-5 animate-spin mx-auto mb-2" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                </svg>
-                Loading models...
-              </div>
-            ) : filteredOptions.length === 0 ? (
-              <div className="px-3 py-4 text-center text-sm text-[var(--color-text-secondary)]">
-                No models found
-              </div>
-            ) : (
-              filteredOptions.map((option, index) => (
-                <button
-                  key={option.id}
-                  type="button"
-                  data-highlighted={index === highlightedIndex}
-                  onClick={() => {
-                    onChange(option.id);
-                    setIsOpen(false);
-                    setSearch('');
-                  }}
-                  onMouseEnter={() => setHighlightedIndex(index)}
-                  className={`w-full px-3 py-2 text-left text-sm transition-colors ${
-                    option.id === value
-                      ? 'bg-[var(--color-accent)] text-white'
-                      : index === highlightedIndex
-                      ? 'bg-[var(--color-bg-hover)] text-[var(--color-text-primary)]'
-                      : 'text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
-                  }`}
-                >
-                  <div className="font-medium">{option.name}</div>
-                  <div className={`text-xs ${option.id === value ? 'text-white/70' : 'text-[var(--color-text-secondary)]'}`}>
-                    {option.id}
-                  </div>
-                </button>
-              ))
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Connection status indicator component
-function ConnectionStatus({ status, error }: { status: 'checking' | 'connected' | 'disconnected'; error?: string }) {
-  return (
-    <div className="flex items-center gap-2 text-sm">
-      {status === 'checking' && (
-        <>
-          <svg className="w-4 h-4 animate-spin text-[var(--color-text-secondary)]" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-          </svg>
-          <span className="text-[var(--color-text-secondary)]">Checking connection...</span>
-        </>
-      )}
-      {status === 'connected' && (
-        <>
-          <div className="w-2 h-2 rounded-full bg-green-500" />
-          <span className="text-green-500">Connected</span>
-        </>
-      )}
-      {status === 'disconnected' && (
-        <>
-          <div className="w-2 h-2 rounded-full bg-red-500" />
-          <span className="text-red-500">{error || 'Not connected'}</span>
-        </>
-      )}
-    </div>
-  );
-}
-
 type SettingsTab = 'general' | 'ai' | 'connection' | 'feeds' | 'integrations';
 
 const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
@@ -376,10 +50,9 @@ const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
-  isSetupMode?: boolean; // When true, modal cannot be closed without valid config
 }
 
-export function SettingsModal({ isOpen, onClose, isSetupMode = false }: SettingsModalProps) {
+export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const settings = useSettingsStore(s => s.settings);
   const fetchSettings = useSettingsStore(s => s.fetchSettings);
   const setSetting = useSettingsStore(s => s.setSetting);
@@ -412,9 +85,8 @@ export function SettingsModal({ isOpen, onClose, isSetupMode = false }: Settings
   const [embeddingModel, setEmbeddingModel] = useState('openai/text-embedding-3-small');
   const [taggingModel, setTaggingModel] = useState('openai/gpt-4o-mini');
   const [wikiModel, setWikiModel] = useState('anthropic/claude-sonnet-4.5');
+  const [wikiStrategy, setWikiStrategy] = useState('centroid');
   const [chatModel, setChatModel] = useState('anthropic/claude-sonnet-4.5');
-  const [isSaving, setIsSaving] = useState(false);
-  const [isConnecting, setIsConnecting] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   // Re-embedding confirmation
@@ -529,11 +201,6 @@ export function SettingsModal({ isOpen, onClose, isSetupMode = false }: Settings
     try {
       await switchTransport({ baseUrl: serverUrl.trim().replace(/\/$/, ''), authToken: serverToken.trim() });
       setShowChangeServer(false);
-      // In setup mode, close to let Layout re-check and initialize
-      if (isSetupMode) {
-        onClose();
-        return;
-      }
       // Refresh data from new source
       fetchSettings();
       fetchAtoms();
@@ -781,6 +448,7 @@ export function SettingsModal({ isOpen, onClose, isSetupMode = false }: Settings
     setEmbeddingModel(settings.embedding_model || 'openai/text-embedding-3-small');
     setTaggingModel(settings.tagging_model || 'openai/gpt-4o-mini');
     setWikiModel(settings.wiki_model || 'anthropic/claude-sonnet-4.5');
+    setWikiStrategy(settings.wiki_strategy || 'centroid');
     setChatModel(settings.chat_model || 'anthropic/claude-sonnet-4.5');
     setOllamaHost(settings.ollama_host || 'http://127.0.0.1:11434');
     setOllamaEmbeddingModel(settings.ollama_embedding_model || 'nomic-embed-text');
@@ -796,8 +464,7 @@ export function SettingsModal({ isOpen, onClose, isSetupMode = false }: Settings
 
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
-      // Don't allow escape to close in setup mode
-      if (e.key === 'Escape' && !isSetupMode) {
+      if (e.key === 'Escape') {
         onClose();
       }
     };
@@ -811,11 +478,10 @@ export function SettingsModal({ isOpen, onClose, isSetupMode = false }: Settings
       document.removeEventListener('keydown', handleEscape);
       document.body.style.overflow = '';
     };
-  }, [isOpen, onClose, isSetupMode]);
+  }, [isOpen, onClose]);
 
   const handleOverlayClick = (e: React.MouseEvent) => {
-    // Don't allow overlay click to close in setup mode
-    if (e.target === overlayRef.current && !isSetupMode) {
+    if (e.target === overlayRef.current) {
       onClose();
     }
   };
@@ -833,18 +499,10 @@ export function SettingsModal({ isOpen, onClose, isSetupMode = false }: Settings
 
   // Handle changes that trigger re-embedding — ask for confirmation
   const handleEmbeddingModelChange = (value: string) => {
-    if (isSetupMode) {
-      setEmbeddingModel(value);
-      return;
-    }
     setPendingEmbeddingChange({ key: 'embedding_model', value, label: value.split('/').pop() || value });
   };
 
   const handleOllamaEmbeddingModelChange = (value: string) => {
-    if (isSetupMode) {
-      setOllamaEmbeddingModel(value);
-      return;
-    }
     setPendingEmbeddingChange({ key: 'ollama_embedding_model', value, label: value });
   };
 
@@ -864,7 +522,6 @@ export function SettingsModal({ isOpen, onClose, isSetupMode = false }: Settings
   // Handle provider change — test connection automatically
   const handleProviderChange = async (value: 'openrouter' | 'ollama') => {
     setProvider(value);
-    if (isSetupMode) return;
     await autoSave('provider', value);
     // Test connection for new provider
     if (value === 'openrouter' && apiKey.trim()) {
@@ -883,87 +540,6 @@ export function SettingsModal({ isOpen, onClose, isSetupMode = false }: Settings
     }
   };
 
-  const handleTestConnection = async () => {
-    if (!apiKey.trim()) return;
-
-    setIsTesting(true);
-    setTestResult(null);
-    setTestError(null);
-
-    try {
-      await testOpenRouterConnection(apiKey);
-      setTestResult('success');
-    } catch (e) {
-      setTestResult('error');
-      setTestError(String(e));
-    } finally {
-      setIsTesting(false);
-    }
-  };
-
-  // Setup mode save — used only for initial configuration
-  const canSave = provider === 'openrouter'
-    ? !!apiKey.trim()
-    : ollamaStatus === 'connected';
-
-  const handleSetupSave = async () => {
-    setSaveError(null);
-
-    // For OpenRouter, test connection if not already verified
-    if (provider === 'openrouter' && testResult !== 'success') {
-      if (!apiKey.trim()) {
-        setSaveError('Please enter an API key');
-        return;
-      }
-
-      setIsConnecting(true);
-      try {
-        await testOpenRouterConnection(apiKey);
-        setTestResult('success');
-      } catch (e) {
-        setTestResult('error');
-        setTestError(String(e));
-        setSaveError('Connection failed. Please check your API key.');
-        setIsConnecting(false);
-        return;
-      }
-      setIsConnecting(false);
-    }
-
-    // For Ollama, verify connection status
-    if (provider === 'ollama' && ollamaStatus !== 'connected') {
-      setSaveError('Please connect to Ollama first');
-      return;
-    }
-
-    setIsSaving(true);
-    try {
-      await setSetting('theme', theme);
-      await setSetting('provider', provider);
-
-      if (provider === 'openrouter') {
-        await setSetting('openrouter_api_key', apiKey);
-        await setSetting('embedding_model', embeddingModel);
-        await setSetting('tagging_model', taggingModel);
-        await setSetting('wiki_model', wikiModel);
-        await setSetting('chat_model', chatModel);
-      } else {
-        await setSetting('ollama_host', ollamaHost);
-        await setSetting('ollama_embedding_model', ollamaEmbeddingModel);
-        await setSetting('ollama_llm_model', ollamaLlmModel);
-      }
-
-      await setSetting('auto_tagging_enabled', autoTaggingEnabled ? 'true' : 'false');
-
-      onClose();
-    } catch (e) {
-      console.error('Failed to save settings:', e);
-      setSaveError('Failed to save settings');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
   // API key — local state updates immediately, auto-save on blur
   const handleApiKeyChange = (value: string) => {
     setApiKey(value);
@@ -972,7 +548,7 @@ export function SettingsModal({ isOpen, onClose, isSetupMode = false }: Settings
   };
 
   const handleApiKeyBlur = async () => {
-    if (isSetupMode || !apiKey.trim()) return;
+    if (!apiKey.trim()) return;
     await autoSave('openrouter_api_key', apiKey);
     // Test connection with new key
     setIsTesting(true);
@@ -1054,9 +630,6 @@ export function SettingsModal({ isOpen, onClose, isSetupMode = false }: Settings
     .filter(m => !m.is_embedding)
     .map(m => ({ id: m.id, name: m.name }));
 
-  // In web mode during setup, we need to connect to a server first
-  const needsServerConnection = !isDesktopApp() && !getTransport().isConnected();
-
   if (!isOpen) return null;
 
   return createPortal(
@@ -1071,29 +644,20 @@ export function SettingsModal({ isOpen, onClose, isSetupMode = false }: Settings
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">
-                {isSetupMode ? 'Welcome to Atomic' : 'Settings'}
+                Settings
               </h2>
-              {isSetupMode && (
-                <p className="text-sm text-[var(--color-text-secondary)] mt-1">
-                  {needsServerConnection ? 'Connect to an Atomic server to get started' : 'Configure an AI provider to get started'}
-                </p>
-              )}
             </div>
-            {!isSetupMode && (
-              <button
-                onClick={onClose}
-                className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            )}
+            <button
+              onClick={onClose}
+              className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
           </div>
 
-          {/* Tabs — only show in normal (non-setup) mode */}
-          {!isSetupMode && !needsServerConnection && (
-            <div className="flex gap-1 mt-4 -mb-4 px-0">
+          <div className="flex gap-1 mt-4 -mb-4 px-0">
               {SETTINGS_TABS.map((tab) => (
                 <button
                   key={tab.id}
@@ -1108,184 +672,10 @@ export function SettingsModal({ isOpen, onClose, isSetupMode = false }: Settings
                 </button>
               ))}
             </div>
-          )}
         </div>
 
         {/* Content */}
         <div className="px-6 py-4 space-y-6 overflow-y-auto flex-1">
-
-          {/* Web setup: server connection required first */}
-          {needsServerConnection && (
-            <div className="space-y-4">
-              <div className="space-y-1">
-                <label className="block text-sm font-medium text-[var(--color-text-primary)]">
-                  Server URL
-                </label>
-                <p className="text-xs text-[var(--color-text-secondary)]">
-                  Enter the URL and auth token of your running atomic-server
-                </p>
-              </div>
-              <input
-                type="text"
-                value={serverUrl}
-                onChange={(e) => { setServerUrl(e.target.value); setServerTestResult(null); }}
-                placeholder="http://localhost:8080"
-                className="w-full px-3 py-2 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-md text-[var(--color-text-primary)] placeholder-[var(--color-text-secondary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] focus:border-transparent transition-colors duration-150 text-sm"
-              />
-              <input
-                type="password"
-                value={serverToken}
-                onChange={(e) => { setServerToken(e.target.value); setServerTestResult(null); }}
-                placeholder="Auth token (printed by server on startup)"
-                className="w-full px-3 py-2 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-md text-[var(--color-text-primary)] placeholder-[var(--color-text-secondary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] focus:border-transparent transition-colors duration-150 text-sm"
-              />
-              <div className="flex gap-2">
-                <Button variant="secondary" onClick={handleTestServer} disabled={!serverUrl.trim() || !serverToken.trim() || isTestingServer}>
-                  {isTestingServer ? 'Testing...' : 'Test Connection'}
-                </Button>
-                <Button onClick={handleConnectServer} disabled={serverTestResult !== 'success'}>
-                  Connect
-                </Button>
-              </div>
-              {serverTestResult === 'success' && (
-                <div className="text-sm text-green-500">Server reachable</div>
-              )}
-              {serverTestResult === 'error' && (
-                <div className="text-sm text-red-500">{serverTestError}</div>
-              )}
-              <div className="p-3 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-md text-xs text-[var(--color-text-secondary)] space-y-1">
-                <p>Start the server with:</p>
-                <code className="block text-[var(--color-text-primary)]">cargo run -p atomic-server -- --db-path /path/to/atomic.db</code>
-                <p>The auth token is printed to stdout on startup.</p>
-              </div>
-            </div>
-          )}
-
-          {/* Normal settings content — hidden when server connection is needed */}
-          {!needsServerConnection && <>
-
-          {/* In setup mode, show all settings in a single scroll (no tabs) */}
-          {isSetupMode ? (
-            <>
-              {/* Theme Selector */}
-              <div className="space-y-2">
-                <label className="block text-sm font-medium text-[var(--color-text-primary)]">
-                  Theme
-                </label>
-                <CustomSelect
-                  value={theme}
-                  onChange={(v) => setTheme(v as Theme)}
-                  options={THEMES}
-                />
-              </div>
-
-              {/* Provider Selector */}
-              <div className="space-y-2">
-                <label className="block text-sm font-medium text-[var(--color-text-primary)]">
-                  AI Provider
-                </label>
-                <p className="text-xs text-[var(--color-text-secondary)]">
-                  Choose between cloud (OpenRouter) or local (Ollama) AI models
-                </p>
-                <CustomSelect
-                  value={provider}
-                  onChange={(v) => setProvider(v as 'openrouter' | 'ollama')}
-                  options={[
-                    { value: 'openrouter', label: 'OpenRouter (Cloud)' },
-                    { value: 'ollama', label: 'Ollama (Local)' },
-                  ]}
-                />
-              </div>
-
-              {/* OpenRouter API Key (setup only needs the key) */}
-              {provider === 'openrouter' && (
-                <div className="space-y-2">
-                  <label className="block text-sm font-medium text-[var(--color-text-primary)]">
-                    OpenRouter API Key
-                  </label>
-                  <p className="text-xs text-[var(--color-text-secondary)]">
-                    Required for AI features. Get your key at openrouter.ai
-                  </p>
-                  <div className="flex gap-2">
-                    <div className="relative flex-1">
-                      <input
-                        type={showApiKey ? 'text' : 'password'}
-                        value={apiKey}
-                        onChange={(e) => handleApiKeyChange(e.target.value)}
-                        placeholder="sk-or-..."
-                        className="w-full px-3 py-2 pr-10 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-md text-[var(--color-text-primary)] placeholder-[var(--color-text-secondary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] focus:border-transparent transition-colors duration-150"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowApiKey(!showApiKey)}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
-                      >
-                        {showApiKey ? (
-                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
-                          </svg>
-                        ) : (
-                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                          </svg>
-                        )}
-                      </button>
-                    </div>
-                    <Button
-                      variant="secondary"
-                      onClick={handleTestConnection}
-                      disabled={!apiKey.trim() || isTesting}
-                      className="whitespace-nowrap"
-                    >
-                      {isTesting ? (
-                        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                        </svg>
-                      ) : (
-                        'Test'
-                      )}
-                    </Button>
-                  </div>
-                  {testResult === 'success' && (
-                    <div className="flex items-center gap-2 text-sm text-green-500">
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
-                      Connection successful
-                    </div>
-                  )}
-                  {testResult === 'error' && (
-                    <div className="flex items-start gap-2 text-sm text-red-500">
-                      <svg className="w-4 h-4 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                      <span>{testError || 'Connection failed'}</span>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Ollama setup */}
-              {provider === 'ollama' && (
-                <div className="space-y-2">
-                  <label className="block text-sm font-medium text-[var(--color-text-primary)]">
-                    Ollama Server URL
-                  </label>
-                  <input
-                    type="text"
-                    value={ollamaHost}
-                    onChange={(e) => setOllamaHost(e.target.value)}
-                    placeholder="http://127.0.0.1:11434"
-                    className="w-full px-3 py-2 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-md text-[var(--color-text-primary)] placeholder-[var(--color-text-secondary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] focus:border-transparent transition-colors duration-150"
-                  />
-                  <ConnectionStatus status={ollamaStatus} error={ollamaError} />
-                </div>
-              )}
-            </>
-          ) : (
-            <>
               {/* ===== GENERAL TAB ===== */}
               {activeTab === 'general' && (
                 <>
@@ -1470,6 +860,24 @@ export function SettingsModal({ isOpen, onClose, isSetupMode = false }: Settings
                           />
                         </div>
 
+                        {/* Wiki Strategy */}
+                        <div className="space-y-1">
+                          <label className="block text-sm font-medium text-[var(--color-text-primary)]">
+                            Wiki Strategy
+                          </label>
+                          <p className="text-xs text-[var(--color-text-secondary)]">
+                            How source material is selected for wiki articles
+                          </p>
+                          <CustomSelect
+                            value={wikiStrategy}
+                            onChange={(v) => { setWikiStrategy(v); autoSave('wiki_strategy', v); }}
+                            options={[
+                              { value: 'centroid', label: 'Centroid — rank chunks by embedding similarity' },
+                              { value: 'agentic', label: 'Agentic — AI agent searches and curates sources' },
+                            ]}
+                          />
+                        </div>
+
                         {/* Chat Model */}
                         <div className="space-y-1">
                           <label className="block text-sm font-medium text-[var(--color-text-primary)]">
@@ -1504,7 +912,7 @@ export function SettingsModal({ isOpen, onClose, isSetupMode = false }: Settings
                           type="text"
                           value={ollamaHost}
                           onChange={(e) => setOllamaHost(e.target.value)}
-                          onBlur={() => { if (!isSetupMode) autoSave('ollama_host', ollamaHost); }}
+                          onBlur={() => autoSave('ollama_host', ollamaHost)}
                           placeholder="http://127.0.0.1:11434"
                           className="w-full px-3 py-2 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-md text-[var(--color-text-primary)] placeholder-[var(--color-text-secondary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] focus:border-transparent transition-colors duration-150"
                         />
@@ -2210,30 +1618,9 @@ export function SettingsModal({ isOpen, onClose, isSetupMode = false }: Settings
                   )}
                 </>
               )}
-            </>
-          )}
-
-          </>}
         </div>
 
-        {/* Footer — setup mode: Get Started button; normal mode: just error display */}
-        {!needsServerConnection && (isSetupMode ? (
-          <div className="px-6 py-4 border-t border-[var(--color-border)] space-y-3">
-            {saveError && (
-              <div className="flex items-start gap-2 text-sm text-red-500">
-                <svg className="w-4 h-4 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <span>{saveError}</span>
-              </div>
-            )}
-            <div className="flex justify-end">
-              <Button onClick={handleSetupSave} disabled={isSaving || isConnecting || !canSave}>
-                {isConnecting ? 'Connecting...' : isSaving ? 'Saving...' : 'Get Started'}
-              </Button>
-            </div>
-          </div>
-        ) : saveError ? (
+        {saveError && (
           <div className="px-6 py-3 border-t border-[var(--color-border)]">
             <div className="flex items-start gap-2 text-sm text-red-500">
               <svg className="w-4 h-4 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2242,7 +1629,7 @@ export function SettingsModal({ isOpen, onClose, isSetupMode = false }: Settings
               <span>{saveError}</span>
             </div>
           </div>
-        ) : null)}
+        )}
 
         {/* Re-embedding confirmation dialog */}
         {pendingEmbeddingChange && (

@@ -17,6 +17,8 @@ export function WikiViewer({ tagId, tagName }: WikiViewerProps) {
   const relatedTags = useWikiStore(s => s.relatedTags);
   const wikiLinks = useWikiStore(s => s.wikiLinks);
   const articles = useWikiStore(s => s.articles);
+  const versions = useWikiStore(s => s.versions);
+  const selectedVersion = useWikiStore(s => s.selectedVersion);
   const isLoading = useWikiStore(s => s.isLoading);
   const isGenerating = useWikiStore(s => s.isGenerating);
   const isUpdating = useWikiStore(s => s.isUpdating);
@@ -25,6 +27,9 @@ export function WikiViewer({ tagId, tagName }: WikiViewerProps) {
   const fetchArticleStatus = useWikiStore(s => s.fetchArticleStatus);
   const fetchRelatedTags = useWikiStore(s => s.fetchRelatedTags);
   const fetchWikiLinks = useWikiStore(s => s.fetchWikiLinks);
+  const fetchVersions = useWikiStore(s => s.fetchVersions);
+  const selectVersion = useWikiStore(s => s.selectVersion);
+  const clearSelectedVersion = useWikiStore(s => s.clearSelectedVersion);
   const generateArticle = useWikiStore(s => s.generateArticle);
   const updateArticle = useWikiStore(s => s.updateArticle);
   const openArticle = useWikiStore(s => s.openArticle);
@@ -39,6 +44,7 @@ export function WikiViewer({ tagId, tagName }: WikiViewerProps) {
   useEffect(() => {
     fetchArticle(tagId);
     fetchArticleStatus(tagId);
+    fetchVersions(tagId);
     // Ensure articles list is available for implicit back-linking
     if (articles.length === 0) {
       fetchAllArticles();
@@ -48,7 +54,7 @@ export function WikiViewer({ tagId, tagName }: WikiViewerProps) {
     return () => {
       clearArticle();
     };
-  }, [tagId, fetchArticle, fetchArticleStatus, clearArticle, articles.length, fetchAllArticles]);
+  }, [tagId, fetchArticle, fetchArticleStatus, fetchVersions, clearArticle, articles.length, fetchAllArticles]);
 
   // Only fetch related tags and wiki links when an article exists
   useEffect(() => {
@@ -187,25 +193,37 @@ export function WikiViewer({ tagId, tagName }: WikiViewerProps) {
     );
   }
 
+  // Determine what content to display
+  const displayArticle = selectedVersion
+    ? { content: selectedVersion.content, id: selectedVersion.id, tag_id: selectedVersion.tag_id, created_at: selectedVersion.created_at, updated_at: selectedVersion.created_at, atom_count: selectedVersion.atom_count }
+    : currentArticle.article;
+  const displayCitations = selectedVersion
+    ? selectedVersion.citations
+    : currentArticle.citations;
+
   // Article exists - show content
   return (
     <div className="flex flex-col h-full">
       <WikiHeader
         tagName={tagName}
-        updatedAt={currentArticle.article.updated_at}
-        sourceCount={currentArticle.citations.length}
-        newAtomsAvailable={articleStatus?.new_atoms_available || 0}
+        updatedAt={selectedVersion ? selectedVersion.created_at : currentArticle.article.updated_at}
+        sourceCount={displayCitations.length}
+        newAtomsAvailable={selectedVersion ? 0 : (articleStatus?.new_atoms_available || 0)}
         onUpdate={handleUpdate}
         onRegenerate={handleRegenerate}
         onClose={closeDrawer}
         isUpdating={isUpdating}
+        versions={versions}
+        onSelectVersion={selectVersion}
+        isViewingVersion={!!selectedVersion}
+        onReturnToCurrent={clearSelectedVersion}
       />
       <div className="flex-1 overflow-y-auto">
         <WikiArticleContent
-          article={currentArticle.article}
-          citations={currentArticle.citations}
-          wikiLinks={wikiLinks}
-          relatedTags={relatedTags}
+          article={displayArticle}
+          citations={displayCitations}
+          wikiLinks={selectedVersion ? [] : wikiLinks}
+          relatedTags={selectedVersion ? [] : relatedTags}
           onViewAtom={handleViewAtom}
           onNavigateToArticle={handleNavigateToArticle}
         />

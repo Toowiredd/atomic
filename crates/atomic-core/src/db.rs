@@ -199,7 +199,7 @@ impl Database {
     ///   1. Add a new `if version < N` block at the end (before the virtual-table section)
     ///   2. End the block with `PRAGMA user_version = N;`
     ///   3. Bump LATEST_VERSION
-    const LATEST_VERSION: i32 = 6;
+    const LATEST_VERSION: i32 = 7;
 
     pub fn run_migrations(conn: &Connection) -> Result<(), AtomicCoreError> {
         let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -542,6 +542,26 @@ impl Database {
                 CREATE INDEX IF NOT EXISTS idx_feed_items_feed ON feed_items(feed_id);
 
                 PRAGMA user_version = 6;
+                "#,
+            )?;
+        }
+
+        // --- V6 → V7: Wiki article version history ---
+        if version < 7 {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS wiki_article_versions (
+                    id TEXT PRIMARY KEY,
+                    tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                    content TEXT NOT NULL,
+                    citations_json TEXT NOT NULL,
+                    atom_count INTEGER NOT NULL,
+                    version_number INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_wiki_versions_tag ON wiki_article_versions(tag_id, version_number);
+
+                PRAGMA user_version = 7;
                 "#,
             )?;
         }

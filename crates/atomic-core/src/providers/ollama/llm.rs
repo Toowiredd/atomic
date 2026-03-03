@@ -233,6 +233,74 @@ pub async fn complete(
     })
 }
 
+pub async fn complete_with_tools(
+    provider: &OllamaProvider,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    config: &LlmConfig,
+) -> Result<CompletionResponse, ProviderError> {
+    let api_messages: Vec<ApiMessage> = messages.iter().map(convert_message).collect();
+    let api_tools: Option<Vec<ApiTool>> = if tools.is_empty() {
+        None
+    } else {
+        Some(tools.iter().map(convert_tool).collect())
+    };
+
+    let format = config
+        .params
+        .structured_output
+        .as_ref()
+        .map(|schema| schema.schema.clone());
+
+    let options = if config.params.temperature.is_some() || config.params.max_tokens.is_some() {
+        Some(ChatOptions {
+            temperature: config.params.temperature,
+            num_predict: config.params.max_tokens,
+        })
+    } else {
+        None
+    };
+
+    let request = ChatRequest {
+        model: config.model.clone(),
+        messages: api_messages,
+        tools: api_tools,
+        format,
+        options,
+        stream: false,
+    };
+
+    let response = provider
+        .client()
+        .post(format!("{}/api/chat", provider.base_url()))
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+
+        return Err(ProviderError::Api {
+            status,
+            message: body,
+        });
+    }
+
+    let chat_response: ChatResponse = response.json().await?;
+
+    let tool_calls = chat_response
+        .message
+        .tool_calls
+        .map(|tcs| tcs.iter().enumerate().map(|(i, tc)| convert_tool_call(tc, i)).collect());
+
+    Ok(CompletionResponse {
+        content: chat_response.message.content,
+        tool_calls,
+    })
+}
+
 // ==================== Streaming Implementation ====================
 
 pub async fn complete_streaming_with_tools(

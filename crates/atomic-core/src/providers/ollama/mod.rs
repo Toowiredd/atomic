@@ -78,6 +78,15 @@ impl LlmProvider for OllamaProvider {
     ) -> Result<CompletionResponse, ProviderError> {
         llm::complete(self, messages, config).await
     }
+
+    async fn complete_with_tools(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        config: &LlmConfig,
+    ) -> Result<CompletionResponse, ProviderError> {
+        llm::complete_with_tools(self, messages, tools, config).await
+    }
 }
 
 #[async_trait]

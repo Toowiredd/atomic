@@ -1,13 +1,17 @@
 //! Wiki article synthesis
 //!
 //! This module handles generating and updating wiki articles for tags.
+//! Strategies control both source selection and content generation;
+//! shared utilities (save, load, citations, LLM calls) live here.
 
-use crate::chunking::count_tokens;
+mod agentic;
+mod centroid;
+
 use crate::db::Database;
-use crate::embedding::distance_to_similarity;
 use crate::models::{
     ChunkWithContext, RelatedTag, SuggestedArticle, WikiArticle, WikiArticleSummary,
-    WikiArticleStatus, WikiArticleWithCitations, WikiCitation, WikiLink,
+    WikiArticleStatus, WikiArticleVersion, WikiArticleWithCitations, WikiCitation,
+    WikiLink, WikiVersionSummary,
 };
 use crate::providers::traits::LlmConfig;
 use crate::providers::types::{GenerationParams, Message, StructuredOutputSchema};
@@ -17,16 +21,72 @@ use chrono::Utc;
 use regex::Regex;
 use rusqlite::Connection;
 use serde::Deserialize;
+use std::sync::Arc;
 use uuid::Uuid;
 
-#[derive(Deserialize)]
-struct WikiGenerationResult {
-    article_content: String,
-    #[allow(dead_code)]
-    citations_used: Vec<i32>,
+// ==================== Strategy Types ====================
+
+/// Wiki generation strategy
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WikiStrategy {
+    /// Default — centroid similarity chunk selection + single-shot LLM call
+    Centroid,
+    /// Agent-driven research loop + shared synthesis
+    Agentic,
 }
 
-const WIKI_GENERATION_SYSTEM_PROMPT: &str = r#"You are synthesizing a wiki article based on the user's personal knowledge base. Write a well-structured, informative article that summarizes what is known about the topic.
+impl WikiStrategy {
+    pub fn from_string(s: &str) -> Self {
+        match s {
+            "centroid" => WikiStrategy::Centroid,
+            "agentic" => WikiStrategy::Agentic,
+            _ => WikiStrategy::Centroid,
+        }
+    }
+}
+
+/// Context passed to strategy implementations
+pub struct WikiStrategyContext {
+    pub db: Arc<Database>,
+    pub provider_config: ProviderConfig,
+    pub wiki_model: String,
+    pub tag_id: String,
+    pub tag_name: String,
+    pub linkable_article_names: Vec<(String, String)>,
+}
+
+/// Generate a wiki article using the given strategy.
+pub async fn strategy_generate(
+    strategy: &WikiStrategy,
+    ctx: &WikiStrategyContext,
+) -> Result<WikiArticleWithCitations, String> {
+    match strategy {
+        WikiStrategy::Centroid => centroid::generate(ctx).await,
+        WikiStrategy::Agentic => agentic::generate(ctx).await,
+    }
+}
+
+/// Update an existing wiki article using the given strategy.
+/// Returns None if no update is needed (e.g., no new content).
+pub async fn strategy_update(
+    strategy: &WikiStrategy,
+    ctx: &WikiStrategyContext,
+    existing: &WikiArticleWithCitations,
+) -> Result<Option<WikiArticleWithCitations>, String> {
+    match strategy {
+        WikiStrategy::Centroid => centroid::update(ctx, existing).await,
+        WikiStrategy::Agentic => agentic::update(ctx, existing).await,
+    }
+}
+
+// ==================== Shared Constants ====================
+
+/// Maximum source material tokens for wiki generation.
+/// Leaves room for system prompt, article output, and structured output framing.
+/// Most wiki models have 128K context; we budget ~80K for source material.
+pub(crate) const MAX_WIKI_SOURCE_TOKENS: usize = 80_000;
+
+pub(crate) const WIKI_GENERATION_SYSTEM_PROMPT: &str = r#"You are synthesizing a wiki article based on the user's personal knowledge base. Write a well-structured, informative article that summarizes what is known about the topic.
 
 Guidelines:
 - Use markdown formatting with ## for main sections and ### for subsections
@@ -40,7 +100,7 @@ Guidelines:
 - Only use [[wiki links]] for topics listed in the EXISTING WIKI ARTICLES section provided
 - Do not force wiki links where they don't fit naturally"#;
 
-const WIKI_UPDATE_SYSTEM_PROMPT: &str = r#"You are updating an existing wiki article with new information from additional sources. Integrate the new information naturally into the existing article.
+pub(crate) const WIKI_UPDATE_SYSTEM_PROMPT: &str = r#"You are updating an existing wiki article with new information from additional sources. Integrate the new information naturally into the existing article.
 
 Guidelines:
 - Maintain the existing structure where sensible
@@ -53,517 +113,17 @@ Guidelines:
 - Only use [[wiki links]] for topics listed in the EXISTING WIKI ARTICLES section provided
 - Do not force wiki links where they don't fit naturally"#;
 
-/// Data needed for wiki article generation (extracted before async call)
-pub struct WikiGenerationInput {
-    pub chunks: Vec<ChunkWithContext>,
-    pub atom_count: i32,
-    pub tag_id: String,
-    pub tag_name: String,
-}
+// ==================== Shared LLM Infrastructure ====================
 
-/// Data needed for wiki article update (extracted before async call)
-pub struct WikiUpdateInput {
-    pub new_chunks: Vec<ChunkWithContext>,
-    pub existing_article: WikiArticle,
-    pub existing_citations: Vec<WikiCitation>,
-    pub atom_count: i32,
-    pub tag_id: String,
-}
-
-/// Maximum source material tokens for wiki generation.
-/// Leaves room for system prompt, article output, and structured output framing.
-/// Most wiki models have 128K context; we budget ~80K for source material.
-const MAX_WIKI_SOURCE_TOKENS: usize = 80_000;
-
-/// Prepare data for wiki article generation.
-///
-/// Uses the tag's centroid embedding to rank all chunks under the tag hierarchy
-/// by semantic relevance, then selects the top chunks that fit within the token budget.
-/// Falls back to a simple SQL fetch (ordered by atom/chunk index) if no centroid exists.
-pub async fn prepare_wiki_generation(
-    db: &Database,
-    _provider_config: &ProviderConfig,
-    tag_id: &str,
-    tag_name: &str,
-) -> Result<WikiGenerationInput, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-
-    // Get all descendant tag IDs (including the tag itself)
-    let all_tag_ids = get_tag_hierarchy(&conn, tag_id)?;
-
-    if all_tag_ids.is_empty() {
-        return Err("No content found for this tag".to_string());
-    }
-
-    // Build the set of atom IDs under this tag hierarchy (for filtering vec_chunks results)
-    let placeholders = all_tag_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let atom_ids_query = format!(
-        "SELECT DISTINCT atom_id FROM atom_tags WHERE tag_id IN ({})",
-        placeholders
-    );
-    let mut stmt = conn.prepare(&atom_ids_query)
-        .map_err(|e| format!("Failed to prepare atom_ids query: {}", e))?;
-    let scoped_atom_ids: std::collections::HashSet<String> = stmt
-        .query_map(rusqlite::params_from_iter(all_tag_ids.iter()), |row| row.get(0))
-        .map_err(|e| format!("Failed to query atom_ids: {}", e))?
-        .collect::<Result<std::collections::HashSet<_>, _>>()
-        .map_err(|e| format!("Failed to collect atom_ids: {}", e))?;
-
-    if scoped_atom_ids.is_empty() {
-        return Err("No content found for this tag".to_string());
-    }
-
-    // Try to load the tag's centroid embedding for ranked retrieval
-    let centroid_blob: Option<Vec<u8>> = conn
-        .query_row(
-            "SELECT embedding FROM tag_embeddings WHERE tag_id = ?1",
-            [tag_id],
-            |row| row.get(0),
-        )
-        .ok();
-
-    let chunks = if let Some(ref centroid) = centroid_blob {
-        // Ranked path: query vec_chunks with centroid, filter to scoped atoms, fill token budget
-        select_chunks_by_centroid(&conn, centroid, &scoped_atom_ids)?
-    } else {
-        // Fallback: no centroid yet (e.g. embeddings haven't run), fetch by insertion order
-        eprintln!("[wiki] No centroid for tag {}, falling back to unranked chunk selection", tag_id);
-        select_chunks_unranked(&conn, &placeholders, &all_tag_ids)?
-    };
-
-    if chunks.is_empty() {
-        return Err("No content found for this tag".to_string());
-    }
-
-    let atom_count = count_atoms_with_tags(&conn, &all_tag_ids)?;
-
-    Ok(WikiGenerationInput {
-        chunks,
-        atom_count,
-        tag_id: tag_id.to_string(),
-        tag_name: tag_name.to_string(),
-    })
-}
-
-/// Select chunks ranked by similarity to the tag centroid, up to the token budget.
-fn select_chunks_by_centroid(
-    conn: &Connection,
-    centroid_blob: &[u8],
-    scoped_atom_ids: &std::collections::HashSet<String>,
-) -> Result<Vec<ChunkWithContext>, String> {
-    // Fetch more than we need from vec_chunks since we'll filter by scope.
-    // Over-fetch by 3x to account for chunks outside the tag hierarchy.
-    let fetch_limit = 3000_i32;
-
-    let mut vec_stmt = conn.prepare(
-        "SELECT chunk_id, distance
-         FROM vec_chunks
-         WHERE embedding MATCH ?1
-         ORDER BY distance
-         LIMIT ?2",
-    ).map_err(|e| format!("Failed to prepare vec_chunks query: {}", e))?;
-
-    let candidates: Vec<(String, f32)> = vec_stmt
-        .query_map(rusqlite::params![centroid_blob, fetch_limit], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
-        .map_err(|e| format!("Failed to query vec_chunks: {}", e))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to collect vec_chunks: {}", e))?;
-
-    // Batch-load chunk details for all candidates
-    let chunk_ids: Vec<&str> = candidates.iter().map(|(id, _)| id.as_str()).collect();
-    let chunk_details = batch_fetch_chunk_details(conn, &chunk_ids)?;
-
-    // Filter to scoped atoms and fill token budget
-    let mut chunks = Vec::new();
-    let mut total_tokens = 0;
-
-    for (chunk_id, distance) in &candidates {
-        if let Some((atom_id, chunk_index, content)) = chunk_details.get(chunk_id.as_str()) {
-            if !scoped_atom_ids.contains(atom_id) {
-                continue;
-            }
-            let tokens = count_tokens(content);
-            if total_tokens + tokens > MAX_WIKI_SOURCE_TOKENS && !chunks.is_empty() {
-                break;
-            }
-            total_tokens += tokens;
-            chunks.push(ChunkWithContext {
-                atom_id: atom_id.clone(),
-                chunk_index: *chunk_index,
-                content: content.clone(),
-                similarity_score: distance_to_similarity(*distance),
-            });
-        }
-    }
-
-    eprintln!(
-        "[wiki] Selected {} chunks ({} tokens) by centroid similarity",
-        chunks.len(), total_tokens
-    );
-
-    Ok(chunks)
-}
-
-/// Batch-fetch chunk details (atom_id, chunk_index, content) by chunk IDs.
-fn batch_fetch_chunk_details(
-    conn: &Connection,
-    chunk_ids: &[&str],
-) -> Result<std::collections::HashMap<String, (String, i32, String)>, String> {
-    let mut map = std::collections::HashMap::new();
-    // Batch in groups of 500 to stay under SQLite parameter limit
-    for batch in chunk_ids.chunks(500) {
-        let placeholders = batch.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let query = format!(
-            "SELECT id, atom_id, chunk_index, content FROM atom_chunks WHERE id IN ({})",
-            placeholders
-        );
-        let mut stmt = conn.prepare(&query)
-            .map_err(|e| format!("Failed to prepare chunk details query: {}", e))?;
-        let mut rows = stmt.query(rusqlite::params_from_iter(batch.iter()))
-            .map_err(|e| format!("Failed to query chunk details: {}", e))?;
-        while let Some(row) = rows.next().map_err(|e| format!("Failed to read row: {}", e))? {
-            let id: String = row.get(0).map_err(|e| format!("Failed to get id: {}", e))?;
-            let atom_id: String = row.get(1).map_err(|e| format!("Failed to get atom_id: {}", e))?;
-            let chunk_index: i32 = row.get(2).map_err(|e| format!("Failed to get chunk_index: {}", e))?;
-            let content: String = row.get(3).map_err(|e| format!("Failed to get content: {}", e))?;
-            map.insert(id, (atom_id, chunk_index, content));
-        }
-    }
-    Ok(map)
-}
-
-/// Fallback: select chunks by insertion order up to the token budget.
-fn select_chunks_unranked(
-    conn: &Connection,
-    placeholders: &str,
-    all_tag_ids: &[String],
-) -> Result<Vec<ChunkWithContext>, String> {
-    let query = format!(
-        "SELECT DISTINCT ac.atom_id, ac.chunk_index, ac.content
-         FROM atom_chunks ac
-         INNER JOIN atom_tags at ON ac.atom_id = at.atom_id
-         WHERE at.tag_id IN ({})
-         ORDER BY ac.atom_id, ac.chunk_index",
-        placeholders
-    );
-
-    let mut stmt = conn.prepare(&query)
-        .map_err(|e| format!("Failed to prepare chunks query: {}", e))?;
-
-    let mut rows = stmt.query(rusqlite::params_from_iter(all_tag_ids.iter()))
-        .map_err(|e| format!("Failed to query chunks: {}", e))?;
-
-    let mut chunks = Vec::new();
-    let mut total_tokens = 0;
-
-    while let Some(row) = rows.next().map_err(|e| format!("Failed to read row: {}", e))? {
-        let content: String = row.get(2).map_err(|e| format!("Failed to get content: {}", e))?;
-        let tokens = count_tokens(&content);
-        if total_tokens + tokens > MAX_WIKI_SOURCE_TOKENS && !chunks.is_empty() {
-            break;
-        }
-        total_tokens += tokens;
-        chunks.push(ChunkWithContext {
-            atom_id: row.get(0).map_err(|e| format!("Failed to get atom_id: {}", e))?,
-            chunk_index: row.get(1).map_err(|e| format!("Failed to get chunk_index: {}", e))?,
-            content,
-            similarity_score: 1.0,
-        });
-    }
-
-    eprintln!(
-        "[wiki] Selected {} chunks ({} tokens) by insertion order (no centroid)",
-        chunks.len(), total_tokens
-    );
-
-    Ok(chunks)
-}
-
-/// Get all tag IDs in hierarchy (tag + all descendants) using recursive CTE
-fn get_tag_hierarchy(conn: &Connection, tag_id: &str) -> Result<Vec<String>, String> {
-    let mut stmt = conn
-        .prepare(
-            "WITH RECURSIVE descendant_tags(id) AS (
-                SELECT ?1
-                UNION ALL
-                SELECT t.id FROM tags t
-                INNER JOIN descendant_tags dt ON t.parent_id = dt.id
-            )
-            SELECT id FROM descendant_tags",
-        )
-        .map_err(|e| format!("Failed to prepare hierarchy query: {}", e))?;
-
-    let tag_ids: Vec<String> = stmt
-        .query_map([tag_id], |row| row.get(0))
-        .map_err(|e| format!("Failed to query hierarchy: {}", e))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to collect hierarchy: {}", e))?;
-
-    Ok(tag_ids)
-}
-
-/// Count atoms with any of the given tags
-fn count_atoms_with_tags(conn: &Connection, tag_ids: &[String]) -> Result<i32, String> {
-    let placeholders = tag_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let query = format!(
-        "SELECT COUNT(DISTINCT atom_id) FROM atom_tags WHERE tag_id IN ({})",
-        placeholders
-    );
-    conn.query_row(&query, rusqlite::params_from_iter(tag_ids), |row| {
-        row.get(0)
-    })
-    .map_err(|e| format!("Failed to count atoms: {}", e))
-}
-
-/// Prepare data for wiki article update (sync, needs db connection)
-pub fn prepare_wiki_update(
-    conn: &Connection,
-    tag_id: &str,
-    _tag_name: &str,
-    existing_article: &WikiArticle,
-    existing_citations: &[WikiCitation],
-) -> Result<Option<WikiUpdateInput>, String> {
-    let last_update = &existing_article.updated_at;
-
-    // Get atoms added after the last update
-    let mut new_atom_stmt = conn
-        .prepare(
-            "SELECT DISTINCT a.id FROM atoms a
-             INNER JOIN atom_tags at ON a.id = at.atom_id
-             WHERE at.tag_id = ?1 AND a.created_at > ?2",
-        )
-        .map_err(|e| format!("Failed to prepare new atoms query: {}", e))?;
-
-    let new_atom_ids: Vec<String> = new_atom_stmt
-        .query_map(rusqlite::params![tag_id, last_update], |row| row.get(0))
-        .map_err(|e| format!("Failed to query new atoms: {}", e))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to collect new atom IDs: {}", e))?;
-
-    if new_atom_ids.is_empty() {
-        return Ok(None); // No new atoms
-    }
-
-    // Get chunks from new atoms only
-    let placeholders: String = new_atom_ids
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(",");
-    let query = format!(
-        "SELECT id, atom_id, chunk_index, content FROM atom_chunks WHERE atom_id IN ({})",
-        placeholders
-    );
-
-    let mut chunk_stmt = conn
-        .prepare(&query)
-        .map_err(|e| format!("Failed to prepare chunk query: {}", e))?;
-
-    let new_chunks: Vec<ChunkWithContext> = chunk_stmt
-        .query_map(rusqlite::params_from_iter(new_atom_ids.iter()), |row| {
-            Ok(ChunkWithContext {
-                atom_id: row.get(1)?,
-                chunk_index: row.get(2)?,
-                content: row.get(3)?,
-                similarity_score: 1.0,
-            })
-        })
-        .map_err(|e| format!("Failed to query new chunks: {}", e))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to collect new chunks: {}", e))?;
-
-    if new_chunks.is_empty() {
-        return Ok(None);
-    }
-
-    let atom_count: i32 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM atom_tags WHERE tag_id = ?1",
-            [tag_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("Failed to count atoms: {}", e))?;
-
-    Ok(Some(WikiUpdateInput {
-        new_chunks,
-        existing_article: existing_article.clone(),
-        existing_citations: existing_citations.to_vec(),
-        atom_count,
-        tag_id: tag_id.to_string(),
-    }))
-}
-
-/// Generate wiki article content via API (async, no db needed)
-/// `existing_article_names` is a list of (tag_id, tag_name) for all tags that already have wiki articles,
-/// used to instruct the LLM to create [[wiki links]] to related articles.
-pub async fn generate_wiki_content(
-    provider_config: &ProviderConfig,
-    input: &WikiGenerationInput,
-    model: &str,
-    existing_article_names: &[(String, String)],
-) -> Result<WikiArticleWithCitations, String> {
-    // Build source materials for prompt
-    let mut source_materials = String::new();
-    for (i, chunk) in input.chunks.iter().enumerate() {
-        source_materials.push_str(&format!("[{}] {}\n\n", i + 1, chunk.content));
-    }
-
-    // Build existing articles list for cross-linking
-    let articles_section = if existing_article_names.is_empty() {
-        String::new()
-    } else {
-        let names: Vec<&str> = existing_article_names
-            .iter()
-            .filter(|(tid, _)| tid != &input.tag_id) // Exclude self
-            .map(|(_, name)| name.as_str())
-            .collect();
-        if names.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "EXISTING WIKI ARTICLES IN THIS KNOWLEDGE BASE:\n{}\n\n",
-                names.join(", ")
-            )
-        }
-    };
-
-    let user_content = format!(
-        "Write a wiki article about \"{}\".\n\n{}\
-         SOURCE MATERIALS:\n{}\
-         Write the article now, citing sources with [N] notation.{}",
-        input.tag_name,
-        articles_section,
-        source_materials,
-        if articles_section.is_empty() {
-            ""
-        } else {
-            " Use [[Article Name]] to link to other articles listed above where relevant."
-        }
-    );
-
-    // Call LLM API
-    let result =
-        call_llm_for_wiki(provider_config, WIKI_GENERATION_SYSTEM_PROMPT, &user_content, model)
-            .await?;
-
-    // Create article
-    let article_id = Uuid::new_v4().to_string();
-    let now = Utc::now().to_rfc3339();
-
-    let article = WikiArticle {
-        id: article_id.clone(),
-        tag_id: input.tag_id.clone(),
-        content: result.article_content.clone(),
-        created_at: now.clone(),
-        updated_at: now,
-        atom_count: input.atom_count,
-    };
-
-    // Extract citations from the article content
-    let citations = extract_citations(&article_id, &result.article_content, &input.chunks)?;
-
-    Ok(WikiArticleWithCitations { article, citations })
-}
-
-/// Update wiki article content via API (async, no db needed)
-pub async fn update_wiki_content(
-    provider_config: &ProviderConfig,
-    input: &WikiUpdateInput,
-    model: &str,
-    existing_article_names: &[(String, String)],
-) -> Result<WikiArticleWithCitations, String> {
-    // Build existing sources section
-    let mut existing_sources = String::new();
-    for citation in &input.existing_citations {
-        existing_sources.push_str(&format!(
-            "[{}] {}\n\n",
-            citation.citation_index, citation.excerpt
-        ));
-    }
-
-    // Build new sources section (continuing numbering)
-    let start_index = input.existing_citations.len() as i32 + 1;
-    let mut new_sources = String::new();
-    for (i, chunk) in input.new_chunks.iter().enumerate() {
-        new_sources.push_str(&format!(
-            "[{}] {}\n\n",
-            start_index + i as i32,
-            chunk.content
-        ));
-    }
-
-    // Build existing articles list for cross-linking
-    let articles_section = if existing_article_names.is_empty() {
-        String::new()
-    } else {
-        let names: Vec<&str> = existing_article_names
-            .iter()
-            .filter(|(tid, _)| tid != &input.tag_id)
-            .map(|(_, name)| name.as_str())
-            .collect();
-        if names.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "\nEXISTING WIKI ARTICLES IN THIS KNOWLEDGE BASE:\n{}\n",
-                names.join(", ")
-            )
-        }
-    };
-
-    let user_content = format!(
-        "CURRENT ARTICLE:\n{}\n\nEXISTING SOURCES (already cited as [1] through [{}]):\n{}\nNEW SOURCES TO INCORPORATE (cite as [{}] onwards):\n{}{}\nUpdate the article to incorporate the new information.{}",
-        input.existing_article.content,
-        input.existing_citations.len(),
-        existing_sources,
-        start_index,
-        new_sources,
-        articles_section,
-        if articles_section.is_empty() {
-            ""
-        } else {
-            " Use [[Article Name]] to link to other articles listed above where relevant."
-        }
-    );
-
-    // Call LLM API
-    let result =
-        call_llm_for_wiki(provider_config, WIKI_UPDATE_SYSTEM_PROMPT, &user_content, model).await?;
-
-    // Create updated article
-    let now = Utc::now().to_rfc3339();
-    let article = WikiArticle {
-        id: input.existing_article.id.clone(),
-        tag_id: input.tag_id.clone(),
-        content: result.article_content.clone(),
-        created_at: input.existing_article.created_at.clone(),
-        updated_at: now,
-        atom_count: input.atom_count,
-    };
-
-    // Extract all citations from the updated content
-    // Combine existing chunks with new chunks for citation mapping
-    let mut all_chunks: Vec<ChunkWithContext> = input
-        .existing_citations
-        .iter()
-        .map(|c| ChunkWithContext {
-            atom_id: c.atom_id.clone(),
-            chunk_index: c.chunk_index.unwrap_or(0),
-            content: c.excerpt.clone(),
-            similarity_score: 1.0,
-        })
-        .collect();
-    all_chunks.extend(input.new_chunks.clone());
-
-    let citations = extract_citations(&article.id, &result.article_content, &all_chunks)?;
-
-    Ok(WikiArticleWithCitations { article, citations })
+#[derive(Deserialize)]
+pub(crate) struct WikiGenerationResult {
+    pub article_content: String,
+    #[allow(dead_code)]
+    pub citations_used: Vec<i32>,
 }
 
 /// Call LLM provider for wiki generation
-async fn call_llm_for_wiki(
+pub(crate) async fn call_llm_for_wiki(
     provider_config: &ProviderConfig,
     system_prompt: &str,
     user_content: &str,
@@ -667,8 +227,10 @@ async fn call_llm_for_wiki(
     Err(last_error)
 }
 
+// ==================== Shared Utilities ====================
+
 /// Extract citations from article content and map to source chunks
-fn extract_citations(
+pub(crate) fn extract_citations(
     _article_id: &str,
     content: &str,
     chunks: &[ChunkWithContext],
@@ -724,13 +286,156 @@ fn extract_citations(
     Ok(citations)
 }
 
-/// Save a wiki article, its citations, and wiki links to the database
+/// Get all tag IDs in hierarchy (tag + all descendants) using recursive CTE
+pub(crate) fn get_tag_hierarchy(conn: &Connection, tag_id: &str) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "WITH RECURSIVE descendant_tags(id) AS (
+                SELECT ?1
+                UNION ALL
+                SELECT t.id FROM tags t
+                INNER JOIN descendant_tags dt ON t.parent_id = dt.id
+            )
+            SELECT id FROM descendant_tags",
+        )
+        .map_err(|e| format!("Failed to prepare hierarchy query: {}", e))?;
+
+    let tag_ids: Vec<String> = stmt
+        .query_map([tag_id], |row| row.get(0))
+        .map_err(|e| format!("Failed to query hierarchy: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect hierarchy: {}", e))?;
+
+    Ok(tag_ids)
+}
+
+/// Count atoms with any of the given tags
+pub(crate) fn count_atoms_with_tags(conn: &Connection, tag_ids: &[String]) -> Result<i32, String> {
+    let placeholders = tag_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let query = format!(
+        "SELECT COUNT(DISTINCT atom_id) FROM atom_tags WHERE tag_id IN ({})",
+        placeholders
+    );
+    conn.query_row(&query, rusqlite::params_from_iter(tag_ids), |row| {
+        row.get(0)
+    })
+    .map_err(|e| format!("Failed to count atoms: {}", e))
+}
+
+/// Batch-fetch chunk details (atom_id, chunk_index, content) by chunk IDs.
+pub(crate) fn batch_fetch_chunk_details(
+    conn: &Connection,
+    chunk_ids: &[&str],
+) -> Result<std::collections::HashMap<String, (String, i32, String)>, String> {
+    let mut map = std::collections::HashMap::new();
+    // Batch in groups of 500 to stay under SQLite parameter limit
+    for batch in chunk_ids.chunks(500) {
+        let placeholders = batch.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query = format!(
+            "SELECT id, atom_id, chunk_index, content FROM atom_chunks WHERE id IN ({})",
+            placeholders
+        );
+        let mut stmt = conn.prepare(&query)
+            .map_err(|e| format!("Failed to prepare chunk details query: {}", e))?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(batch.iter()))
+            .map_err(|e| format!("Failed to query chunk details: {}", e))?;
+        while let Some(row) = rows.next().map_err(|e| format!("Failed to read row: {}", e))? {
+            let id: String = row.get(0).map_err(|e| format!("Failed to get id: {}", e))?;
+            let atom_id: String = row.get(1).map_err(|e| format!("Failed to get atom_id: {}", e))?;
+            let chunk_index: i32 = row.get(2).map_err(|e| format!("Failed to get chunk_index: {}", e))?;
+            let content: String = row.get(3).map_err(|e| format!("Failed to get content: {}", e))?;
+            map.insert(id, (atom_id, chunk_index, content));
+        }
+    }
+    Ok(map)
+}
+
+// ==================== Shared Synthesis ====================
+
+/// Synthesize a wiki article from a set of chunks.
+/// Used by both centroid and agentic strategies after source selection.
+pub(crate) async fn synthesize_article(
+    provider_config: &ProviderConfig,
+    tag_id: &str,
+    tag_name: &str,
+    chunks: &[ChunkWithContext],
+    atom_count: i32,
+    model: &str,
+    linkable_article_names: &[(String, String)],
+) -> Result<WikiArticleWithCitations, String> {
+    // Build source materials for prompt
+    let mut source_materials = String::new();
+    for (i, chunk) in chunks.iter().enumerate() {
+        source_materials.push_str(&format!("[{}] {}\n\n", i + 1, chunk.content));
+    }
+
+    // Build existing articles list for cross-linking
+    let articles_section = if linkable_article_names.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<&str> = linkable_article_names
+            .iter()
+            .filter(|(tid, _)| tid != tag_id)
+            .map(|(_, name)| name.as_str())
+            .collect();
+        if names.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "EXISTING WIKI ARTICLES IN THIS KNOWLEDGE BASE:\n{}\n\n",
+                names.join(", ")
+            )
+        }
+    };
+
+    let user_content = format!(
+        "Write a wiki article about \"{}\".\n\n{}\
+         SOURCE MATERIALS:\n{}\
+         Write the article now, citing sources with [N] notation.{}",
+        tag_name,
+        articles_section,
+        source_materials,
+        if articles_section.is_empty() {
+            ""
+        } else {
+            " Use [[Article Name]] to link to other articles listed above where relevant."
+        }
+    );
+
+    let result =
+        call_llm_for_wiki(provider_config, WIKI_GENERATION_SYSTEM_PROMPT, &user_content, model)
+            .await?;
+
+    let article_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+
+    let article = WikiArticle {
+        id: article_id.clone(),
+        tag_id: tag_id.to_string(),
+        content: result.article_content.clone(),
+        created_at: now.clone(),
+        updated_at: now,
+        atom_count,
+    };
+
+    let citations = extract_citations(&article_id, &result.article_content, chunks)?;
+
+    Ok(WikiArticleWithCitations { article, citations })
+}
+
+// ==================== Database Operations ====================
+
+/// Save a wiki article, its citations, and wiki links to the database.
+/// Archives the existing article (if any) into wiki_article_versions before replacing it.
 pub fn save_wiki_article(
     conn: &Connection,
     article: &WikiArticle,
     citations: &[WikiCitation],
     wiki_links: &[WikiLink],
 ) -> Result<(), String> {
+    // Archive existing article before deleting
+    archive_existing_article(conn, &article.tag_id)?;
+
     // Delete existing article for this tag (if any)
     conn.execute(
         "DELETE FROM wiki_articles WHERE tag_id = ?1",
@@ -784,6 +489,132 @@ pub fn save_wiki_article(
     }
 
     Ok(())
+}
+
+/// Archive the current wiki article (if any) into wiki_article_versions
+fn archive_existing_article(conn: &Connection, tag_id: &str) -> Result<(), String> {
+    // Load existing article
+    let existing: Option<(String, String, i32, String)> = conn
+        .query_row(
+            "SELECT id, content, atom_count, created_at FROM wiki_articles WHERE tag_id = ?1",
+            [tag_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .ok();
+
+    let (article_id, content, atom_count, created_at) = match existing {
+        Some(e) => e,
+        None => return Ok(()), // No existing article to archive
+    };
+
+    // Load citations for this article
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, citation_index, atom_id, chunk_index, excerpt FROM wiki_citations WHERE wiki_article_id = ?1 ORDER BY citation_index",
+        )
+        .map_err(|e| format!("Failed to prepare citation query: {}", e))?;
+    let citations: Vec<WikiCitation> = stmt
+        .query_map([&article_id], |row| {
+            Ok(WikiCitation {
+                id: row.get(0)?,
+                citation_index: row.get(1)?,
+                atom_id: row.get(2)?,
+                chunk_index: row.get(3)?,
+                excerpt: row.get(4)?,
+            })
+        })
+        .map_err(|e| format!("Failed to query citations: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect citations: {}", e))?;
+
+    // Compute next version number
+    let next_version: i32 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version_number), 0) + 1 FROM wiki_article_versions WHERE tag_id = ?1",
+            [tag_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to compute version number: {}", e))?;
+
+    // Serialize citations to JSON
+    let citations_json = serde_json::to_string(&citations)
+        .map_err(|e| format!("Failed to serialize citations: {}", e))?;
+
+    // Insert version
+    conn.execute(
+        "INSERT INTO wiki_article_versions (id, tag_id, content, citations_json, atom_count, version_number, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            Uuid::new_v4().to_string(),
+            tag_id,
+            content,
+            citations_json,
+            atom_count,
+            next_version,
+            created_at
+        ],
+    )
+    .map_err(|e| format!("Failed to insert article version: {}", e))?;
+
+    Ok(())
+}
+
+/// List version summaries for a tag, ordered by version_number descending
+pub fn list_wiki_versions(
+    conn: &Connection,
+    tag_id: &str,
+) -> Result<Vec<WikiVersionSummary>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, version_number, atom_count, created_at FROM wiki_article_versions WHERE tag_id = ?1 ORDER BY version_number DESC",
+        )
+        .map_err(|e| format!("Failed to prepare version query: {}", e))?;
+
+    let versions = stmt
+        .query_map([tag_id], |row| {
+            Ok(WikiVersionSummary {
+                id: row.get(0)?,
+                version_number: row.get(1)?,
+                atom_count: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })
+        .map_err(|e| format!("Failed to query versions: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect versions: {}", e))?;
+
+    Ok(versions)
+}
+
+/// Get a single wiki article version by ID
+pub fn get_wiki_version(
+    conn: &Connection,
+    version_id: &str,
+) -> Result<Option<WikiArticleVersion>, String> {
+    let result: Option<(String, String, String, String, i32, i32, String)> = conn
+        .query_row(
+            "SELECT id, tag_id, content, citations_json, atom_count, version_number, created_at FROM wiki_article_versions WHERE id = ?1",
+            [version_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+        )
+        .ok();
+
+    match result {
+        Some((id, tag_id, content, citations_json, atom_count, version_number, created_at)) => {
+            let citations: Vec<WikiCitation> = serde_json::from_str(&citations_json)
+                .map_err(|e| format!("Failed to deserialize citations: {}", e))?;
+
+            Ok(Some(WikiArticleVersion {
+                id,
+                tag_id,
+                content,
+                citations,
+                atom_count,
+                version_number,
+                created_at,
+            }))
+        }
+        None => Ok(None),
+    }
 }
 
 /// Load a wiki article with its citations from the database
@@ -1099,7 +930,7 @@ pub fn get_related_tags(
             if exclude_set.contains(candidate_tag_id.as_str()) {
                 continue;
             }
-            let centroid_sim = distance_to_similarity(*distance) as f64;
+            let centroid_sim = crate::embedding::distance_to_similarity(*distance) as f64;
             if centroid_sim < 0.3 {
                 continue;
             }

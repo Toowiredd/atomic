@@ -219,6 +219,27 @@ pub struct SuggestedArticle {
     pub score: f64,
 }
 
+/// Archived version of a wiki article
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WikiArticleVersion {
+    pub id: String,
+    pub tag_id: String,
+    pub content: String,
+    pub citations: Vec<WikiCitation>,
+    pub atom_count: i32,
+    pub version_number: i32,
+    pub created_at: String,
+}
+
+/// Summary of a wiki article version for list views
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WikiVersionSummary {
+    pub id: String,
+    pub version_number: i32,
+    pub atom_count: i32,
+    pub created_at: String,
+}
+
 /// Chunk with context for wiki generation
 #[derive(Debug, Clone)]
 pub struct ChunkWithContext {

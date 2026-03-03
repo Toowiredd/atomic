@@ -15,6 +15,7 @@ settings:
     INFOPLIST_KEY_UILaunchScreen_Generation: true
     INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
     INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait
+    INFOPLIST_KEY_NSCameraUsageDescription: "Atomic needs camera access to scan QR codes for server setup"
     SWIFT_STRICT_CONCURRENCY: complete
 
 packages:

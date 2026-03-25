@@ -197,7 +197,6 @@ export function HierarchicalCanvas() {
                           stroke="var(--color-accent)"
                           strokeWidth={1 + edge.weight}
                           strokeOpacity={0.15 + edge.weight * 0.2}
-                          strokeDasharray={edge.weight < 0.5 ? '4,3' : undefined}
                         />
                       );
                     })}

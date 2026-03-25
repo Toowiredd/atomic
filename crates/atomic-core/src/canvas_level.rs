@@ -809,6 +809,12 @@ fn cluster_atoms_into_groups(
     let labels = clustering::label_propagation(&edges);
     let groups = clustering::group_labels_into_clusters(&labels, 2);
 
+    // If clustering didn't produce a meaningful split (0 or 1 groups),
+    // show atoms flat to avoid an infinite drill-down loop.
+    if groups.len() <= 1 {
+        return build_flat_atom_nodes(conn, atom_ids);
+    }
+
     let clustered: HashSet<&String> = labels.keys().collect();
     let unclustered: Vec<String> = atom_ids
         .iter()
@@ -1240,7 +1246,11 @@ fn compute_edges_between_nodes(
     Ok(edges)
 }
 
-/// Simplified edge computation for atom-level nodes (direct semantic edge lookup)
+/// Maximum strongest connections to keep per atom node
+const TOP_K_EDGES_PER_ATOM: usize = 3;
+
+/// Simplified edge computation for atom-level nodes (direct semantic edge lookup).
+/// Keeps only the top-K strongest connections per atom to avoid visual noise.
 fn compute_edges_for_atom_set(
     conn: &Connection,
     atom_ids: &[String],
@@ -1252,14 +1262,33 @@ fn compute_edges_for_atom_set(
         return Ok(vec![]);
     }
 
+    // For each atom, keep only its top-K strongest edges
+    let mut per_atom: HashMap<String, Vec<(String, String, f32)>> = HashMap::new();
+    for (src, tgt, score) in &edges {
+        per_atom.entry(src.clone()).or_default().push((src.clone(), tgt.clone(), *score));
+        per_atom.entry(tgt.clone()).or_default().push((src.clone(), tgt.clone(), *score));
+    }
+
+    let mut kept: HashSet<(String, String)> = HashSet::new();
+    for (_atom_id, mut atom_edges) in per_atom {
+        atom_edges.sort_by(|a, b| b.2.total_cmp(&a.2));
+        for (src, tgt, _) in atom_edges.into_iter().take(TOP_K_EDGES_PER_ATOM) {
+            let key = if src < tgt { (src, tgt) } else { (tgt, src) };
+            kept.insert(key);
+        }
+    }
+
     Ok(edges
         .into_iter()
+        .filter(|(src, tgt, _)| {
+            let key = if src < tgt { (src.clone(), tgt.clone()) } else { (tgt.clone(), src.clone()) };
+            kept.contains(&key)
+        })
         .map(|(src, tgt, score)| CanvasEdge {
             source_id: src,
             target_id: tgt,
             weight: score / max_score,
         })
-        .filter(|e| e.weight >= EDGE_MIN_WEIGHT)
         .collect())
 }
 

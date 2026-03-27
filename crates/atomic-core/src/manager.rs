@@ -119,15 +119,56 @@ impl DatabaseManager {
             .ok_or_else(|| AtomicCoreError::Configuration("No cores loaded".to_string()))
     }
 
+    /// Resolve a database identifier to its canonical ID.
+    /// If the value matches an existing database ID, returns it as-is.
+    /// Otherwise, tries a case-insensitive name lookup.
+    fn resolve_database_id(&self, id_or_name: &str) -> Result<String, AtomicCoreError> {
+        #[cfg(feature = "postgres")]
+        if self.is_postgres() {
+            let databases = self.any_storage()?.list_databases_sync()?;
+            if databases.iter().any(|d| d.id == id_or_name) {
+                return Ok(id_or_name.to_string());
+            }
+            if let Some(db) = databases.iter().find(|d| d.name.eq_ignore_ascii_case(id_or_name)) {
+                return Ok(db.id.clone());
+            }
+            return Err(AtomicCoreError::NotFound(format!("Database '{}'", id_or_name)));
+        }
+
+        // SQLite path: check registry
+        let databases = self.registry.list_databases()?;
+        if databases.iter().any(|d| d.id == id_or_name) {
+            return Ok(id_or_name.to_string());
+        }
+        if let Some(db) = self.registry.find_database_by_name(id_or_name)? {
+            return Ok(db.id);
+        }
+        // Return the original value — let downstream handle not-found
+        Ok(id_or_name.to_string())
+    }
+
     /// Get a core for a specific database, loading it lazily if needed.
+    /// Accepts either a database ID or name — if `id` doesn't match a known
+    /// database ID, it falls back to a case-insensitive name lookup.
     pub fn get_core(&self, id: &str) -> Result<AtomicCore, AtomicCoreError> {
-        // Fast path: already loaded
+        // Fast path: already loaded by id
         {
             let cores = self.cores.read().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
             if let Some(core) = cores.get(id) {
                 return Ok(core.clone());
             }
         }
+
+        // If the id doesn't look like a known database id, try resolving by name
+        let resolved_id = self.resolve_database_id(id)?;
+        if resolved_id != id {
+            // Check cache again with the resolved id
+            let cores = self.cores.read().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+            if let Some(core) = cores.get(&resolved_id) {
+                return Ok(core.clone());
+            }
+        }
+        let id = &resolved_id;
 
         // Postgres path: create lightweight core sharing the same pool with a new db_id
         #[cfg(feature = "postgres")]

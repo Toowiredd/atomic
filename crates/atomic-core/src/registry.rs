@@ -332,6 +332,28 @@ impl Registry {
         Ok(rows)
     }
 
+    /// Find a database by name (case-insensitive). Returns the first match.
+    pub fn find_database_by_name(&self, name: &str) -> Result<Option<DatabaseInfo>, AtomicCoreError> {
+        let conn = self.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        match conn.query_row(
+            "SELECT id, name, is_default, created_at, last_opened_at FROM databases WHERE name = ?1 COLLATE NOCASE LIMIT 1",
+            [name],
+            |row| {
+                Ok(DatabaseInfo {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    is_default: row.get::<_, i32>(2)? != 0,
+                    created_at: row.get(3)?,
+                    last_opened_at: row.get(4)?,
+                })
+            },
+        ) {
+            Ok(info) => Ok(Some(info)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Create a new database entry. Returns the new database info.
     /// The actual SQLite file is created when the DatabaseManager opens it.
     pub fn create_database(&self, name: &str) -> Result<DatabaseInfo, AtomicCoreError> {

@@ -367,6 +367,34 @@ impl DatabaseStore for PostgresStorage {
         })
     }
 
+    async fn set_default_database(&self, id: &str) -> StorageResult<()> {
+        // Verify the database exists
+        let exists: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM databases WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+
+        if exists.is_none() {
+            return Err(AtomicCoreError::NotFound(format!("Database '{}'", id)));
+        }
+
+        sqlx::query("UPDATE databases SET is_default = 0 WHERE is_default = 1")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+
+        sqlx::query("UPDATE databases SET is_default = 1 WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+
+        Ok(())
+    }
+
     async fn purge_database_data(&self, db_id: &str) -> StorageResult<()> {
         // Delete from all per-database tables in dependency order (children first).
         // Tables with FKs to other per-db tables are deleted first to avoid constraint violations.

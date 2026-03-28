@@ -156,6 +156,12 @@ impl SqliteStorage {
         ))
     }
 
+    pub(crate) fn set_default_database_sync(&self, _id: &str) -> StorageResult<()> {
+        Err(AtomicCoreError::Configuration(
+            "Database management not available on SQLite storage backend".to_string(),
+        ))
+    }
+
     pub(crate) fn purge_database_data_sync(&self, _db_id: &str) -> StorageResult<()> {
         // SQLite uses separate .db files — no shared tables to purge.
         Ok(())
@@ -182,6 +188,10 @@ impl DatabaseStore for SqliteStorage {
 
     async fn get_default_database_id(&self) -> StorageResult<String> {
         self.get_default_database_id_sync()
+    }
+
+    async fn set_default_database(&self, id: &str) -> StorageResult<()> {
+        self.set_default_database_sync(id)
     }
 
     async fn purge_database_data(&self, _db_id: &str) -> StorageResult<()> {

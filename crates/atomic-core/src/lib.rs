@@ -407,6 +407,11 @@ impl AtomicCore {
 
     // ==================== Atom Operations ====================
 
+    /// Count total atoms in this database.
+    pub fn count_atoms(&self) -> Result<i32, AtomicCoreError> {
+        self.storage.count_atoms_impl()
+    }
+
     /// Get all atoms with their tags
     pub fn get_all_atoms(&self) -> Result<Vec<AtomWithTags>, AtomicCoreError> {
         self.storage.get_all_atoms_impl()

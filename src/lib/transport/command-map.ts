@@ -531,4 +531,12 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'PUT',
     path: (a) => `/api/databases/${encodeURIComponent(a.id as string)}/activate`,
   },
+  set_default_database: {
+    method: 'PUT',
+    path: (a) => `/api/databases/${encodeURIComponent(a.id as string)}/default`,
+  },
+  get_database_stats: {
+    method: 'GET',
+    path: (a) => `/api/databases/${encodeURIComponent(a.id as string)}/stats`,
+  },
 };

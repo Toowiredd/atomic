@@ -80,3 +80,32 @@ pub async fn activate_database(
         Err(e) => crate::error::error_response(e),
     }
 }
+
+#[utoipa::path(put, path = "/api/databases/{id}/default", params(("id" = String, Path, description = "Database ID")), responses((status = 200, description = "Default database changed")), tag = "databases")]
+pub async fn set_default_database(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let id = path.into_inner();
+    match state.manager.set_default_database(&id) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({"set_default": true})),
+        Err(e) => crate::error::error_response(e),
+    }
+}
+
+#[utoipa::path(get, path = "/api/databases/{id}/stats", params(("id" = String, Path, description = "Database ID")), responses((status = 200, description = "Database statistics")), tag = "databases")]
+pub async fn database_stats(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let id = path.into_inner();
+    match state.manager.get_core(&id) {
+        Ok(core) => {
+            let atom_count = core.count_atoms().unwrap_or(0);
+            HttpResponse::Ok().json(serde_json::json!({
+                "atom_count": atom_count,
+            }))
+        }
+        Err(e) => crate::error::error_response(e),
+    }
+}

@@ -13,6 +13,10 @@ export interface DatabaseInfo {
   last_opened_at: string | null;
 }
 
+export interface DatabaseStats {
+  atom_count: number;
+}
+
 interface DatabasesStore {
   databases: DatabaseInfo[];
   activeId: string | null;
@@ -24,6 +28,8 @@ interface DatabasesStore {
   renameDatabase: (id: string, name: string) => Promise<void>;
   deleteDatabase: (id: string) => Promise<void>;
   switchDatabase: (id: string) => Promise<void>;
+  setDefaultDatabase: (id: string) => Promise<void>;
+  getDatabaseStats: (id: string) => Promise<DatabaseStats>;
 }
 
 export const useDatabasesStore = create<DatabasesStore>((set, get) => ({
@@ -65,8 +71,31 @@ export const useDatabasesStore = create<DatabasesStore>((set, get) => ({
 
   deleteDatabase: async (id: string) => {
     const transport = getTransport();
+    const wasActive = get().activeId === id;
     await transport.invoke('delete_database', { id });
     await get().fetchDatabases();
+
+    // If the deleted DB was active, the backend switched to default —
+    // reset data stores to load the new active DB's data
+    if (wasActive) {
+      useAtomsStore.getState().reset();
+      useTagsStore.getState().reset();
+      useWikiStore.getState().reset();
+      useChatStore.getState().reset();
+      useTagsStore.getState().fetchTags();
+      useAtomsStore.getState().fetchAtoms();
+    }
+  },
+
+  setDefaultDatabase: async (id: string) => {
+    const transport = getTransport();
+    await transport.invoke('set_default_database', { id });
+    await get().fetchDatabases();
+  },
+
+  getDatabaseStats: async (id: string) => {
+    const transport = getTransport();
+    return await transport.invoke('get_database_stats', { id }) as DatabaseStats;
   },
 
   switchDatabase: async (id: string) => {

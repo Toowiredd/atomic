@@ -152,6 +152,15 @@ impl AtomStore for PostgresStorage {
         Ok(result)
     }
 
+    async fn count_atoms(&self) -> StorageResult<i32> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM atoms WHERE db_id = $1")
+            .bind(&self.db_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        Ok(count as i32)
+    }
+
     async fn get_atom(&self, id: &str) -> StorageResult<Option<AtomWithTags>> {
         let row: Option<(
             String, String, String, String,

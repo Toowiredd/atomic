@@ -392,6 +392,16 @@ impl DatabaseManager {
         self.registry.rename_database(id, name)
     }
 
+    /// Set a database as the new default.
+    pub fn set_default_database(&self, id: &str) -> Result<(), AtomicCoreError> {
+        #[cfg(feature = "postgres")]
+        if self.is_postgres() {
+            return self.any_storage()?.set_default_database_sync(id);
+        }
+
+        self.registry.set_default_database(id)
+    }
+
     /// Optimize all loaded cores (call on shutdown).
     pub fn optimize_all(&self) {
         if let Ok(cores) = self.cores.read() {

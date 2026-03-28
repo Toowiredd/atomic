@@ -207,6 +207,8 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.route("/databases/{id}", web::put().to(databases::rename_database));
     cfg.route("/databases/{id}", web::delete().to(databases::delete_database));
     cfg.route("/databases/{id}/activate", web::put().to(databases::activate_database));
+    cfg.route("/databases/{id}/default", web::put().to(databases::set_default_database));
+    cfg.route("/databases/{id}/stats", web::get().to(databases::database_stats));
 
     // Import
     cfg.route(

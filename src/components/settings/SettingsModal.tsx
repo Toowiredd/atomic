@@ -37,8 +37,9 @@ import {
 import { getTransport, switchTransport, switchToLocal, isDesktopApp, isLocalServer, type HttpTransportConfig } from '../../lib/transport';
 import { pickDirectory } from '../../lib/platform';
 import { formatRelativeDate } from '../../lib/date';
+import { useDatabasesStore, type DatabaseInfo, type DatabaseStats } from '../../stores/databases';
 
-type SettingsTab = 'general' | 'ai' | 'connection' | 'feeds' | 'integrations';
+type SettingsTab = 'general' | 'ai' | 'connection' | 'feeds' | 'integrations' | 'databases';
 
 const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: 'General' },
@@ -46,7 +47,181 @@ const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'connection', label: 'Connection' },
   { id: 'feeds', label: 'Feeds' },
   { id: 'integrations', label: 'Integrations' },
+  { id: 'databases', label: 'Databases' },
 ];
+
+function DatabasesTab() {
+  const { databases, activeId, fetchDatabases, renameDatabase, deleteDatabase, setDefaultDatabase, getDatabaseStats } = useDatabasesStore();
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState('');
+  const [confirmDeleteDb, setConfirmDeleteDb] = useState<DatabaseInfo | null>(null);
+  const [deleteStats, setDeleteStats] = useState<DatabaseStats | null>(null);
+  const [isLoadingStats, setIsLoadingStats] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  useEffect(() => {
+    fetchDatabases();
+  }, [fetchDatabases]);
+
+  const handleRename = async (id: string) => {
+    const trimmed = editName.trim();
+    if (!trimmed) { setEditingId(null); return; }
+    await renameDatabase(id, trimmed);
+    setEditingId(null);
+  };
+
+  const handleStartDelete = async (db: DatabaseInfo) => {
+    setConfirmDeleteDb(db);
+    setDeleteStats(null);
+    setIsLoadingStats(true);
+    try {
+      const stats = await getDatabaseStats(db.id);
+      setDeleteStats(stats);
+    } catch {
+      setDeleteStats({ atom_count: -1 });
+    }
+    setIsLoadingStats(false);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!confirmDeleteDb) return;
+    setIsDeleting(true);
+    await deleteDatabase(confirmDeleteDb.id);
+    setIsDeleting(false);
+    setConfirmDeleteDb(null);
+  };
+
+  const handleSetDefault = async (id: string) => {
+    await setDefaultDatabase(id);
+  };
+
+  return (
+    <>
+      <div className="space-y-1">
+        <h3 className="text-sm font-medium text-[var(--color-text-primary)]">Manage Databases</h3>
+        <p className="text-xs text-[var(--color-text-secondary)]">
+          Rename, delete, or change the default database. The default database is used by integrations (MCP, API).
+        </p>
+      </div>
+
+      <div className="space-y-1">
+        {databases.map(db => (
+          <div
+            key={db.id}
+            className="flex items-center gap-3 px-3 py-2.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-main)]"
+          >
+            {editingId === db.id ? (
+              <input
+                autoFocus
+                className="flex-1 bg-transparent border border-[var(--color-accent)] rounded px-2 py-1 text-sm text-[var(--color-text-primary)] outline-none"
+                value={editName}
+                onChange={e => setEditName(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') handleRename(db.id);
+                  if (e.key === 'Escape') setEditingId(null);
+                }}
+                onBlur={() => handleRename(db.id)}
+              />
+            ) : (
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-[var(--color-text-primary)] truncate">{db.name}</span>
+                  {db.is_default && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--color-accent)]/20 text-[var(--color-accent)] font-medium">
+                      Default
+                    </span>
+                  )}
+                  {db.id === activeId && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-400 font-medium">
+                      Active
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {editingId !== db.id && (
+              <div className="flex items-center gap-1">
+                {!db.is_default && (
+                  <button
+                    onClick={() => handleSetDefault(db.id)}
+                    className="px-2 py-1 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] rounded transition-colors"
+                    title="Set as default"
+                  >
+                    Set default
+                  </button>
+                )}
+                <button
+                  onClick={() => { setEditingId(db.id); setEditName(db.name); }}
+                  className="p-1.5 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] rounded transition-colors"
+                  title="Rename"
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M12.146.854a.5.5 0 0 1 .708 0l2.292 2.292a.5.5 0 0 1 0 .708l-9.5 9.5a.5.5 0 0 1-.168.11l-4 1.5a.5.5 0 0 1-.65-.65l1.5-4a.5.5 0 0 1 .11-.168l9.5-9.5z"/>
+                  </svg>
+                </button>
+                {!db.is_default && (
+                  <button
+                    onClick={() => handleStartDelete(db)}
+                    className="p-1.5 text-[var(--color-text-tertiary)] hover:text-red-400 hover:bg-[var(--color-bg-hover)] rounded transition-colors"
+                    title="Delete database"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                      <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+                      <path fillRule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118z"/>
+                    </svg>
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {databases.length === 0 && (
+        <p className="text-sm text-[var(--color-text-secondary)] text-center py-4">No databases found.</p>
+      )}
+
+      {/* Delete confirmation dialog */}
+      {confirmDeleteDb && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50">
+          <div className="bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded-lg shadow-xl p-6 mx-4 max-w-sm w-full space-y-4">
+            <div className="space-y-2">
+              <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">Delete database?</h3>
+              <p className="text-xs text-[var(--color-text-secondary)]">
+                This will permanently delete <span className="font-medium text-[var(--color-text-primary)]">"{confirmDeleteDb.name}"</span>
+                {isLoadingStats ? (
+                  <span> and all its data.</span>
+                ) : deleteStats && deleteStats.atom_count >= 0 ? (
+                  <span> and its <span className="font-medium text-[var(--color-text-primary)]">{deleteStats.atom_count} atom{deleteStats.atom_count !== 1 ? 's' : ''}</span>. </span>
+                ) : (
+                  <span> and all its data. </span>
+                )}
+                This action cannot be undone.
+              </p>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setConfirmDeleteDb(null)}
+                disabled={isDeleting}
+                className="px-3 py-1.5 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] rounded transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmDelete}
+                disabled={isDeleting || isLoadingStats}
+                className="px-3 py-1.5 text-xs bg-red-600 hover:bg-red-700 text-white rounded transition-colors disabled:opacity-50"
+              >
+                {isDeleting ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -1890,6 +2065,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                     </div>
                   )}
                 </>
+              )}
+
+              {/* ===== DATABASES TAB ===== */}
+              {activeTab === 'databases' && (
+                <DatabasesTab />
               )}
         </div>
 

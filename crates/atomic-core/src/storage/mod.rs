@@ -171,6 +171,8 @@ use std::collections::{HashMap, HashSet};
 
 dispatch! {
     // ---- AtomStore ----
+    fn count_atoms_impl(&self) -> Result<i32, AtomicCoreError>
+        => sqlite: count_atoms_impl, pg_trait: AtomStore, pg_method: count_atoms;
     fn get_all_atoms_impl(&self) -> Result<Vec<AtomWithTags>, AtomicCoreError>
         => sqlite: get_all_atoms_impl, pg_trait: AtomStore, pg_method: get_all_atoms;
     fn get_atom_impl(&self, id: &str) -> Result<Option<AtomWithTags>, AtomicCoreError>
@@ -389,6 +391,8 @@ dispatch! {
         => sqlite: delete_database_sync, pg_trait: DatabaseStore, pg_method: delete_database;
     fn get_default_database_id_sync(&self) -> Result<String, AtomicCoreError>
         => sqlite: get_default_database_id_sync, pg_trait: DatabaseStore, pg_method: get_default_database_id;
+    fn set_default_database_sync(&self, id: &str) -> Result<(), AtomicCoreError>
+        => sqlite: set_default_database_sync, pg_trait: DatabaseStore, pg_method: set_default_database;
     fn purge_database_data_sync(&self, db_id: &str) -> Result<(), AtomicCoreError>
         => sqlite: purge_database_data_sync, pg_trait: DatabaseStore, pg_method: purge_database_data;
 

@@ -12,6 +12,12 @@ use crate::{
 use async_trait::async_trait;
 
 impl SqliteStorage {
+    pub(crate) fn count_atoms_impl(&self) -> StorageResult<i32> {
+        let conn = self.db.read_conn()?;
+        let count: i32 = conn.query_row("SELECT COUNT(*) FROM atoms", [], |row| row.get(0))?;
+        Ok(count)
+    }
+
     pub(crate) fn get_all_atoms_impl(&self) -> StorageResult<Vec<AtomWithTags>> {
         let conn = self.db.read_conn()?;
 
@@ -813,6 +819,10 @@ impl SqliteStorage {
 impl AtomStore for SqliteStorage {
     async fn get_all_atoms(&self) -> StorageResult<Vec<AtomWithTags>> {
         self.get_all_atoms_impl()
+    }
+
+    async fn count_atoms(&self) -> StorageResult<i32> {
+        self.count_atoms_impl()
     }
 
     async fn get_atom(&self, id: &str) -> StorageResult<Option<AtomWithTags>> {

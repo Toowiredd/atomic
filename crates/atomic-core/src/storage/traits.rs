@@ -26,6 +26,9 @@ pub trait AtomStore: Send + Sync {
     /// Get all atoms with their tags.
     async fn get_all_atoms(&self) -> StorageResult<Vec<AtomWithTags>>;
 
+    /// Count total atoms in this database.
+    async fn count_atoms(&self) -> StorageResult<i32>;
+
     /// Get a single atom by ID with its tags.
     async fn get_atom(&self, id: &str) -> StorageResult<Option<AtomWithTags>>;
 
@@ -696,6 +699,9 @@ pub trait DatabaseStore: Send + Sync {
 
     /// Get the ID of the default database.
     async fn get_default_database_id(&self) -> StorageResult<String>;
+
+    /// Set a database as the new default.
+    async fn set_default_database(&self, id: &str) -> StorageResult<()>;
 
     /// Purge all data for a logical database (delete all rows with the given db_id).
     /// Called after deleting the database entry to avoid orphaned data.

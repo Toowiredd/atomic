@@ -409,6 +409,32 @@ impl Registry {
         Ok(())
     }
 
+    /// Set a database as the default, clearing the flag from the previous default.
+    /// Cannot set a non-existent database as default.
+    pub fn set_default_database(&self, id: &str) -> Result<(), AtomicCoreError> {
+        let conn = self.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+
+        // Verify the database exists
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM databases WHERE id = ?1",
+                [id],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+
+        if !exists {
+            return Err(AtomicCoreError::NotFound(format!("Database '{}'", id)));
+        }
+
+        conn.execute("UPDATE databases SET is_default = 0 WHERE is_default = 1", [])?;
+        conn.execute(
+            "UPDATE databases SET is_default = 1 WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
+    }
+
     /// Get the ID of the default database.
     pub fn get_default_database_id(&self) -> Result<String, AtomicCoreError> {
         let conn = self.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
@@ -702,6 +728,35 @@ mod tests {
         let registry = Registry::open_or_create(dir.path()).unwrap();
 
         let result = registry.delete_database("default");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_default_database() {
+        let dir = TempDir::new().unwrap();
+        let registry = Registry::open_or_create(dir.path()).unwrap();
+
+        let db = registry.create_database("Second").unwrap();
+        assert!(!db.is_default);
+
+        registry.set_default_database(&db.id).unwrap();
+
+        let databases = registry.list_databases().unwrap();
+        let old_default = databases.iter().find(|d| d.id == "default").unwrap();
+        let new_default = databases.iter().find(|d| d.id == db.id).unwrap();
+        assert!(!old_default.is_default);
+        assert!(new_default.is_default);
+
+        // Verify get_default_database_id returns the new one
+        let default_id = registry.get_default_database_id().unwrap();
+        assert_eq!(default_id, db.id);
+    }
+
+    #[test]
+    fn test_set_default_nonexistent() {
+        let dir = TempDir::new().unwrap();
+        let registry = Registry::open_or_create(dir.path()).unwrap();
+        let result = registry.set_default_database("nonexistent");
         assert!(result.is_err());
     }
 

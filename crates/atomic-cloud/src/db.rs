@@ -189,9 +189,11 @@ pub async fn get_instance_by_subdomain(
     pool: &PgPool,
     subdomain: &str,
 ) -> Result<Option<Instance>, CloudError> {
-    sqlx::query_as::<_, Instance>("SELECT * FROM instances WHERE subdomain = $1")
-        .bind(subdomain)
-        .fetch_optional(pool)
+    sqlx::query_as::<_, Instance>(
+        "SELECT * FROM instances WHERE subdomain = $1 AND status != 'destroyed'",
+    )
+    .bind(subdomain)
+    .fetch_optional(pool)
         .await
         .map_err(CloudError::from)
 }

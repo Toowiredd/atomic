@@ -106,30 +106,18 @@ fn create_manager(
                 atomic_core::DatabaseManager::new_deferred(data_dir)
             } else {
                 // Databases exist, no passphrase — try opening unencrypted.
-                // If they're encrypted, this will fail and we prompt.
+                // If they're encrypted, start in locked/deferred mode and
+                // serve an unlock endpoint for the UI to provide the passphrase.
                 match atomic_core::DatabaseManager::new_encrypted(data_dir, None) {
                     Ok(manager) => manager,
                     Err(_) => {
-                        // Likely encrypted — prompt for passphrase
-                        tracing::warn!("database appears to be encrypted");
-                        let pp = prompt_passphrase();
-                        atomic_core::DatabaseManager::new_encrypted(data_dir, Some(pp))
-                            .expect("Failed to open database — wrong passphrase?")
+                        tracing::info!("database is encrypted — waiting for unlock via UI");
+                        atomic_core::DatabaseManager::new_deferred(data_dir)
                     }
                 }
             }
         }
     }
-}
-
-/// Prompt the user for a passphrase on stdin.
-fn prompt_passphrase() -> String {
-    eprint!("  Enter passphrase: ");
-    let mut passphrase = String::new();
-    std::io::stdin()
-        .read_line(&mut passphrase)
-        .expect("Failed to read passphrase");
-    passphrase.trim().to_string()
 }
 
 fn run_token_command(core: &atomic_core::AtomicCore, action: TokenAction) {
@@ -375,6 +363,7 @@ async fn run_server(
             // Instance setup (public, no auth — guarded by zero-token check)
             .route("/api/setup/status", web::get().to(routes::setup::setup_status))
             .route("/api/setup/claim", web::post().to(routes::setup::claim_instance))
+            .route("/api/setup/unlock", web::post().to(routes::setup::unlock_instance))
             // OAuth flow (public, no auth)
             .route("/oauth/register", web::post().to(routes::oauth::register))
             .route(

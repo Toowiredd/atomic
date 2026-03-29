@@ -9,13 +9,16 @@ interface WelcomeStepProps {
   onNext: () => void;
 }
 
-type SetupMode = 'checking' | 'claim' | 'manual';
+type SetupMode = 'checking' | 'claim' | 'unlock' | 'manual';
 
 export function WelcomeStep({ state, dispatch, onNext }: WelcomeStepProps) {
   const isDesktop = isDesktopApp();
   const [setupMode, setSetupMode] = useState<SetupMode>('checking');
   const [isClaiming, setIsClaiming] = useState(false);
   const [claimError, setClaimError] = useState<string | null>(null);
+  const [isUnlocking, setIsUnlocking] = useState(false);
+  const [unlockPassphrase, setUnlockPassphrase] = useState('');
+  const [unlockError, setUnlockError] = useState<string | null>(null);
   const [claimedToken, setClaimedToken] = useState<string | null>(null);
   const [tokenCopied, setTokenCopied] = useState(false);
   const [passphrase, setPassphrase] = useState('');
@@ -30,13 +33,14 @@ export function WelcomeStep({ state, dispatch, onNext }: WelcomeStepProps) {
     const baseUrl = window.location.origin;
     fetch(`${baseUrl}/api/setup/status`)
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`${r.status}`)))
-      .then((data: { needs_setup: boolean }) => {
-        if (data.needs_setup) {
-          dispatch({ type: 'SET_SERVER_URL', value: baseUrl });
+      .then((data: { needs_setup: boolean; needs_unlock: boolean }) => {
+        dispatch({ type: 'SET_SERVER_URL', value: baseUrl });
+        if (data.needs_unlock) {
+          setSetupMode('unlock');
+        } else if (data.needs_setup) {
           setSetupMode('claim');
         } else {
           // Server exists at same origin but is already claimed — pre-fill URL
-          dispatch({ type: 'SET_SERVER_URL', value: baseUrl });
           setSetupMode('manual');
         }
       })
@@ -80,6 +84,29 @@ export function WelcomeStep({ state, dispatch, onNext }: WelcomeStepProps) {
       setClaimError(String(e instanceof Error ? e.message : e));
     } finally {
       setIsClaiming(false);
+    }
+  };
+
+  const handleUnlock = async () => {
+    setIsUnlocking(true);
+    setUnlockError(null);
+    const baseUrl = state.serverUrl.trim().replace(/\/$/, '');
+    try {
+      const resp = await fetch(`${baseUrl}/api/setup/unlock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ passphrase: unlockPassphrase }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+        throw new Error(err.error || err.hint || `HTTP ${resp.status}`);
+      }
+      // Unlocked — now check if we need to show manual login or already have a token
+      setSetupMode('manual');
+    } catch (e) {
+      setUnlockError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setIsUnlocking(false);
     }
   };
 
@@ -312,6 +339,48 @@ export function WelcomeStep({ state, dispatch, onNext }: WelcomeStepProps) {
         >
           Connect to a different server instead
         </button>
+      </div>
+    );
+  }
+
+  // Encrypted database — needs unlock
+  if (setupMode === 'unlock') {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-center space-y-6 px-8">
+        <div className="w-16 h-16 rounded-2xl bg-[var(--color-accent)]/10 flex items-center justify-center">
+          <svg className="w-8 h-8 text-[var(--color-accent)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+          </svg>
+        </div>
+
+        <div>
+          <h2 className="text-2xl font-bold text-[var(--color-text-primary)] mb-2">
+            Database Locked
+          </h2>
+          <p className="text-[var(--color-text-secondary)] max-w-md">
+            Your database is encrypted. Enter your passphrase to unlock it.
+          </p>
+        </div>
+
+        <div className="w-full max-w-sm space-y-3">
+          <input
+            type="password"
+            value={unlockPassphrase}
+            onChange={(e) => setUnlockPassphrase(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && unlockPassphrase) handleUnlock(); }}
+            placeholder="Passphrase"
+            autoFocus
+            className="w-full px-3 py-2 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-md text-[var(--color-text-primary)] placeholder-[var(--color-text-secondary)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] focus:border-transparent text-sm"
+          />
+
+          <Button onClick={handleUnlock} disabled={isUnlocking || !unlockPassphrase}>
+            {isUnlocking ? 'Unlocking...' : 'Unlock'}
+          </Button>
+
+          {unlockError && (
+            <div className="text-sm text-red-500">{unlockError}</div>
+          )}
+        </div>
       </div>
     );
   }

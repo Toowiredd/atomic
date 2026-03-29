@@ -74,6 +74,11 @@ impl DatabaseManager {
         self.registry.read().map(|r| r.is_some()).unwrap_or(false)
     }
 
+    /// Get the data directory path.
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     /// Initialize the manager, creating the registry and databases with an optional passphrase.
     /// Called during the setup/claim flow when databases were deferred.
     pub fn initialize(&self, passphrase: Option<String>) -> Result<(), AtomicCoreError> {

@@ -6,6 +6,13 @@ use serde::Deserialize;
 
 /// GET /api/setup/status — Check if the instance needs initial setup
 pub async fn setup_status(state: web::Data<AppState>) -> HttpResponse {
+    if !state.manager.is_initialized() {
+        return HttpResponse::Ok().json(serde_json::json!({
+            "needs_setup": true,
+            "needs_passphrase": true,
+        }));
+    }
+
     let core = match state.manager.active_core() {
         Ok(c) => c,
         Err(e) => return crate::error::error_response(e),
@@ -15,6 +22,7 @@ pub async fn setup_status(state: web::Data<AppState>) -> HttpResponse {
             let active = tokens.iter().filter(|t| !t.is_revoked).count();
             HttpResponse::Ok().json(serde_json::json!({
                 "needs_setup": active == 0,
+                "needs_passphrase": false,
             }))
         }
         Ok(Err(e)) => crate::error::error_response(e),
@@ -25,14 +33,29 @@ pub async fn setup_status(state: web::Data<AppState>) -> HttpResponse {
 #[derive(Deserialize)]
 pub struct ClaimBody {
     pub name: Option<String>,
+    /// Optional passphrase for SQLCipher database encryption.
+    /// If set, all databases will be encrypted at rest.
+    /// Cannot be changed after initial setup.
+    pub passphrase: Option<String>,
 }
 
-/// POST /api/setup/claim — Create the first API token (only works when no tokens exist)
+/// POST /api/setup/claim — Create the first API token (only works when no tokens exist).
+/// If the manager is not yet initialized (deferred mode), this also creates the databases
+/// with the optional passphrase for encryption.
 pub async fn claim_instance(
     state: web::Data<AppState>,
     body: web::Json<ClaimBody>,
 ) -> HttpResponse {
-    let name = body.into_inner().name.unwrap_or_else(|| "default".to_string());
+    let body = body.into_inner();
+    let name = body.name.unwrap_or_else(|| "default".to_string());
+
+    // Initialize databases if in deferred mode
+    if !state.manager.is_initialized() {
+        if let Err(e) = state.manager.initialize(body.passphrase) {
+            return crate::error::error_response(e);
+        }
+    }
+
     let core = match state.manager.active_core() {
         Ok(c) => c,
         Err(e) => return crate::error::error_response(e),

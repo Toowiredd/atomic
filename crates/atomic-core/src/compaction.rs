@@ -222,6 +222,10 @@ async fn get_merge_suggestions(
             }
             Err(e) => {
                 let err_str = e.to_string();
+                eprintln!("=== MERGE LLM ERROR (attempt {}/{}) ===", attempt + 1, 3);
+                eprintln!("Error: {}", err_str);
+                eprintln!("======================================");
+                
                 if e.is_retryable() {
                     last_error = err_str;
                     continue;

@@ -52,6 +52,7 @@ pub struct ProviderConfig {
     pub ollama_embedding_model: String,
     pub ollama_llm_model: String,
     pub ollama_context_length: usize,
+    pub ollama_timeout_secs: u64,
     // OpenAI-compatible settings
     pub openai_compat_base_url: String,
     pub openai_compat_api_key: Option<String>,
@@ -90,6 +91,9 @@ impl ProviderConfig {
             ollama_context_length: settings.get("ollama_context_length")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(65536),
+            ollama_timeout_secs: settings.get("ollama_timeout_secs")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(120), // Default 2 minutes
             openai_compat_base_url: settings.get("openai_compat_base_url")
                 .cloned()
                 .unwrap_or_default(),
@@ -190,7 +194,7 @@ pub fn create_embedding_provider(config: &ProviderConfig) -> Result<Arc<dyn Embe
             Ok(Arc::new(OpenRouterProvider::new(api_key)))
         }
         ProviderType::Ollama => {
-            Ok(Arc::new(OllamaProvider::new(Some(config.ollama_host.clone()))))
+            Ok(Arc::new(OllamaProvider::new(Some(config.ollama_host.clone()), Some(config.ollama_timeout_secs))))
         }
         ProviderType::OpenAICompat => {
             if config.openai_compat_base_url.is_empty() {
@@ -213,7 +217,7 @@ pub fn create_llm_provider(config: &ProviderConfig) -> Result<Arc<dyn LlmProvide
             Ok(Arc::new(OpenRouterProvider::new(api_key)))
         }
         ProviderType::Ollama => {
-            Ok(Arc::new(OllamaProvider::new(Some(config.ollama_host.clone()))))
+            Ok(Arc::new(OllamaProvider::new(Some(config.ollama_host.clone()), Some(config.ollama_timeout_secs))))
         }
         ProviderType::OpenAICompat => {
             if config.openai_compat_base_url.is_empty() {
@@ -236,7 +240,7 @@ pub fn create_streaming_llm_provider(config: &ProviderConfig) -> Result<Arc<dyn 
             Ok(Arc::new(OpenRouterProvider::new(api_key)))
         }
         ProviderType::Ollama => {
-            Ok(Arc::new(OllamaProvider::new(Some(config.ollama_host.clone()))))
+            Ok(Arc::new(OllamaProvider::new(Some(config.ollama_host.clone()), Some(config.ollama_timeout_secs))))
         }
         ProviderType::OpenAICompat => {
             if config.openai_compat_base_url.is_empty() {

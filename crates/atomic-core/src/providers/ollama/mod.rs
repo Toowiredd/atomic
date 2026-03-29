@@ -24,9 +24,10 @@ pub struct OllamaProvider {
 }
 
 impl OllamaProvider {
-    pub fn new(base_url: Option<String>) -> Self {
+    pub fn new(base_url: Option<String>, timeout_secs: Option<u64>) -> Self {
+        let timeout = Duration::from_secs(timeout_secs.unwrap_or(120));
         let client = Client::builder()
-            .timeout(Duration::from_secs(60))
+            .timeout(timeout)
             .build()
             .unwrap_or_else(|_| Client::new());
 

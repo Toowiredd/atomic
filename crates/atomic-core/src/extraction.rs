@@ -250,6 +250,10 @@ pub async fn extract_tags_from_content(
             }
             Err(e) => {
                 let err_str = e.to_string();
+                eprintln!("=== TAG EXTRACTION LLM ERROR (attempt {}/{}) ===", attempt + 1, 3);
+                eprintln!("Error: {}", err_str);
+                eprintln!("================================================");
+                
                 if e.is_retryable() {
                     last_error = err_str;
                     continue;
@@ -349,6 +353,10 @@ pub async fn extract_tags_from_chunk(
             }
             Err(e) => {
                 let err_str = e.to_string();
+                eprintln!("=== TAG EXTRACTION LLM ERROR (attempt {}/{}) ===", attempt + 1, 3);
+                eprintln!("Error: {}", err_str);
+                eprintln!("================================================");
+                
                 if e.is_retryable() {
                     last_error = err_str;
                     continue;
@@ -719,6 +727,10 @@ pub async fn consolidate_atom_tags(
             }
             Err(e) => {
                 let err_str = e.to_string();
+                eprintln!("=== TAG CONSOLIDATION LLM ERROR (attempt {}/{}) ===", attempt + 1, 3);
+                eprintln!("Error: {}", err_str);
+                eprintln!("======================================================");
+                
                 if e.is_retryable() {
                     last_error = err_str;
                     continue;

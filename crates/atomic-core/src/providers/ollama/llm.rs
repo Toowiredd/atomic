@@ -22,6 +22,8 @@ struct ChatRequest {
     format: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<ChatOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
     stream: bool,
 }
 
@@ -193,12 +195,20 @@ pub async fn complete(
         None
     };
 
+    // Disable thinking for faster responses when minimize_reasoning is true
+    let think = if config.params.minimize_reasoning {
+        Some(false)
+    } else {
+        None
+    };
+
     let request = ChatRequest {
         model: config.model.clone(),
         messages: api_messages,
         tools: None,
         format,
         options,
+        think,
         stream: false,
     };
 
@@ -261,12 +271,20 @@ pub async fn complete_with_tools(
         None
     };
 
+    // Disable thinking for faster responses when minimize_reasoning is true
+    let think = if config.params.minimize_reasoning {
+        Some(false)
+    } else {
+        None
+    };
+
     let request = ChatRequest {
         model: config.model.clone(),
         messages: api_messages,
         tools: api_tools,
         format,
         options,
+        think,
         stream: false,
     };
 
@@ -326,12 +344,20 @@ pub async fn complete_streaming_with_tools(
         None
     };
 
+    // Disable thinking for faster responses when minimize_reasoning is true
+    let think = if config.params.minimize_reasoning {
+        Some(false)
+    } else {
+        None
+    };
+
     let request = ChatRequest {
         model: config.model.clone(),
         messages: api_messages,
         tools: api_tools,
         format: None, // Streaming doesn't support structured output
         options,
+        think,
         stream: true,
     };
 

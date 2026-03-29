@@ -15,6 +15,7 @@ pub const DEFAULT_SETTINGS: &[(&str, &str)] = &[
     ("ollama_host", DEFAULT_OLLAMA_HOST),
     ("ollama_embedding_model", "nomic-embed-text"),
     ("ollama_llm_model", "llama3.2"),
+    ("ollama_timeout_secs", "120"), // 2 minutes default for Ollama (local models can be slow)
     ("ollama_context_length", "65536"),
     ("openrouter_context_length", ""),
     ("embedding_model", "openai/text-embedding-3-small"),

@@ -273,6 +273,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [ollamaEmbeddingModel, setOllamaEmbeddingModel] = useState('nomic-embed-text');
   const [ollamaLlmModel, setOllamaLlmModel] = useState('llama3.2');
   const [ollamaContextLength, setOllamaContextLength] = useState('65536');
+  const [ollamaTimeoutSecs, setOllamaTimeoutSecs] = useState('120');
   const [isLoadingOllamaModels, setIsLoadingOllamaModels] = useState(false);
 
   // Common settings
@@ -650,6 +651,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     setOllamaEmbeddingModel(settings.ollama_embedding_model || 'nomic-embed-text');
     setOllamaLlmModel(settings.ollama_llm_model || 'llama3.2');
     setOllamaContextLength(settings.ollama_context_length || '65536');
+    setOllamaTimeoutSecs(settings.ollama_timeout_secs || '120');
     setOpenaiCompatBaseUrl(settings.openai_compat_base_url || '');
     setOpenaiCompatApiKey(settings.openai_compat_api_key || '');
     setOpenaiCompatEmbeddingModel(settings.openai_compat_embedding_model || '');
@@ -1242,6 +1244,28 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                                 { value: '131072', label: '128K' },
                                 { value: '262144', label: '256K' },
                                 { value: '1000000', label: '1M' },
+                              ]}
+                            />
+                          </div>
+
+                          {/* Timeout */}
+                          <div className="space-y-1">
+                            <label className="block text-sm font-medium text-[var(--color-text-primary)]">
+                              Request Timeout
+                            </label>
+                            <p className="text-xs text-[var(--color-text-secondary)]">
+                              Maximum time to wait for Ollama to respond
+                            </p>
+                            <CustomSelect
+                              value={ollamaTimeoutSecs}
+                              onChange={(v) => { setOllamaTimeoutSecs(v); autoSave('ollama_timeout_secs', v); }}
+                              options={[
+                                { value: '30', label: '30 seconds' },
+                                { value: '60', label: '60 seconds' },
+                                { value: '120', label: '2 minutes' },
+                                { value: '180', label: '3 minutes' },
+                                { value: '300', label: '5 minutes' },
+                                { value: '600', label: '10 minutes' },
                               ]}
                             />
                           </div>

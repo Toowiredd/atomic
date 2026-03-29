@@ -37,6 +37,7 @@ export interface OnboardingState {
   ollamaModels: OllamaModel[];
   isLoadingOllamaModels: boolean;
   ollamaContextLength: string;
+  ollamaTimeoutSecs: string;
   // OpenAI Compatible
   openaiCompatBaseUrl: string;
   openaiCompatApiKey: string;
@@ -89,6 +90,7 @@ export type OnboardingAction =
   | { type: 'SET_OLLAMA_MODELS'; models: OllamaModel[] }
   | { type: 'SET_LOADING_OLLAMA_MODELS'; value: boolean }
   | { type: 'SET_OLLAMA_CONTEXT_LENGTH'; value: string }
+  | { type: 'SET_OLLAMA_TIMEOUT_SECS'; value: string }
   // OpenAI Compatible
   | { type: 'SET_OPENAI_COMPAT_BASE_URL'; value: string }
   | { type: 'SET_OPENAI_COMPAT_API_KEY'; value: string }
@@ -133,6 +135,7 @@ const initialState: OnboardingState = {
   ollamaModels: [],
   isLoadingOllamaModels: false,
   ollamaContextLength: '65536',
+  ollamaTimeoutSecs: '120',
   openaiCompatBaseUrl: '',
   openaiCompatApiKey: '',
   openaiCompatEmbeddingModel: '',
@@ -200,6 +203,8 @@ function reducer(state: OnboardingState, action: OnboardingAction): OnboardingSt
       return { ...state, isLoadingOllamaModels: action.value };
     case 'SET_OLLAMA_CONTEXT_LENGTH':
       return { ...state, ollamaContextLength: action.value };
+    case 'SET_OLLAMA_TIMEOUT_SECS':
+      return { ...state, ollamaTimeoutSecs: action.value };
     case 'SET_OPENAI_COMPAT_BASE_URL':
       return { ...state, openaiCompatBaseUrl: action.value };
     case 'SET_OPENAI_COMPAT_API_KEY':

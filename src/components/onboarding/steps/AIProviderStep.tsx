@@ -352,6 +352,25 @@ export function AIProviderStep({ state, dispatch }: AIProviderStepProps) {
                   ]}
                 />
               </div>
+
+              <div className="space-y-2">
+                <label className="block text-xs text-[var(--color-text-secondary)]">Request Timeout (seconds)</label>
+                <CustomSelect
+                  value={state.ollamaTimeoutSecs}
+                  onChange={(v) => dispatch({ type: 'SET_OLLAMA_TIMEOUT_SECS', value: v })}
+                  options={[
+                    { value: '30', label: '30 seconds' },
+                    { value: '60', label: '60 seconds' },
+                    { value: '120', label: '2 minutes' },
+                    { value: '180', label: '3 minutes' },
+                    { value: '300', label: '5 minutes' },
+                    { value: '600', label: '10 minutes' },
+                  ]}
+                />
+                <p className="text-[10px] text-[var(--color-text-tertiary)]">
+                  Maximum time to wait for Ollama to respond. Increase for slow models or large contexts.
+                </p>
+              </div>
             </div>
           )}
         </>

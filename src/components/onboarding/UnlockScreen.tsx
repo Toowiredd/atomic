@@ -3,7 +3,7 @@ import { Button } from '../ui/Button';
 
 interface UnlockScreenProps {
   baseUrl: string;
-  onUnlocked: () => void;
+  onUnlocked: () => Promise<void>;
 }
 
 export function UnlockScreen({ baseUrl, onUnlocked }: UnlockScreenProps) {
@@ -24,10 +24,11 @@ export function UnlockScreen({ baseUrl, onUnlocked }: UnlockScreenProps) {
         const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
         throw new Error(err.error || err.hint || `HTTP ${resp.status}`);
       }
-      onUnlocked();
+      // Stay in "unlocking" state while the parent reconnects the transport —
+      // the component will be unmounted once Layout transitions to the app.
+      await onUnlocked();
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
-    } finally {
       setIsUnlocking(false);
     }
   };

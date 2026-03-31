@@ -12,6 +12,7 @@ import { useTagsStore } from '../../stores/tags';
 import { useUIStore } from '../../stores/ui';
 import { useTheme } from '../../hooks';
 import { verifyProviderConfigured } from '../../lib/api';
+import { getTransport } from '../../lib/transport';
 import { isTauri } from '../../lib/platform';
 
 
@@ -93,6 +94,14 @@ export function Layout() {
   useEffect(() => {
     const checkSetup = async () => {
       try {
+        // If the transport has no server configured, skip straight to setup
+        // instead of making an authenticated call that will 503
+        const transport = getTransport();
+        if (!transport.isConnected()) {
+          setIsSetupRequired(true);
+          return;
+        }
+
         const configured = await verifyProviderConfigured();
         setIsSetupRequired(!configured);
 

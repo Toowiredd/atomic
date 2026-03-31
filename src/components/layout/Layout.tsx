@@ -12,8 +12,9 @@ import { useTagsStore } from '../../stores/tags';
 import { useUIStore } from '../../stores/ui';
 import { useTheme } from '../../hooks';
 import { verifyProviderConfigured } from '../../lib/api';
-import { getTransport } from '../../lib/transport';
+import { getTransport, switchTransport } from '../../lib/transport';
 import { isTauri } from '../../lib/platform';
+import { UnlockScreen } from '../onboarding/UnlockScreen';
 
 
 export function Layout() {
@@ -21,6 +22,7 @@ export function Layout() {
   const fetchAtoms = useAtomsStore(s => s.fetchAtoms);
   const fetchTags = useTagsStore(s => s.fetchTags);
   const [isSetupRequired, setIsSetupRequired] = useState<boolean | null>(null); // null = checking
+  const [needsUnlock, setNeedsUnlock] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Command palette state
@@ -94,10 +96,27 @@ export function Layout() {
   useEffect(() => {
     const checkSetup = async () => {
       try {
-        // If the transport has no server configured, skip straight to setup
-        // instead of making an authenticated call that will 503
+        // If the transport has no server configured, check if we have a saved
+        // config whose server just needs an unlock (encrypted DB restart).
         const transport = getTransport();
         if (!transport.isConnected()) {
+          const saved = localStorage.getItem('atomic-server-config');
+          if (saved) {
+            const config = JSON.parse(saved) as { baseUrl: string; authToken: string };
+            try {
+              const resp = await fetch(`${config.baseUrl.replace(/\/$/, '')}/api/setup/status`);
+              if (resp.ok) {
+                const data = await resp.json();
+                if (data.needs_unlock) {
+                  setNeedsUnlock(true);
+                  setIsSetupRequired(false);
+                  return;
+                }
+              }
+            } catch {
+              // Server unreachable — fall through to onboarding
+            }
+          }
           setIsSetupRequired(true);
           return;
         }
@@ -129,11 +148,39 @@ export function Layout() {
     await initializeApp();
   };
 
+  const handleUnlockComplete = async () => {
+    // After unlock, reconnect with the saved config
+    const saved = localStorage.getItem('atomic-server-config');
+    if (saved) {
+      const config = JSON.parse(saved) as { baseUrl: string; authToken: string };
+      await switchTransport(config);
+    }
+    setNeedsUnlock(false);
+    // Re-check if provider is configured
+    try {
+      const configured = await verifyProviderConfigured();
+      setIsSetupRequired(!configured);
+      if (configured) await initializeApp();
+    } catch {
+      setIsSetupRequired(true);
+    }
+  };
+
   // Show loading while checking
-  if (isSetupRequired === null) {
+  if (isSetupRequired === null && !needsUnlock) {
     return (
       <div className={`flex h-screen items-center justify-center bg-[var(--color-bg-main)] ${isTauri() ? 'pt-[28px]' : ''}`}>
         <span className="text-[var(--color-text-secondary)]">Loading...</span>
+      </div>
+    );
+  }
+
+  // Show standalone unlock screen (not inside onboarding wizard)
+  if (needsUnlock) {
+    const saved = JSON.parse(localStorage.getItem('atomic-server-config') || '{}');
+    return (
+      <div className={`flex h-screen overflow-hidden bg-[var(--color-bg-main)] ${isTauri() ? 'pt-[28px]' : ''}`}>
+        <UnlockScreen baseUrl={saved.baseUrl || ''} onUnlocked={handleUnlockComplete} />
       </div>
     );
   }

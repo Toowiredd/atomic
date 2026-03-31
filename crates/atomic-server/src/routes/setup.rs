@@ -58,6 +58,7 @@ pub async fn claim_instance(
         if let Err(e) = state.manager.initialize(body.passphrase) {
             return crate::error::error_response(e);
         }
+        run_post_init_tasks(&state);
     }
 
     let core = match state.manager.active_core() {
@@ -109,13 +110,68 @@ pub async fn unlock_instance(
         }));
     }
 
-    match state.manager.initialize(Some(body.into_inner().passphrase)) {
-        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
-            "status": "unlocked"
-        })),
-        Err(e) => HttpResponse::Unauthorized().json(serde_json::json!({
+    if let Err(e) = state.manager.initialize(Some(body.into_inner().passphrase)) {
+        return HttpResponse::Unauthorized().json(serde_json::json!({
             "error": format!("Failed to unlock: {e}"),
             "hint": "Check your passphrase and try again"
-        })),
+        }));
+    }
+
+    // Run the same startup recovery tasks that run on boot for non-encrypted instances
+    run_post_init_tasks(&state);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "unlocked"
+    }))
+}
+
+/// Runs startup recovery tasks after the manager has been initialized.
+/// Called both from `claim_instance` (fresh setup) and `unlock_instance` (encrypted restart).
+fn run_post_init_tasks(state: &web::Data<AppState>) {
+    // Migrate legacy token if present
+    if let Ok(core) = state.manager.active_core() {
+        match core.migrate_legacy_token() {
+            Ok(true) => tracing::info!("migrated legacy auth token to new token system"),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = %e, "failed to migrate legacy token"),
+        }
+    }
+
+    // Reset stuck atoms and process pending work for all databases
+    let (databases, _) = match state.manager.list_databases() {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to list databases for post-init recovery");
+            return;
+        }
+    };
+
+    for db_info in &databases {
+        let db_core = match state.manager.get_core(&db_info.id) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(db = %db_info.name, error = %e, "failed to load database");
+                continue;
+            }
+        };
+        let on_event = crate::event_bridge::embedding_event_callback(state.event_tx.clone());
+
+        match db_core.reset_stuck_processing() {
+            Ok(count) if count > 0 => tracing::info!(db = %db_info.name, count = count, "reset atoms stuck in processing state"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(db = %db_info.name, error = %e, "failed to reset stuck processing"),
+        }
+
+        match db_core.process_pending_embeddings(on_event.clone()) {
+            Ok(count) if count > 0 => tracing::info!(db = %db_info.name, count = count, "processing pending embeddings in background"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(db = %db_info.name, error = %e, "failed to start pending embeddings"),
+        }
+
+        match db_core.process_pending_tagging(on_event) {
+            Ok(count) if count > 0 => tracing::info!(db = %db_info.name, count = count, "processing pending tagging operations in background"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(db = %db_info.name, error = %e, "failed to start pending tagging"),
+        }
     }
 }

@@ -47,8 +47,10 @@ export async function initTransport(): Promise<void> {
 
 /// Switch to a remote server (saves config to localStorage)
 export async function switchTransport(config: HttpTransportConfig): Promise<void> {
-  if (activeTransport) activeTransport.disconnect();
+  const prev = activeTransport as HttpTransport | null;
+  if (prev) prev.disconnect();
   activeTransport = new HttpTransport(config);
+  if (prev) (activeTransport as HttpTransport).transferListenersFrom(prev);
   wireConnectionCallback(activeTransport);
   await activeTransport.connect();
   localStorage.setItem('atomic-server-config', JSON.stringify(config));
@@ -59,8 +61,10 @@ export async function switchToLocal(): Promise<void> {
   if (!localServerConfig) {
     throw new Error('No local server config available — not running in desktop app');
   }
-  if (activeTransport) activeTransport.disconnect();
+  const prev = activeTransport as HttpTransport | null;
+  if (prev) prev.disconnect();
   activeTransport = new HttpTransport(localServerConfig);
+  if (prev) (activeTransport as HttpTransport).transferListenersFrom(prev);
   wireConnectionCallback(activeTransport);
   await activeTransport.connect();
   localStorage.removeItem('atomic-server-config');

@@ -193,4 +193,17 @@ export class HttpTransport implements Transport {
     subs.add(callback);
     return () => { subs.delete(callback); };
   }
+
+  /** Copy all event subscriptions from another transport (used during switchTransport). */
+  transferListenersFrom(other: HttpTransport): void {
+    for (const [event, callbacks] of other.listeners) {
+      if (!this.listeners.has(event)) {
+        this.listeners.set(event, new Set());
+      }
+      const target = this.listeners.get(event)!;
+      for (const cb of callbacks) {
+        target.add(cb);
+      }
+    }
+  }
 }

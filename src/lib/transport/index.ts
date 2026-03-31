@@ -29,7 +29,12 @@ export async function initTransport(): Promise<void> {
 
     activeTransport = new HttpTransport(config);
     wireConnectionCallback(activeTransport);
-    await activeTransport.connect();
+
+    // If no auth token (fresh install or lost token), create a disconnected
+    // transport so the frontend can handle setup/claim via HTTP.
+    if (config.authToken) {
+      await activeTransport.connect();
+    }
   } else {
     // Web SPA — require explicit config from localStorage or prompt user
     const saved = localStorage.getItem('atomic-server-config');
@@ -85,4 +90,21 @@ export function isLocalServer(): boolean {
 /// Get the local server config (for MCP setup display, etc.)
 export function getLocalServerConfig(): HttpTransportConfig | null {
   return localServerConfig;
+}
+
+/// True when running desktop app on a fresh install (no auth token yet).
+/// The user needs to complete the claim flow before the transport can connect.
+export function isDesktopFreshInstall(): boolean {
+  return localServerConfig !== null && !localServerConfig.authToken;
+}
+
+/// Save the auth token to disk via Tauri IPC (desktop only).
+/// Called after a successful claim so the token persists across restarts.
+export async function saveDesktopToken(token: string): Promise<void> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('save_local_token', { token });
+  // Update in-memory config so subsequent calls reflect the new token
+  if (localServerConfig) {
+    localServerConfig.authToken = token;
+  }
 }

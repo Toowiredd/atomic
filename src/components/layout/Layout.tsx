@@ -12,7 +12,7 @@ import { useTagsStore } from '../../stores/tags';
 import { useUIStore } from '../../stores/ui';
 import { useTheme } from '../../hooks';
 import { verifyProviderConfigured } from '../../lib/api';
-import { getTransport, switchTransport } from '../../lib/transport';
+import { getTransport, switchTransport, switchToLocal, getLocalServerConfig, isDesktopApp } from '../../lib/transport';
 import { isTauri } from '../../lib/platform';
 import { UnlockScreen } from '../onboarding/UnlockScreen';
 
@@ -96,15 +96,25 @@ export function Layout() {
   useEffect(() => {
     const checkSetup = async () => {
       try {
-        // If the transport has no server configured, check if we have a saved
-        // config whose server just needs an unlock (encrypted DB restart).
+        // If the transport has no server configured, check if the server
+        // just needs an unlock (encrypted DB restart) before falling into onboarding.
         const transport = getTransport();
         if (!transport.isConnected()) {
-          const saved = localStorage.getItem('atomic-server-config');
-          if (saved) {
-            const config = JSON.parse(saved) as { baseUrl: string; authToken: string };
+          // Determine the server URL to check — desktop uses local sidecar,
+          // web uses the saved remote config from localStorage.
+          let serverBaseUrl: string | null = null;
+          if (isDesktopApp()) {
+            serverBaseUrl = getLocalServerConfig()?.baseUrl || null;
+          } else {
+            const saved = localStorage.getItem('atomic-server-config');
+            if (saved) {
+              serverBaseUrl = (JSON.parse(saved) as { baseUrl: string }).baseUrl;
+            }
+          }
+
+          if (serverBaseUrl) {
             try {
-              const resp = await fetch(`${config.baseUrl.replace(/\/$/, '')}/api/setup/status`);
+              const resp = await fetch(`${serverBaseUrl.replace(/\/$/, '')}/api/setup/status`);
               if (resp.ok) {
                 const data = await resp.json();
                 if (data.needs_unlock) {
@@ -149,11 +159,15 @@ export function Layout() {
   };
 
   const handleUnlockComplete = async () => {
-    // After unlock, reconnect with the saved config
-    const saved = localStorage.getItem('atomic-server-config');
-    if (saved) {
-      const config = JSON.parse(saved) as { baseUrl: string; authToken: string };
-      await switchTransport(config);
+    // After unlock, reconnect — desktop uses local sidecar, web uses saved config
+    if (isDesktopApp()) {
+      await switchToLocal();
+    } else {
+      const saved = localStorage.getItem('atomic-server-config');
+      if (saved) {
+        const config = JSON.parse(saved) as { baseUrl: string; authToken: string };
+        await switchTransport(config);
+      }
     }
     setNeedsUnlock(false);
     // Re-check if provider is configured
@@ -177,10 +191,12 @@ export function Layout() {
 
   // Show standalone unlock screen (not inside onboarding wizard)
   if (needsUnlock) {
-    const saved = JSON.parse(localStorage.getItem('atomic-server-config') || '{}');
+    const unlockBaseUrl = isDesktopApp()
+      ? (getLocalServerConfig()?.baseUrl || '')
+      : (JSON.parse(localStorage.getItem('atomic-server-config') || '{}').baseUrl || '');
     return (
       <div className={`flex h-screen overflow-hidden bg-[var(--color-bg-main)] ${isTauri() ? 'pt-[28px]' : ''}`}>
-        <UnlockScreen baseUrl={saved.baseUrl || ''} onUnlocked={handleUnlockComplete} />
+        <UnlockScreen baseUrl={unlockBaseUrl} onUnlocked={handleUnlockComplete} />
       </div>
     );
   }

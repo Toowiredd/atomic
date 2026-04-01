@@ -14,7 +14,7 @@ Atomic stores knowledge as **atoms** — markdown notes that are automatically c
 
 *Spatial canvas — related atoms cluster together*
 
-![Canvas View](./docs/images/canvas.png)
+<video src="./docs/images/atomicdemo.mp4" autoplay muted loop playsinline width="100%"></video>
 
 *Atoms — markdown notes with tags, sources, and neighborhood graph*
 

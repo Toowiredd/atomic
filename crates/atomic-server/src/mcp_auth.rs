@@ -159,6 +159,7 @@ mod tests {
             manager,
             event_tx,
             public_url: public_url.map(String::from),
+            log_buffer: crate::log_buffer::LogBuffer::new(0),
         });
         std::mem::forget(temp);
         (state, raw_token)

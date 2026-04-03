@@ -32,6 +32,7 @@ impl TestCtx {
             manager,
             event_tx,
             public_url: None,
+            log_buffer: atomic_server::log_buffer::LogBuffer::new(0),
         });
         TestCtx {
             _temp: temp,

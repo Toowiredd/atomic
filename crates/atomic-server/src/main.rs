@@ -7,7 +7,7 @@ mod config;
 
 use actix_cors::Cors;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer, Responder};
-use atomic_server::{auth, event_bridge, log_buffer::LogBuffer, mcp, mcp_auth, routes, state::AppState, ws, Scalar, Servable};
+use atomic_server::{auth, event_bridge, log_buffer::LogBuffer, mcp, mcp_auth, rate_limiter, request_logger, routes, security_headers, state::AppState, ws, Scalar, Servable};
 use utoipa::OpenApi;
 use clap::Parser;
 use config::{Cli, Command, TokenAction};
@@ -15,6 +15,9 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp_actix_web::transport::StreamableHttpService;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Default rate limit: 600 requests per minute per IP (10 req/s).
+const DEFAULT_RATE_LIMIT: u64 = config::DEFAULT_RATE_LIMIT;
 
 async fn health() -> impl Responder {
     HttpResponse::Ok().json(serde_json::json!({
@@ -51,17 +54,17 @@ async fn main() -> std::io::Result<()> {
         }
 
         // Server mode
-        Some(Command::Serve { port, bind, public_url, storage, database_url }) => {
+        Some(Command::Serve { port, bind, public_url, storage, database_url, allowed_origins, rate_limit }) => {
             // Auto-detect public URL on Fly.io if not explicitly set
             let public_url = public_url.or_else(|| {
                 std::env::var("FLY_APP_NAME").ok().map(|name| format!("https://{name}.fly.dev"))
             });
             let manager = create_manager(&data_dir, &storage, database_url.as_deref());
-            run_server(manager, &data_dir.display().to_string(), port, &bind, public_url, log_buffer).await
+            run_server(manager, &data_dir.display().to_string(), port, &bind, public_url, log_buffer, allowed_origins, rate_limit).await
         }
         None => {
             let manager = create_manager(&data_dir, "sqlite", None);
-            run_server(manager, &data_dir.display().to_string(), 8080, "127.0.0.1", None, log_buffer).await
+            run_server(manager, &data_dir.display().to_string(), 8080, "127.0.0.1", None, log_buffer, None, DEFAULT_RATE_LIMIT).await
         }
     }
 }
@@ -158,6 +161,8 @@ async fn run_server(
     bind: &str,
     public_url: Option<String>,
     log_buffer: LogBuffer,
+    allowed_origins: Option<String>,
+    rate_limit: u64,
 ) -> std::io::Result<()> {
     let manager = Arc::new(manager);
 
@@ -304,11 +309,31 @@ async fn run_server(
     let shutdown_manager = Arc::clone(&manager);
 
     HttpServer::new(move || {
-        let cors = Cors::permissive();
+        // Configure CORS: permissive by default, or restrict to specified origins.
+        let cors = match &allowed_origins {
+            Some(origins) => {
+                let mut builder = Cors::default()
+                    .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+                    .allowed_headers(vec![
+                        actix_web::http::header::AUTHORIZATION,
+                        actix_web::http::header::CONTENT_TYPE,
+                        actix_web::http::header::ACCEPT,
+                    ])
+                    .max_age(3600);
+                for origin in origins.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    builder = builder.allowed_origin(origin);
+                }
+                builder
+            }
+            None => Cors::permissive(),
+        };
 
         App::new()
             .wrap(cors)
             .wrap(middleware::Compress::default())
+            .wrap(request_logger::RequestLogger)
+            .wrap(security_headers::SecurityHeaders)
+            .wrap(rate_limiter::RateLimiter::new(rate_limit, 60))
             .app_data(app_state.clone())
             // Public routes (no auth)
             .route("/health", web::get().to(health))

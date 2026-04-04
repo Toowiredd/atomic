@@ -555,4 +555,89 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'GET',
     path: '/api/logs',
   },
+
+  // ==================== Import (extended) ====================
+  import_conversations: {
+    method: 'POST',
+    path: '/api/import/conversations',
+    argsMode: 'body',
+    transformArgs: (a) => ({
+      source_type: a.sourceType,
+      path: a.path,
+    }),
+  },
+  import_logs: {
+    method: 'POST',
+    path: '/api/import/logs',
+    argsMode: 'body',
+    transformArgs: (a) => ({
+      path: a.path ?? null,
+      content: a.content ?? null,
+      format: a.format ?? null,
+      source_name: a.sourceName,
+      tag_root: a.tagRoot ?? null,
+      tag_category: a.tagCategory ?? null,
+    }),
+  },
+  import_remote: {
+    method: 'POST',
+    path: '/api/import/remote',
+    argsMode: 'body',
+    transformArgs: (a) => ({
+      url: a.url,
+      token: a.token ?? null,
+      import_type: a.importType ?? 'conversations',
+      max_items: a.maxItems ?? null,
+    }),
+  },
+  persist_logs: {
+    method: 'POST',
+    path: '/api/import/persist-logs',
+  },
+
+  // ==================== Sync Sources ====================
+  list_sync_sources: {
+    method: 'GET',
+    path: '/api/sync/sources',
+  },
+  create_sync_source: {
+    method: 'POST',
+    path: '/api/sync/sources',
+    argsMode: 'body',
+    transformArgs: (a) => ({
+      name: a.name,
+      source_type: a.sourceType,
+      source_url: a.sourceUrl ?? null,
+      source_path: a.sourcePath ?? null,
+      source_token: a.sourceToken ?? null,
+      target_db_id: a.targetDbId ?? null,
+      interval_secs: a.intervalSecs ?? 0,
+    }),
+  },
+  update_sync_source: {
+    method: 'PUT',
+    path: (a) => `/api/sync/sources/${encodeURIComponent(a.id as string)}`,
+    argsMode: 'body',
+    transformArgs: (a) => ({
+      name: a.name ?? null,
+      source_url: a.sourceUrl !== undefined ? a.sourceUrl : null,
+      source_path: a.sourcePath !== undefined ? a.sourcePath : null,
+      source_token: a.sourceToken !== undefined ? a.sourceToken : null,
+      target_db_id: a.targetDbId !== undefined ? a.targetDbId : null,
+      interval_secs: a.intervalSecs ?? null,
+      enabled: a.enabled !== undefined ? a.enabled : null,
+    }),
+  },
+  delete_sync_source: {
+    method: 'DELETE',
+    path: (a) => `/api/sync/sources/${encodeURIComponent(a.id as string)}`,
+  },
+  run_sync_source: {
+    method: 'POST',
+    path: (a) => `/api/sync/sources/${encodeURIComponent(a.id as string)}/run`,
+  },
+  get_sync_status: {
+    method: 'GET',
+    path: '/api/sync/status',
+  },
 };

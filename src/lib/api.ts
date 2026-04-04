@@ -430,6 +430,10 @@ export async function exportLogs(): Promise<string> {
   return result.logs;
 }
 
+export async function persistLogs(): Promise<{ atom_id?: string; message?: string }> {
+  return getTransport().invoke('persist_logs');
+}
+
 export function getMcpConfig(serverBaseUrl: string): McpConfig {
   return {
     mcpServers: {
@@ -438,4 +442,117 @@ export function getMcpConfig(serverBaseUrl: string): McpConfig {
       },
     },
   };
+}
+
+// ==================== Extended Import ====================
+
+export interface ImportConversationsResult {
+  conversations_imported: number;
+  messages_imported: number;
+}
+
+export async function importConversations(
+  sourceType: 'chatgpt' | 'claude' | 'markdown',
+  path: string
+): Promise<ImportConversationsResult> {
+  return getTransport().invoke('import_conversations', { sourceType, path });
+}
+
+export interface ImportLogsOptions {
+  path?: string;
+  content?: string;
+  format?: 'auto' | 'json_lines' | 'syslog' | 'plain_text';
+  sourceName: string;
+  tagRoot?: string;
+  tagCategory?: string;
+}
+
+export async function importLogs(options: ImportLogsOptions): Promise<{ atom_id: string }> {
+  return getTransport().invoke('import_logs', {
+    path: options.path,
+    content: options.content,
+    format: options.format,
+    sourceName: options.sourceName,
+    tagRoot: options.tagRoot,
+    tagCategory: options.tagCategory,
+  });
+}
+
+export async function importRemote(
+  url: string,
+  token?: string,
+  maxItems?: number
+): Promise<ImportConversationsResult> {
+  return getTransport().invoke('import_remote', {
+    url,
+    token,
+    importType: 'conversations',
+    maxItems,
+  });
+}
+
+// ==================== Sync Sources ====================
+
+export interface SyncSource {
+  id: string;
+  name: string;
+  source_type: 'chatgpt' | 'claude' | 'markdown_dir' | 'remote_atomic' | 'log_file';
+  source_url: string | null;
+  source_path: string | null;
+  target_db_id: string | null;
+  interval_secs: number;
+  enabled: boolean;
+  last_synced_at: string | null;
+  last_sync_status: string | null;
+  created_at: string;
+  has_token: boolean;
+}
+
+export interface CreateSyncSourceRequest {
+  name: string;
+  sourceType: string;
+  sourceUrl?: string;
+  sourcePath?: string;
+  sourceToken?: string;
+  targetDbId?: string;
+  intervalSecs?: number;
+}
+
+export async function listSyncSources(): Promise<SyncSource[]> {
+  return getTransport().invoke('list_sync_sources');
+}
+
+export async function createSyncSource(req: CreateSyncSourceRequest): Promise<SyncSource> {
+  return getTransport().invoke('create_sync_source', req);
+}
+
+export async function updateSyncSource(
+  id: string,
+  updates: Partial<{
+    name: string;
+    sourceUrl: string | null;
+    sourcePath: string | null;
+    sourceToken: string | null;
+    targetDbId: string | null;
+    intervalSecs: number;
+    enabled: boolean;
+  }>
+): Promise<SyncSource> {
+  return getTransport().invoke('update_sync_source', { id, ...updates });
+}
+
+export async function deleteSyncSource(id: string): Promise<void> {
+  return getTransport().invoke('delete_sync_source', { id });
+}
+
+export async function runSyncSource(id: string): Promise<{ message: string; source_id: string }> {
+  return getTransport().invoke('run_sync_source', { id });
+}
+
+export async function getSyncStatus(): Promise<{
+  sources: SyncSource[];
+  total: number;
+  enabled: number;
+}> {
+  return getTransport().invoke('get_sync_status');
 }

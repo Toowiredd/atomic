@@ -628,3 +628,100 @@ pub struct SourceInfo {
     pub source: String,
     pub atom_count: i32,
 }
+
+// ==================== Insights / Discovery Types ====================
+
+/// An atom that has no or very few semantic connections in the knowledge graph,
+/// suggesting an unexplored area of knowledge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct IsolatedAtom {
+    pub atom_id: String,
+    pub title: String,
+    pub snippet: String,
+    pub connection_count: i32,
+    pub created_at: String,
+}
+
+/// A tag with very few atoms, suggesting an underexplored topic area.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SparseTag {
+    pub tag_id: String,
+    pub tag_name: String,
+    pub atom_count: i32,
+    pub parent_name: Option<String>,
+}
+
+/// An atom that acts as a bridge between otherwise disconnected parts of the
+/// knowledge graph — high-value integrative knowledge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct BridgeAtom {
+    pub atom_id: String,
+    pub title: String,
+    pub snippet: String,
+    /// Number of distinct clusters this atom connects.
+    pub cluster_span: i32,
+    /// IDs of the clusters this atom bridges.
+    pub bridged_cluster_ids: Vec<i32>,
+}
+
+/// Results from a knowledge-gap analysis of the semantic graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct KnowledgeGapsResult {
+    /// Atoms with no or very few semantic connections (unexplored islands).
+    pub isolated_atoms: Vec<IsolatedAtom>,
+    /// Tags with very few atoms (areas needing more depth).
+    pub sparse_tags: Vec<SparseTag>,
+    /// Atoms that bridge otherwise disconnected clusters (integrative hubs).
+    pub bridge_atoms: Vec<BridgeAtom>,
+}
+
+/// A single step in a serendipity walk through the knowledge graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SerendipityStep {
+    pub atom_id: String,
+    pub title: String,
+    pub snippet: String,
+    /// How this atom connects to the previous step.
+    pub connection_reason: String,
+    /// Similarity score to the previous atom (0.0–1.0), None for the start atom.
+    pub similarity_to_prev: Option<f32>,
+    pub depth: i32,
+}
+
+/// Results from a serendipity walk — a path of unexpected-but-related atoms.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SerendipityWalkResult {
+    pub start_atom_id: String,
+    pub steps: Vec<SerendipityStep>,
+}
+
+/// A pair of atoms surfaced by the time-capsule feature: an old atom that is
+/// semantically relevant to a recently added atom.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct TimeCapsulePair {
+    pub old_atom_id: String,
+    pub old_atom_title: String,
+    pub old_atom_snippet: String,
+    pub old_atom_created_at: String,
+    pub new_atom_id: String,
+    pub new_atom_title: String,
+    pub new_atom_snippet: String,
+    pub new_atom_created_at: String,
+    pub similarity_score: f32,
+}
+
+/// Results from the time-capsule feature.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct TimeCapsuleResult {
+    pub pairs: Vec<TimeCapsulePair>,
+    /// How many days back "old" atoms were drawn from.
+    pub lookback_days: i32,
+}

@@ -305,6 +305,13 @@ async fn run_server(
         });
     }
 
+    // Spawn sync source scheduler (ticks every 60 seconds, runs due sources)
+    {
+        let sync_manager = Arc::clone(&manager);
+        let sync_tx = event_tx.clone();
+        atomic_server::sync::spawn_sync_scheduler(sync_manager, sync_tx);
+    }
+
     let bind_owned = bind.to_string();
     let shutdown_manager = Arc::clone(&manager);
 

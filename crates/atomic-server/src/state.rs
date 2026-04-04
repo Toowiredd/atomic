@@ -126,6 +126,30 @@ pub enum ServerEvent {
         error: String,
     },
 
+    // Sync pipeline events
+    SyncStarted {
+        source_id: String,
+        source_name: String,
+    },
+    SyncProgress {
+        source_id: String,
+        current: i32,
+        total: i32,
+        message: String,
+    },
+    SyncComplete {
+        source_id: String,
+        source_name: String,
+        conversations_imported: i32,
+        messages_imported: i32,
+        atoms_imported: i32,
+    },
+    SyncFailed {
+        source_id: String,
+        source_name: String,
+        error: String,
+    },
+
     // Chat streaming events
     ChatStreamDelta {
         conversation_id: String,

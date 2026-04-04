@@ -63,10 +63,10 @@ pub use models::*;
 pub use providers::{ProviderConfig, ProviderType};
 pub use search::{SearchMode, SearchOptions};
 pub use tokens::ApiTokenInfo;
-pub use import::{ImportProgress, ImportResult};
+pub use import::{ImportProgress, ImportResult, ImportedConversation, ImportedMessage};
 pub use ingest::{IngestionEvent, IngestionRequest, IngestionResult, FeedPollResult};
 pub use manager::DatabaseManager;
-pub use registry::{DatabaseInfo, OAuthCodeInfo, Registry};
+pub use registry::{DatabaseInfo, OAuthCodeInfo, Registry, SyncSourceInfo};
 
 use chrono::Utc;
 use rusqlite::Connection;
@@ -1632,6 +1632,160 @@ impl AtomicCore {
         }
 
         Ok(stats)
+    }
+
+    /// Import conversations from an external source (ChatGPT, Claude, or Markdown).
+    ///
+    /// Each imported conversation is written to the local chat tables.
+    /// Returns the number of conversations and messages imported.
+    pub fn import_conversations<P>(
+        &self,
+        conversations: &[import::ImportedConversation],
+        on_progress: P,
+    ) -> Result<(i32, i32), AtomicCoreError>
+    where
+        P: Fn(ImportProgress),
+    {
+        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
+            AtomicCoreError::Configuration(
+                "Conversation import is only supported with the SQLite backend".to_string(),
+            )
+        })?;
+        let conn = sqlite.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+
+        let total = conversations.len() as i32;
+        let mut conv_count = 0i32;
+        let mut msg_count = 0i32;
+
+        for (i, imported) in conversations.iter().enumerate() {
+            if imported.messages.is_empty() {
+                continue;
+            }
+
+            let title = imported.title.as_deref();
+            let conv = chat::create_conversation(&conn, &[], title)?;
+            conv_count += 1;
+
+            for msg in &imported.messages {
+                chat::save_message(&conn, &conv.conversation.id, &msg.role, &msg.content)?;
+                msg_count += 1;
+            }
+
+            on_progress(ImportProgress {
+                current: i as i32 + 1,
+                total,
+                current_file: imported.title.clone().unwrap_or_else(|| format!("Conversation {}", i + 1)),
+                status: "importing".to_string(),
+            });
+        }
+
+        Ok((conv_count, msg_count))
+    }
+
+    /// Ingest a log file as an atom, tagged under a hierarchical tag path.
+    ///
+    /// Returns the atom ID of the newly created atom.
+    pub fn ingest_log_file<F>(
+        &self,
+        request: import::IngestLogRequest,
+        on_event: F,
+    ) -> Result<String, AtomicCoreError>
+    where
+        F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
+    {
+        let prepared = import::log_ingest::prepare_log_atom(&request);
+
+        if prepared.content.trim().is_empty() {
+            return Err(AtomicCoreError::Validation("Log content is empty".to_string()));
+        }
+
+        // Resolve or create the tag path hierarchy (e.g. ["Logs", "System", "host1"])
+        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
+            AtomicCoreError::Configuration(
+                "Log ingestion is only supported with the SQLite backend".to_string(),
+            )
+        })?;
+
+        let atom_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+
+        self.storage.insert_atom_impl(
+            &atom_id,
+            &CreateAtomRequest {
+                content: prepared.content.clone(),
+                source_url: None,
+                published_at: None,
+                tag_ids: vec![],
+            },
+            &now,
+        )?;
+
+        // Build and attach tag hierarchy
+        {
+            let conn = sqlite.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+            let mut tag_cache: HashMap<(String, Option<String>), String> = HashMap::new();
+            let mut stats = ImportResult { imported: 0, skipped: 0, errors: 0, tags_created: 0, tags_linked: 0 };
+            let mut parent_id: Option<String> = None;
+
+            for segment in &prepared.tag_path {
+                if let Some(tag_id) = get_or_create_tag(
+                    &conn,
+                    &mut tag_cache,
+                    segment,
+                    parent_id.as_deref(),
+                    &mut stats,
+                ) {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO atom_tags (atom_id, tag_id) VALUES (?1, ?2)",
+                        rusqlite::params![&atom_id, &tag_id],
+                    )?;
+                    parent_id = Some(tag_id);
+                }
+            }
+        }
+
+        // Trigger embedding
+        self.storage.set_embedding_status_sync(&atom_id, "processing").ok();
+        let storage_clone = self.storage.clone();
+        let bg_settings = self.settings_for_background();
+        let content_clone = prepared.content.clone();
+        let atom_id_clone = atom_id.clone();
+        executor::spawn(async move {
+            match bg_settings {
+                Some(s) => embedding::process_embedding_batch_with_settings(
+                    storage_clone, vec![(atom_id_clone, content_clone)], false, on_event, s,
+                ).await,
+                None => embedding::process_embedding_batch(
+                    storage_clone, vec![(atom_id_clone, content_clone)], false, on_event,
+                ).await,
+            };
+        });
+
+        Ok(atom_id)
+    }
+
+    /// Persist the current in-memory log buffer as an atom.
+    ///
+    /// This is called by the server to checkpoint recent logs before restart
+    /// or on a schedule.  The log text itself is provided by the caller (the
+    /// server owns the `LogBuffer`).
+    pub fn persist_logs_as_atom<F>(
+        &self,
+        log_text: String,
+        source_name: &str,
+        on_event: F,
+    ) -> Result<String, AtomicCoreError>
+    where
+        F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
+    {
+        let request = import::IngestLogRequest {
+            content: log_text,
+            format: import::LogFormat::PlainText,
+            source_name: source_name.to_string(),
+            tag_root: Some("Logs".to_string()),
+            tag_category: Some("Server".to_string()),
+        };
+        self.ingest_log_file(request, on_event)
     }
 
     // ==================== Content Ingestion ====================

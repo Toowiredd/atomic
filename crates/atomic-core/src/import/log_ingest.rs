@@ -93,6 +93,19 @@ pub fn prepare_log_atom(req: &IngestLogRequest) -> PreparedLogAtom {
 
 // ==================== Format detection ====================
 
+/// Compiled once at first use; matches RFC-3164 (`Jan  1 00:00:00`) and ISO-8601
+/// (`2024-01-01T00:00:00`) syslog-style line prefixes.
+static SYSLOG_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+
+fn syslog_re() -> &'static regex::Regex {
+    SYSLOG_RE.get_or_init(|| {
+        regex::Regex::new(
+            r"^(?:[A-Z][a-z]{2}\s+\d+|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\s+\S+\s+\S+",
+        )
+        .expect("SYSLOG_RE is a valid regex")
+    })
+}
+
 fn detect_format(content: &str) -> LogFormat {
     let first_non_empty = content.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
 
@@ -102,13 +115,8 @@ fn detect_format(content: &str) -> LogFormat {
 
     // Syslog: lines beginning with RFC-3164 timestamp like "Jan  1 00:00:00" or
     // ISO-8601 timestamp "2024-01-01T00:00:00" followed by hostname.
-    let syslog_re = regex::Regex::new(
-        r"^(?:[A-Z][a-z]{2}\s+\d+|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\s+\S+\s+\S+"
-    ).ok();
-    if let Some(re) = syslog_re {
-        if re.is_match(first_non_empty) {
-            return LogFormat::Syslog;
-        }
+    if syslog_re().is_match(first_non_empty) {
+        return LogFormat::Syslog;
     }
 
     LogFormat::PlainText

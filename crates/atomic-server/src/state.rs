@@ -3,8 +3,9 @@
 use crate::log_buffer::LogBuffer;
 use atomic_core::{AtomicCore, DatabaseManager};
 use serde::Serialize;
+use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 
 /// Shared application state for all route handlers
 pub struct AppState {
@@ -14,6 +15,11 @@ pub struct AppState {
     pub public_url: Option<String>,
     /// In-memory ring buffer for recent log lines (for user export)
     pub log_buffer: LogBuffer,
+    /// Set of sync source IDs currently executing.
+    ///
+    /// Prevents the scheduler and manual "run now" from starting a second
+    /// concurrent run for the same source.
+    pub sync_running: Arc<Mutex<HashSet<String>>>,
 }
 
 impl AppState {

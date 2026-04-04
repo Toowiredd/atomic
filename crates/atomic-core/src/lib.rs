@@ -1667,7 +1667,13 @@ impl AtomicCore {
             conv_count += 1;
 
             for msg in &imported.messages {
-                chat::save_message(&conn, &conv.conversation.id, &msg.role, &msg.content)?;
+                chat::save_message_with_timestamp(
+                    &conn,
+                    &conv.conversation.id,
+                    &msg.role,
+                    &msg.content,
+                    msg.created_at.as_deref(),
+                )?;
                 msg_count += 1;
             }
 

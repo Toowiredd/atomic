@@ -3,13 +3,18 @@
 //! The scheduler runs every 60 seconds, checks all enabled sync sources,
 //! and executes any that are due.  The same `execute_sync_source` function
 //! is used by the manual "run now" route trigger.
+//!
+//! A shared `sync_running` set (stored in `AppState`) prevents concurrent
+//! runs for the same source from both the scheduler and the manual trigger.
 
 use crate::event_bridge::embedding_event_callback;
 use crate::state::ServerEvent;
 use atomic_core::registry::SyncSource;
 use atomic_core::DatabaseManager;
+use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 
 // ==================== Scheduler ====================
 
@@ -20,13 +25,14 @@ use tokio::sync::broadcast;
 pub fn spawn_sync_scheduler(
     manager: Arc<DatabaseManager>,
     tx: broadcast::Sender<ServerEvent>,
+    sync_running: Arc<Mutex<HashSet<String>>>,
 ) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         interval.tick().await; // skip the immediate first tick
         loop {
             interval.tick().await;
-            tick_sync_sources(&manager, tx.clone()).await;
+            tick_sync_sources(&manager, tx.clone(), Arc::clone(&sync_running)).await;
         }
     });
 }
@@ -34,6 +40,7 @@ pub fn spawn_sync_scheduler(
 async fn tick_sync_sources(
     manager: &Arc<DatabaseManager>,
     tx: broadcast::Sender<ServerEvent>,
+    sync_running: Arc<Mutex<HashSet<String>>>,
 ) {
     let sources = match manager.registry().list_sync_sources_internal() {
         Ok(s) => s,
@@ -63,8 +70,9 @@ async fn tick_sync_sources(
         if due {
             let mgr = Arc::clone(manager);
             let tx2 = tx.clone();
+            let running = Arc::clone(&sync_running);
             tokio::spawn(async move {
-                execute_sync_source(&source, &mgr, tx2).await;
+                execute_sync_source(&source, &mgr, tx2, running).await;
             });
         }
     }
@@ -74,13 +82,25 @@ async fn tick_sync_sources(
 
 /// Run a single sync source and emit progress events.
 ///
-/// This is the shared implementation used by both the scheduler and the
-/// manual trigger route.
+/// Acquires a slot in `sync_running` to prevent concurrent runs for the same
+/// source.  Returns immediately (without emitting any event) if the source is
+/// already running.
 pub async fn execute_sync_source(
     source: &SyncSource,
     manager: &Arc<DatabaseManager>,
     tx: broadcast::Sender<ServerEvent>,
+    sync_running: Arc<Mutex<HashSet<String>>>,
 ) {
+    // Concurrency guard: skip if already running
+    {
+        let mut running = sync_running.lock().await;
+        if running.contains(&source.id) {
+            tracing::debug!(source_id = %source.id, "sync already running, skipping");
+            return;
+        }
+        running.insert(source.id.clone());
+    }
+
     let _ = tx.send(ServerEvent::SyncStarted {
         source_id: source.id.clone(),
         source_name: source.name.clone(),
@@ -94,6 +114,13 @@ pub async fn execute_sync_source(
     );
 
     let result = run_source(source, manager, tx.clone()).await;
+
+    // Always release the concurrency slot, even on panic-unwind scenarios
+    // (tokio::spawn tasks don't propagate panics, so this suffices).
+    {
+        let mut running = sync_running.lock().await;
+        running.remove(&source.id);
+    }
 
     let status = match &result {
         Ok(_) => "ok",
@@ -133,6 +160,21 @@ pub async fn execute_sync_source(
     }
 }
 
+// ==================== Path safety ====================
+
+/// Canonicalize `raw_path` and verify it exists.
+///
+/// Returns an error string if the path cannot be canonicalized (e.g.
+/// doesn't exist) to prevent path-traversal attacks via symlinks or `../`
+/// sequences in user-supplied `source_path` values.
+fn safe_canonicalize(raw_path: &str) -> Result<std::path::PathBuf, String> {
+    Path::new(raw_path)
+        .canonicalize()
+        .map_err(|e| format!("invalid path '{}': {}", raw_path, e))
+}
+
+// ==================== Per-source execution ====================
+
 /// Execute the source-specific logic.
 /// Returns (conversations_imported, messages_imported, atoms_imported).
 async fn run_source(
@@ -161,10 +203,11 @@ async fn run_source(
 
     match source.source_type.as_str() {
         "chatgpt" => {
-            let path = source.source_path.as_deref().ok_or("source_path is required for chatgpt")?;
-            let content = tokio::fs::read_to_string(path)
+            let raw = source.source_path.as_deref().ok_or("source_path is required for chatgpt")?;
+            let path = safe_canonicalize(raw)?;
+            let content = tokio::fs::read_to_string(&path)
                 .await
-                .map_err(|e| format!("cannot read {path}: {e}"))?;
+                .map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
             let conversations =
                 atomic_core::import::conversations::parse_chatgpt_export(&content)
                     .map_err(|e| format!("parse error: {e}"))?;
@@ -175,10 +218,11 @@ async fn run_source(
         }
 
         "claude" => {
-            let path = source.source_path.as_deref().ok_or("source_path is required for claude")?;
-            let content = tokio::fs::read_to_string(path)
+            let raw = source.source_path.as_deref().ok_or("source_path is required for claude")?;
+            let path = safe_canonicalize(raw)?;
+            let content = tokio::fs::read_to_string(&path)
                 .await
-                .map_err(|e| format!("cannot read {path}: {e}"))?;
+                .map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
             let conversations =
                 atomic_core::import::conversations::parse_claude_export(&content)
                     .map_err(|e| format!("parse error: {e}"))?;
@@ -189,8 +233,9 @@ async fn run_source(
         }
 
         "markdown_dir" => {
-            let dir = source.source_path.as_deref().ok_or("source_path is required for markdown_dir")?;
-            let conversations = collect_markdown_conversations(dir).await?;
+            let raw = source.source_path.as_deref().ok_or("source_path is required for markdown_dir")?;
+            let dir = safe_canonicalize(raw)?;
+            let conversations = collect_markdown_conversations(&dir).await?;
             let (c, m) = core
                 .import_conversations(&conversations, on_progress)
                 .map_err(|e| e.to_string())?;
@@ -208,18 +253,20 @@ async fn run_source(
         }
 
         "log_file" => {
-            let path = source.source_path.as_deref().ok_or("source_path is required for log_file")?;
-            let content = tokio::fs::read_to_string(path)
+            let raw = source.source_path.as_deref().ok_or("source_path is required for log_file")?;
+            let path = safe_canonicalize(raw)?;
+            let content = tokio::fs::read_to_string(&path)
                 .await
-                .map_err(|e| format!("cannot read {path}: {e}"))?;
-            let source_name = source
-                .source_url
-                .as_deref()
-                .unwrap_or_else(|| std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path));
+                .map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+            let source_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(raw)
+                .to_string();
             let request = atomic_core::import::IngestLogRequest {
                 content,
                 format: atomic_core::import::LogFormat::Auto,
-                source_name: source_name.to_string(),
+                source_name,
                 tag_root: None,
                 tag_category: None,
             };
@@ -236,13 +283,13 @@ async fn run_source(
 
 /// Walk a directory and parse every *.md / *.markdown file as a conversation.
 async fn collect_markdown_conversations(
-    dir: &str,
+    dir: &Path,
 ) -> Result<Vec<atomic_core::ImportedConversation>, String> {
-    let dir = dir.to_string();
+    let dir = dir.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut conversations = Vec::new();
         let entries = std::fs::read_dir(&dir)
-            .map_err(|e| format!("cannot read directory {dir}: {e}"))?;
+            .map_err(|e| format!("cannot read directory {}: {}", dir.display(), e))?;
 
         for entry in entries.flatten() {
             let path = entry.path();
@@ -272,7 +319,8 @@ pub async fn fetch_remote_conversations_public(
     fetch_remote_conversations(base_url, token).await
 }
 
-/// Fetch conversations from a remote Atomic server via its REST API.
+/// Fetch ALL conversations from a remote Atomic server, using offset-based
+/// pagination to handle servers with more than one page of results.
 async fn fetch_remote_conversations(
     base_url: &str,
     token: Option<&str>,
@@ -283,33 +331,47 @@ async fn fetch_remote_conversations(
         .map_err(|e| e.to_string())?;
 
     let base_url = base_url.trim_end_matches('/');
+    const PAGE_SIZE: usize = 100;
 
-    // 1. Fetch conversation list
-    let mut list_req = client.get(format!("{base_url}/api/conversations?limit=200"));
-    if let Some(t) = token {
-        list_req = list_req.bearer_auth(t);
-    }
-    let list_resp = list_req.send().await.map_err(|e| e.to_string())?;
-    if !list_resp.status().is_success() {
-        return Err(format!(
-            "remote returned {} for /api/conversations",
-            list_resp.status()
-        ));
-    }
-    let list_json: serde_json::Value = list_resp.json().await.map_err(|e| e.to_string())?;
+    // 1. Paginate the conversation list until we get a short page
+    let mut all_conv_ids: Vec<String> = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        let url = format!(
+            "{base_url}/api/conversations?limit={PAGE_SIZE}&offset={offset}"
+        );
+        let mut req = client.get(&url);
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await.map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "remote returned {} for /api/conversations",
+                resp.status()
+            ));
+        }
+        let page: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let ids: Vec<String> = page
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| c["id"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-    let conv_ids: Vec<String> = list_json
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|c| c["id"].as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+        let page_len = ids.len();
+        all_conv_ids.extend(ids);
+        if page_len < PAGE_SIZE {
+            break; // last page
+        }
+        offset += PAGE_SIZE;
+    }
 
     // 2. Fetch each conversation's full message history
     let mut results = Vec::new();
-    for id in conv_ids {
+    for id in all_conv_ids {
         let mut detail_req = client.get(format!("{base_url}/api/conversations/{id}"));
         if let Some(t) = token {
             detail_req = detail_req.bearer_auth(t);

@@ -27,7 +27,7 @@ pub struct CreateSyncSourceBody {
     pub source_token: Option<String>,
     /// Target database ID; null means the active database.
     pub target_db_id: Option<String>,
-    /// Polling interval in seconds.  0 = manual only.
+    /// Polling interval in seconds.  0 = manual only.  Negative values are rejected.
     pub interval_secs: Option<i64>,
 }
 
@@ -41,8 +41,23 @@ pub struct UpdateSyncSourceBody {
     /// Pass `null` to clear the token, a string to update it.
     pub source_token: Option<serde_json::Value>,
     pub target_db_id: Option<serde_json::Value>,
+    /// Polling interval in seconds.  0 = manual only.  Negative values are rejected.
     pub interval_secs: Option<i64>,
     pub enabled: Option<bool>,
+}
+
+// ==================== Helpers ====================
+
+/// Returns a 400 if `interval_secs` is negative.
+fn validate_interval(secs: Option<i64>) -> Option<HttpResponse> {
+    if let Some(s) = secs {
+        if s < 0 {
+            return Some(HttpResponse::BadRequest().json(ApiErrorResponse {
+                error: format!("interval_secs must be >= 0, got {s}"),
+            }));
+        }
+    }
+    None
 }
 
 // ==================== Handlers ====================
@@ -77,6 +92,11 @@ pub async fn create_sync_source(
         });
     }
 
+    // Reject negative intervals
+    if let Some(resp) = validate_interval(body.interval_secs) {
+        return resp;
+    }
+
     let registry = state.manager.registry().clone();
     let body = body.into_inner();
     blocking_ok(move || {
@@ -106,24 +126,25 @@ pub async fn update_sync_source(
     path: web::Path<String>,
     body: web::Json<UpdateSyncSourceBody>,
 ) -> HttpResponse {
+    // Reject negative intervals before hitting the DB
+    if let Some(resp) = validate_interval(body.interval_secs) {
+        return resp;
+    }
+
     let id = path.into_inner();
     let registry = state.manager.registry().clone();
     let body = body.into_inner();
 
     blocking_ok(move || {
-        // Parse nullable JSON fields into Option<Option<&str>>
-        let source_url: Option<Option<String>> = body.source_url.map(|v| {
+        // Parse nullable JSON fields into Option<Option<String>>
+        fn parse_nullable(v: serde_json::Value) -> Option<String> {
             if v.is_null() { None } else { v.as_str().map(String::from) }
-        });
-        let source_path: Option<Option<String>> = body.source_path.map(|v| {
-            if v.is_null() { None } else { v.as_str().map(String::from) }
-        });
-        let source_token: Option<Option<String>> = body.source_token.map(|v| {
-            if v.is_null() { None } else { v.as_str().map(String::from) }
-        });
-        let target_db_id: Option<Option<String>> = body.target_db_id.map(|v| {
-            if v.is_null() { None } else { v.as_str().map(String::from) }
-        });
+        }
+
+        let source_url: Option<Option<String>> = body.source_url.map(parse_nullable);
+        let source_path: Option<Option<String>> = body.source_path.map(parse_nullable);
+        let source_token: Option<Option<String>> = body.source_token.map(parse_nullable);
+        let target_db_id: Option<Option<String>> = body.target_db_id.map(parse_nullable);
 
         registry.update_sync_source(
             &id,
@@ -160,6 +181,7 @@ pub async fn delete_sync_source(
     responses(
         (status = 202, description = "Sync triggered"),
         (status = 404, description = "Not found", body = ApiErrorResponse),
+        (status = 409, description = "Sync already running", body = ApiErrorResponse),
     ),
     tag = "sync")]
 pub async fn run_sync_source(
@@ -175,11 +197,22 @@ pub async fn run_sync_source(
         Err(e) => return crate::error::error_response(e),
     };
 
+    // Check if already running without acquiring the lock for long
+    {
+        let running = state.sync_running.lock().await;
+        if running.contains(&id) {
+            return HttpResponse::Conflict().json(ApiErrorResponse {
+                error: format!("Sync source '{id}' is already running"),
+            });
+        }
+    }
+
     let manager = state.manager.clone();
     let tx = state.event_tx.clone();
+    let sync_running = state.sync_running.clone();
 
     tokio::spawn(async move {
-        crate::sync::execute_sync_source(&source, &manager, tx).await;
+        crate::sync::execute_sync_source(&source, &manager, tx, sync_running).await;
     });
 
     HttpResponse::Accepted().json(serde_json::json!({

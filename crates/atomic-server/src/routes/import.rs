@@ -93,19 +93,28 @@ pub async fn import_conversations(
 
         let conversations: Vec<atomic_core::ImportedConversation> = match source_type.as_str() {
             "chatgpt" => {
-                let content = std::fs::read_to_string(&path)
+                let canonical = std::path::Path::new(&path)
+                    .canonicalize()
+                    .map_err(|e| format!("Invalid path '{}': {}", path, e))?;
+                let content = std::fs::read_to_string(&canonical)
                     .map_err(|e| format!("Cannot read file: {e}"))?;
                 atomic_core::import::conversations::parse_chatgpt_export(&content)
                     .map_err(|e| format!("Parse error: {e}"))?
             }
             "claude" => {
-                let content = std::fs::read_to_string(&path)
+                let canonical = std::path::Path::new(&path)
+                    .canonicalize()
+                    .map_err(|e| format!("Invalid path '{}': {}", path, e))?;
+                let content = std::fs::read_to_string(&canonical)
                     .map_err(|e| format!("Cannot read file: {e}"))?;
                 atomic_core::import::conversations::parse_claude_export(&content)
                     .map_err(|e| format!("Parse error: {e}"))?
             }
             "markdown" => {
-                let dir = std::fs::read_dir(&path)
+                let canonical = std::path::Path::new(&path)
+                    .canonicalize()
+                    .map_err(|e| format!("Invalid path '{}': {}", path, e))?;
+                let dir = std::fs::read_dir(&canonical)
                     .map_err(|e| format!("Cannot read directory: {e}"))?;
                 let mut convs = Vec::new();
                 for entry in dir.flatten() {
@@ -188,13 +197,20 @@ pub async fn import_logs(
 
     let content = match (body.content, body.path.as_deref()) {
         (Some(c), _) => c,
-        (None, Some(p)) => match std::fs::read_to_string(p) {
-            Ok(c) => c,
-            Err(e) => {
-                return HttpResponse::BadRequest()
-                    .json(serde_json::json!({"error": format!("Cannot read file: {e}")}))
+        (None, Some(p)) => {
+            let canonical = match std::path::Path::new(p).canonicalize() {
+                Ok(c) => c,
+                Err(e) => return HttpResponse::BadRequest()
+                    .json(serde_json::json!({"error": format!("Invalid path '{}': {}", p, e)})),
+            };
+            match std::fs::read_to_string(&canonical) {
+                Ok(c) => c,
+                Err(e) => {
+                    return HttpResponse::BadRequest()
+                        .json(serde_json::json!({"error": format!("Cannot read file: {e}")}))
+                }
             }
-        },
+        }
         (None, None) => {
             return HttpResponse::BadRequest()
                 .json(serde_json::json!({"error": "Either 'path' or 'content' is required"}))

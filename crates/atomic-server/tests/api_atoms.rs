@@ -33,6 +33,7 @@ impl TestCtx {
             event_tx,
             public_url: None,
             log_buffer: atomic_server::log_buffer::LogBuffer::new(0),
+            sync_running: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
         });
         TestCtx {
             _temp: temp,

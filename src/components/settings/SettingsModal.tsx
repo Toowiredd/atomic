@@ -87,9 +87,18 @@ function SyncTab() {
   const [sources, setSources] = useState<SyncSource[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
-  const [runningId, setRunningId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Live sync progress state keyed by source_id
+  const [syncActivity, setSyncActivity] = useState<Record<string, {
+    status: 'running' | 'done' | 'failed';
+    message?: string;
+    current?: number;
+    total?: number;
+    result?: { conversations_imported: number; messages_imported: number; atoms_imported: number };
+    error?: string;
+  }>>({});
 
   // One-off conversation import state
   const [convImportPath, setConvImportPath] = useState('');
@@ -131,17 +140,78 @@ function SyncTab() {
     fetchSources();
   }, [fetchSources]);
 
+  // Subscribe to sync WebSocket events for live progress
+  useEffect(() => {
+    const transport = getTransport();
+
+    const unsubStarted = transport.subscribe<{ source_id: string; source_name: string }>(
+      'sync-started',
+      ({ source_id }) => {
+        setSyncActivity((prev) => ({
+          ...prev,
+          [source_id]: { status: 'running', message: 'Starting…' },
+        }));
+      }
+    );
+
+    const unsubProgress = transport.subscribe<{ source_id: string; current: number; total: number; message: string }>(
+      'sync-progress',
+      ({ source_id, current, total, message }) => {
+        setSyncActivity((prev) => ({
+          ...prev,
+          [source_id]: { status: 'running', message, current, total },
+        }));
+      }
+    );
+
+    const unsubComplete = transport.subscribe<{ source_id: string; conversations_imported: number; messages_imported: number; atoms_imported: number }>(
+      'sync-complete',
+      ({ source_id, conversations_imported, messages_imported, atoms_imported }) => {
+        setSyncActivity((prev) => ({
+          ...prev,
+          [source_id]: {
+            status: 'done',
+            result: { conversations_imported, messages_imported, atoms_imported },
+          },
+        }));
+        // Refresh the source list to show updated last_synced_at
+        fetchSources();
+      }
+    );
+
+    const unsubFailed = transport.subscribe<{ source_id: string; error: string }>(
+      'sync-failed',
+      ({ source_id, error }) => {
+        setSyncActivity((prev) => ({
+          ...prev,
+          [source_id]: { status: 'failed', error },
+        }));
+        fetchSources();
+      }
+    );
+
+    return () => {
+      unsubStarted();
+      unsubProgress();
+      unsubComplete();
+      unsubFailed();
+    };
+  }, [fetchSources]);
+
   const handleRunNow = async (id: string) => {
-    setRunningId(id);
     setError(null);
+    // Optimistically mark as running (server will confirm via WS)
+    setSyncActivity((prev) => ({ ...prev, [id]: { status: 'running', message: 'Starting…' } }));
     try {
       await runSyncSource(id);
-      toast.success('Sync started');
-      setTimeout(fetchSources, 2000);
     } catch (e) {
+      // 409 = already running; clear our optimistic state
+      setSyncActivity((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       setError(String(e));
-    } finally {
-      setRunningId(null);
     }
   };
 
@@ -159,6 +229,11 @@ function SyncTab() {
     try {
       await deleteSyncSource(id);
       setSources((prev) => prev.filter((s) => s.id !== id));
+      setSyncActivity((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -352,7 +427,10 @@ function SyncTab() {
           </p>
         ) : (
           <div className="space-y-2">
-            {sources.map((source) => (
+            {sources.map((source) => {
+              const activity = syncActivity[source.id];
+              const isRunning = activity?.status === 'running';
+              return (
               <div
                 key={source.id}
                 className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-main)]"
@@ -375,12 +453,35 @@ function SyncTab() {
                       {source.last_synced_at && (
                         <span>Last sync: {formatRelativeDate(source.last_synced_at)}</span>
                       )}
-                      {source.last_sync_status && (
+                      {source.last_sync_status && !activity && (
                         <span className={source.last_sync_status === 'ok' ? 'text-green-400' : 'text-red-400'}>
                           {source.last_sync_status}
                         </span>
                       )}
                     </div>
+                    {/* Live sync activity */}
+                    {activity && (
+                      <div className="mt-1">
+                        {activity.status === 'running' && (
+                          <div className="flex items-center gap-2">
+                            <span className="inline-block w-3 h-3 rounded-full bg-yellow-400 animate-pulse shrink-0" />
+                            <span className="text-yellow-400">
+                              {activity.message ?? 'Running…'}
+                              {activity.total ? ` (${activity.current}/${activity.total})` : ''}
+                            </span>
+                          </div>
+                        )}
+                        {activity.status === 'done' && activity.result && (
+                          <span className="text-green-400">
+                            ✓ {activity.result.conversations_imported} conversations, {activity.result.messages_imported} messages
+                            {activity.result.atoms_imported > 0 ? `, ${activity.result.atoms_imported} atoms` : ''}
+                          </span>
+                        )}
+                        {activity.status === 'failed' && (
+                          <span className="text-red-400">✗ {activity.error}</span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
@@ -399,11 +500,11 @@ function SyncTab() {
                   {/* Run now */}
                   <button
                     onClick={() => handleRunNow(source.id)}
-                    disabled={runningId === source.id}
+                    disabled={isRunning}
                     className="text-xs px-2 py-1 rounded bg-[var(--color-bg-panel)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent)] hover:text-white transition-colors disabled:opacity-50"
                     title="Run now"
                   >
-                    {runningId === source.id ? '…' : '▶'}
+                    {isRunning ? '…' : '▶'}
                   </button>
                   {/* Delete */}
                   <button
@@ -416,7 +517,8 @@ function SyncTab() {
                   </button>
                 </div>
               </div>
-            ))}
+            );
+            })}
           </div>
         )}
       </div>

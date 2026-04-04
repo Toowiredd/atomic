@@ -10,6 +10,7 @@ pub mod embedding;
 pub mod feeds;
 pub mod graph;
 pub mod import;
+pub mod insights;
 pub mod logs;
 pub mod ingest;
 pub mod oauth;
@@ -239,4 +240,15 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
 
     // Logs
     cfg.route("/logs", web::get().to(logs::get_logs));
+
+    // Insights — novel discovery features
+    cfg.route("/insights/gaps", web::get().to(insights::knowledge_gaps));
+    cfg.route(
+        "/insights/serendipity",
+        web::get().to(insights::serendipity_walk),
+    );
+    cfg.route(
+        "/insights/time-capsule",
+        web::get().to(insights::time_capsule),
+    );
 }

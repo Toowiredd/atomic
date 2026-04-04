@@ -42,6 +42,7 @@ pub mod executor;
 pub mod extraction;
 pub mod ingest;
 pub mod import;
+pub mod insights;
 pub mod manager;
 pub mod models;
 pub mod projection;
@@ -1979,6 +1980,76 @@ impl AtomicCore {
     /// Useful for backfilling after this feature is added to an existing database.
     pub fn recompute_all_tag_embeddings(&self) -> Result<i32, AtomicCoreError> {
         self.storage.recompute_all_tag_embeddings_sync()
+    }
+
+    // ==================== Insights / Novel Discovery ====================
+
+    /// Analyse the knowledge graph for gaps and underexplored areas.
+    ///
+    /// Returns isolated atoms (no connections), sparse tags (few atoms), and
+    /// bridge atoms (connecting otherwise-disconnected clusters).
+    ///
+    /// Requires SQLite backend.
+    pub fn knowledge_gaps(
+        &self,
+        isolation_threshold: i32,
+        sparse_tag_threshold: i32,
+        max_results: usize,
+    ) -> Result<crate::models::KnowledgeGapsResult, AtomicCoreError> {
+        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
+            AtomicCoreError::Configuration(
+                "knowledge_gaps is not yet supported with Postgres backend".to_string(),
+            )
+        })?;
+        let conn = sqlite.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        insights::knowledge_gaps(&conn, isolation_threshold, sparse_tag_threshold, max_results)
+    }
+
+    /// Walk the semantic graph from `start_atom_id` for `steps` hops, following
+    /// edges with controlled randomness to surface unexpected connections.
+    ///
+    /// `randomness` controls exploration temperature (0.0 = deterministic best
+    /// neighbour, 1.0 = uniform random). `seed` makes the walk reproducible.
+    ///
+    /// Requires SQLite backend.
+    pub fn serendipity_walk(
+        &self,
+        start_atom_id: &str,
+        steps: usize,
+        randomness: f32,
+        seed: u64,
+    ) -> Result<crate::models::SerendipityWalkResult, AtomicCoreError> {
+        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
+            AtomicCoreError::Configuration(
+                "serendipity_walk is not yet supported with Postgres backend".to_string(),
+            )
+        })?;
+        let conn = sqlite.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        insights::serendipity_walk(&conn, start_atom_id, steps, randomness, seed)
+    }
+
+    /// Surface old atoms that are semantically similar to recently added ones —
+    /// resurfacing forgotten-but-relevant knowledge.
+    ///
+    /// - `lookback_days`: atoms older than this many days are considered "old".
+    /// - `recent_days`: atoms newer than this many days are considered "new".
+    /// - `similarity_threshold`: minimum semantic similarity for a pair to appear.
+    ///
+    /// Requires SQLite backend.
+    pub fn time_capsule(
+        &self,
+        lookback_days: i32,
+        recent_days: i32,
+        similarity_threshold: f32,
+        limit: usize,
+    ) -> Result<crate::models::TimeCapsuleResult, AtomicCoreError> {
+        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
+            AtomicCoreError::Configuration(
+                "time_capsule is not yet supported with Postgres backend".to_string(),
+            )
+        })?;
+        let conn = sqlite.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        insights::time_capsule(&conn, lookback_days, recent_days, similarity_threshold, limit)
     }
 }
 

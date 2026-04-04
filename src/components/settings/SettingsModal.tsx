@@ -253,7 +253,12 @@ function SyncTab() {
         sourceToken: newToken || undefined,
         intervalSecs: newInterval,
       });
-      setNewName(''); setNewType('chatgpt'); setNewUrl(''); setNewPath(''); setNewToken(''); setNewInterval(0);
+      setNewName('');
+      setNewType('chatgpt');
+      setNewUrl('');
+      setNewPath('');
+      setNewToken('');
+      setNewInterval(0);
       setShowAddForm(false);
       await fetchSources();
       toast.success('Sync source created');

@@ -95,6 +95,10 @@ pub fn prepare_log_atom(req: &IngestLogRequest) -> PreparedLogAtom {
 
 /// Compiled once at first use; matches RFC-3164 (`Jan  1 00:00:00`) and ISO-8601
 /// (`2024-01-01T00:00:00`) syslog-style line prefixes.
+///
+/// Using `OnceLock` avoids recompiling the regex on every `detect_format` call,
+/// which would otherwise happen for each log file processed.  The lock ensures
+/// the regex is initialized exactly once even under concurrent access.
 static SYSLOG_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 
 fn syslog_re() -> &'static regex::Regex {

@@ -4,8 +4,11 @@
 //! and executes any that are due.  The same `execute_sync_source` function
 //! is used by the manual "run now" route trigger.
 //!
-//! A shared `sync_running` set (stored in `AppState`) prevents concurrent
-//! runs for the same source from both the scheduler and the manual trigger.
+//! Concurrency is controlled by `sync_running` (stored in `AppState`).
+//! **Both the scheduler and the route handler atomically check-and-insert
+//! the source ID before spawning** — `execute_sync_source` only needs to
+//! release the slot when it finishes.  This eliminates the TOCTOU race that
+//! would exist if the check and insert happened inside the spawned task.
 
 use crate::event_bridge::embedding_event_callback;
 use crate::state::ServerEvent;
@@ -67,14 +70,29 @@ async fn tick_sync_sources(
             })
             .unwrap_or(true); // never run → due immediately
 
-        if due {
-            let mgr = Arc::clone(manager);
-            let tx2 = tx.clone();
-            let running = Arc::clone(&sync_running);
-            tokio::spawn(async move {
-                execute_sync_source(&source, &mgr, tx2, running).await;
-            });
+        if !due {
+            continue;
         }
+
+        // Atomically check-and-reserve the slot under the lock before spawning.
+        // This prevents both the scheduler and a concurrent manual trigger from
+        // running the same source simultaneously.
+        {
+            let mut running = sync_running.lock().await;
+            if running.contains(&source.id) {
+                tracing::debug!(source_id = %source.id, "sync already running, skipping scheduler tick");
+                continue;
+            }
+            running.insert(source.id.clone());
+        }
+
+        let mgr = Arc::clone(manager);
+        let tx2 = tx.clone();
+        let running_ref = Arc::clone(&sync_running);
+        tokio::spawn(async move {
+            // Slot was pre-acquired above; execute_sync_source just releases it.
+            execute_sync_source(&source, &mgr, tx2, running_ref).await;
+        });
     }
 }
 
@@ -82,25 +100,15 @@ async fn tick_sync_sources(
 
 /// Run a single sync source and emit progress events.
 ///
-/// Acquires a slot in `sync_running` to prevent concurrent runs for the same
-/// source.  Returns immediately (without emitting any event) if the source is
-/// already running.
+/// **Callers must atomically check-and-insert `source.id` into `sync_running`
+/// before calling this function.**  This function only removes the ID from the
+/// set when it finishes (success or failure).
 pub async fn execute_sync_source(
     source: &SyncSource,
     manager: &Arc<DatabaseManager>,
     tx: broadcast::Sender<ServerEvent>,
     sync_running: Arc<Mutex<HashSet<String>>>,
 ) {
-    // Concurrency guard: skip if already running
-    {
-        let mut running = sync_running.lock().await;
-        if running.contains(&source.id) {
-            tracing::debug!(source_id = %source.id, "sync already running, skipping");
-            return;
-        }
-        running.insert(source.id.clone());
-    }
-
     let _ = tx.send(ServerEvent::SyncStarted {
         source_id: source.id.clone(),
         source_name: source.name.clone(),
@@ -115,8 +123,8 @@ pub async fn execute_sync_source(
 
     let result = run_source(source, manager, tx.clone()).await;
 
-    // Always release the concurrency slot, even on panic-unwind scenarios
-    // (tokio::spawn tasks don't propagate panics, so this suffices).
+    // Always release the concurrency slot.
+    // (tokio::spawn tasks don't propagate panics so this always runs.)
     {
         let mut running = sync_running.lock().await;
         running.remove(&source.id);
@@ -167,13 +175,19 @@ pub async fn execute_sync_source(
 /// Returns an error string if the path cannot be canonicalized (e.g.
 /// doesn't exist) to prevent path-traversal attacks via symlinks or `../`
 /// sequences in user-supplied `source_path` values.
+///
+/// **Note:** canonicalization prevents traversal to non-existent paths and
+/// resolves symlinks, but does not restrict access to a specific base
+/// directory.  `source_path` values are set by authenticated administrators
+/// only; the server process's filesystem permissions are the final authority
+/// on what files may be read.
 fn safe_canonicalize(raw_path: &str) -> Result<std::path::PathBuf, String> {
     Path::new(raw_path)
         .canonicalize()
         .map_err(|e| format!("invalid path '{}': {}", raw_path, e))
 }
 
-// ==================== Per-source execution ====================
+// ==================== Per-source execution (internal) ====================
 
 /// Execute the source-specific logic.
 /// Returns (conversations_imported, messages_imported, atoms_imported).

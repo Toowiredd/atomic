@@ -191,20 +191,24 @@ pub async fn run_sync_source(
     let id = path.into_inner();
     let registry = state.manager.registry().clone();
 
-    // Verify the source exists before spawning
+    // Verify the source exists before touching the lock
     let source = match registry.get_sync_source_internal(&id) {
         Ok(s) => s,
         Err(e) => return crate::error::error_response(e),
     };
 
-    // Check if already running without acquiring the lock for long
+    // Atomically check-and-insert under the lock to avoid TOCTOU races with
+    // the background scheduler.  If the ID is already present the source is
+    // running; return 409.  If not, insert it here — execute_sync_source will
+    // only release the slot, not acquire it.
     {
-        let running = state.sync_running.lock().await;
+        let mut running = state.sync_running.lock().await;
         if running.contains(&id) {
             return HttpResponse::Conflict().json(ApiErrorResponse {
                 error: format!("Sync source '{id}' is already running"),
             });
         }
+        running.insert(id.clone());
     }
 
     let manager = state.manager.clone();

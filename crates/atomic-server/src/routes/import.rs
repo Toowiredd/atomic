@@ -92,6 +92,9 @@ pub async fn import_conversations(
         };
 
         let conversations: Vec<atomic_core::ImportedConversation> = match source_type.as_str() {
+            // canonicalize() resolves `../` sequences and symlinks to prevent path-traversal.
+            // Access is further bounded by the server process's filesystem permissions.
+            // These endpoints require a valid API token, so callers are trusted administrators.
             "chatgpt" => {
                 let canonical = std::path::Path::new(&path)
                     .canonicalize()

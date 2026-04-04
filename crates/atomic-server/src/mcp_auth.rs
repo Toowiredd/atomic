@@ -160,6 +160,8 @@ mod tests {
             event_tx,
             public_url: public_url.map(String::from),
             log_buffer: crate::log_buffer::LogBuffer::new(0),
+            sync_running: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+            sync_cooldowns: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         });
         std::mem::forget(temp);
         (state, raw_token)

@@ -50,6 +50,14 @@ export function normalizeServerEvent(data: Record<string, unknown>): NormalizedE
       return { event: 'feed-poll-complete', payload: { feed_id: data.feed_id, new_items: data.new_items, skipped: data.skipped, errors: data.errors } };
     case 'FeedPollFailed':
       return { event: 'feed-poll-failed', payload: { feed_id: data.feed_id, error: data.error } };
+    case 'SyncStarted':
+      return { event: 'sync-started', payload: { source_id: data.source_id, source_name: data.source_name } };
+    case 'SyncProgress':
+      return { event: 'sync-progress', payload: { source_id: data.source_id, current: data.current, total: data.total, message: data.message, elapsed_ms: data.elapsed_ms } };
+    case 'SyncComplete':
+      return { event: 'sync-complete', payload: { source_id: data.source_id, source_name: data.source_name, conversations_imported: data.conversations_imported, messages_imported: data.messages_imported, atoms_imported: data.atoms_imported } };
+    case 'SyncFailed':
+      return { event: 'sync-failed', payload: { source_id: data.source_id, source_name: data.source_name, error: data.error } };
     default:
       console.warn('Unknown server event type:', type);
       return null;

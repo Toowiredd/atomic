@@ -197,6 +197,8 @@ async fn run_server(
         event_tx: event_tx.clone(),
         public_url: public_url.clone(),
         log_buffer,
+        sync_running: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+        sync_cooldowns: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     });
 
     // Create MCP service with multi-database support via ?db= query param
@@ -303,6 +305,14 @@ async fn run_server(
                 }
             }
         });
+    }
+
+    // Spawn sync source scheduler (ticks every 60 seconds, runs due sources)
+    {
+        let sync_manager = Arc::clone(&manager);
+        let sync_tx = event_tx.clone();
+        let sync_running = app_state.sync_running.clone();
+        atomic_server::sync::spawn_sync_scheduler(sync_manager, sync_tx, sync_running);
     }
 
     let bind_owned = bind.to_string();

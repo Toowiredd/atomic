@@ -123,7 +123,7 @@ mod tests {
         );
         let (info, raw_token) = manager.registry().create_api_token("test-token").unwrap();
         let (event_tx, _) = broadcast::channel(16);
-        let state = web::Data::new(AppState { manager, event_tx, public_url: None, log_buffer: crate::log_buffer::LogBuffer::new(0) });
+        let state = web::Data::new(AppState { manager, event_tx, public_url: None, log_buffer: crate::log_buffer::LogBuffer::new(0), sync_running: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())), sync_cooldowns: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())) });
         // Leak the tempdir so the DB stays alive during the test
         std::mem::forget(temp);
         let _ = info;

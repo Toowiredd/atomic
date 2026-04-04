@@ -18,6 +18,7 @@ pub mod ollama;
 pub mod search;
 pub mod setup;
 pub mod settings;
+pub mod sync;
 pub mod utils;
 pub mod wiki;
 
@@ -225,6 +226,31 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         "/import/obsidian",
         web::post().to(import::import_obsidian_vault),
     );
+    cfg.route(
+        "/import/conversations",
+        web::post().to(import::import_conversations),
+    );
+    cfg.route(
+        "/import/logs",
+        web::post().to(import::import_logs),
+    );
+    cfg.route(
+        "/import/remote",
+        web::post().to(import::import_remote),
+    );
+    cfg.route(
+        "/import/persist-logs",
+        web::post().to(import::persist_logs),
+    );
+
+    // Sync sources
+    cfg.route("/sync/sources", web::get().to(sync::list_sync_sources));
+    cfg.route("/sync/sources", web::post().to(sync::create_sync_source));
+    cfg.route("/sync/sources/{id}", web::put().to(sync::update_sync_source));
+    cfg.route("/sync/sources/{id}", web::delete().to(sync::delete_sync_source));
+    cfg.route("/sync/sources/{id}/run", web::post().to(sync::run_sync_source));
+    cfg.route("/sync/sources/{id}/test-connection", web::post().to(sync::test_sync_connection));
+    cfg.route("/sync/status", web::get().to(sync::sync_status));
 
     // Ingestion
     cfg.route("/ingest/url", web::post().to(ingest::ingest_url));

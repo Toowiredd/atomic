@@ -15,6 +15,7 @@ pub mod request_logger;
 pub mod routes;
 pub mod security_headers;
 pub mod state;
+pub mod sync;
 pub mod ws;
 
 use actix_web::{HttpResponse, Responder};

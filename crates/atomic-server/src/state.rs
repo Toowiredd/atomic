@@ -3,8 +3,10 @@
 use crate::log_buffer::LogBuffer;
 use atomic_core::{AtomicCore, DatabaseManager};
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use std::time::Instant;
+use tokio::sync::{broadcast, Mutex};
 
 /// Shared application state for all route handlers
 pub struct AppState {
@@ -14,6 +16,17 @@ pub struct AppState {
     pub public_url: Option<String>,
     /// In-memory ring buffer for recent log lines (for user export)
     pub log_buffer: LogBuffer,
+    /// Set of sync source IDs currently executing.
+    ///
+    /// Prevents the scheduler and manual "run now" from starting a second
+    /// concurrent run for the same source.
+    pub sync_running: Arc<Mutex<HashSet<String>>>,
+    /// Per-source timestamp of the last manual "run now" trigger.
+    ///
+    /// Used to enforce a 30-second cooldown between manual triggers so users
+    /// cannot spam the endpoint.  Only the route handler reads/writes this map;
+    /// the background scheduler is not subject to the cooldown.
+    pub sync_cooldowns: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl AppState {
@@ -123,6 +136,32 @@ pub enum ServerEvent {
     },
     FeedPollFailed {
         feed_id: String,
+        error: String,
+    },
+
+    // Sync pipeline events
+    SyncStarted {
+        source_id: String,
+        source_name: String,
+    },
+    SyncProgress {
+        source_id: String,
+        current: i32,
+        total: i32,
+        message: String,
+        /// Milliseconds elapsed since the sync started — used by the UI to show progress speed.
+        elapsed_ms: u64,
+    },
+    SyncComplete {
+        source_id: String,
+        source_name: String,
+        conversations_imported: i32,
+        messages_imported: i32,
+        atoms_imported: i32,
+    },
+    SyncFailed {
+        source_id: String,
+        source_name: String,
         error: String,
     },
 

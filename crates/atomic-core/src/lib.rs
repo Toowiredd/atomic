@@ -63,10 +63,10 @@ pub use models::*;
 pub use providers::{ProviderConfig, ProviderType};
 pub use search::{SearchMode, SearchOptions};
 pub use tokens::ApiTokenInfo;
-pub use import::{ImportProgress, ImportResult};
+pub use import::{ImportProgress, ImportResult, ImportedConversation, ImportedMessage};
 pub use ingest::{IngestionEvent, IngestionRequest, IngestionResult, FeedPollResult};
 pub use manager::DatabaseManager;
-pub use registry::{DatabaseInfo, OAuthCodeInfo, Registry};
+pub use registry::{DatabaseInfo, OAuthCodeInfo, Registry, SyncSourceInfo};
 
 use chrono::Utc;
 use rusqlite::Connection;
@@ -1632,6 +1632,218 @@ impl AtomicCore {
         }
 
         Ok(stats)
+    }
+
+    /// Import conversations from an external source (ChatGPT, Claude, or Markdown).
+    ///
+    /// Each imported conversation is written to the local chat tables.
+    /// Returns the number of conversations and messages imported.
+    pub fn import_conversations<P>(
+        &self,
+        conversations: &[import::ImportedConversation],
+        on_progress: P,
+    ) -> Result<(i32, i32), AtomicCoreError>
+    where
+        P: Fn(ImportProgress),
+    {
+        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
+            AtomicCoreError::Configuration(
+                "Conversation import is only supported with the SQLite backend".to_string(),
+            )
+        })?;
+        let conn = sqlite.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+
+        // Build a fingerprint set of existing (title, first_message_content) pairs
+        // so we can skip re-importing conversations that are already present.
+        let existing_fingerprints: std::collections::HashSet<(String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT c.title, m.content
+                 FROM conversations c
+                 JOIN chat_messages m ON m.conversation_id = c.id AND m.message_index = 0",
+            )?;
+            stmt.query_map([], |row| {
+                let title: Option<String> = row.get(0)?;
+                let content: String = row.get(1)?;
+                Ok((title.unwrap_or_default(), content))
+            })?
+            .filter_map(|r| r.ok())
+            .collect()
+        };
+
+        // Wrap the entire import in a transaction so a mid-import failure does
+        // not leave partially-imported conversations in the database.
+        conn.execute_batch("BEGIN")?;
+
+        let total = conversations.len() as i32;
+        let mut conv_count = 0i32;
+        let mut msg_count = 0i32;
+        // Track fingerprints added during this run to also deduplicate within the
+        // input slice (e.g. if the same conversation appears twice in one export).
+        let mut added_this_run: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+
+        let import_result: Result<(), AtomicCoreError> = (|| {
+            for (i, imported) in conversations.iter().enumerate() {
+                if imported.messages.is_empty() {
+                    continue;
+                }
+
+                // Deduplication: skip if title + first message content already exists
+                // either in the database or earlier in this same import batch.
+                let title_str = imported.title.as_deref().unwrap_or("");
+                let first_content = imported.messages[0].content.as_str();
+                let fp = (title_str.to_string(), first_content.to_string());
+                if existing_fingerprints.contains(&fp) || added_this_run.contains(&fp) {
+                    tracing::debug!(
+                        title = title_str,
+                        "skipping duplicate conversation"
+                    );
+                    continue;
+                }
+
+                let title = imported.title.as_deref();
+                let conv = chat::create_conversation(&conn, &[], title)?;
+                conv_count += 1;
+                added_this_run.insert(fp);
+
+                for msg in &imported.messages {
+                    chat::save_message_with_timestamp(
+                        &conn,
+                        &conv.conversation.id,
+                        &msg.role,
+                        &msg.content,
+                        msg.created_at.as_deref(),
+                    )?;
+                    msg_count += 1;
+                }
+
+                on_progress(ImportProgress {
+                    current: i as i32 + 1,
+                    total,
+                    current_file: imported.title.clone().unwrap_or_else(|| format!("Conversation {}", i + 1)),
+                    status: "importing".to_string(),
+                });
+            }
+            Ok(())
+        })();
+
+        match import_result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")?;
+                Ok((conv_count, msg_count))
+            }
+            Err(e) => {
+                // Best-effort rollback — the lock is released after this scope.
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Ingest a log file as an atom, tagged under a hierarchical tag path.
+    ///
+    /// Returns the atom ID of the newly created atom.
+    pub fn ingest_log_file<F>(
+        &self,
+        request: import::IngestLogRequest,
+        on_event: F,
+    ) -> Result<String, AtomicCoreError>
+    where
+        F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
+    {
+        let prepared = import::log_ingest::prepare_log_atom(&request);
+
+        if prepared.content.trim().is_empty() {
+            return Err(AtomicCoreError::Validation("Log content is empty".to_string()));
+        }
+
+        // Resolve or create the tag path hierarchy (e.g. ["Logs", "System", "host1"])
+        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
+            AtomicCoreError::Configuration(
+                "Log ingestion is only supported with the SQLite backend".to_string(),
+            )
+        })?;
+
+        let atom_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+
+        self.storage.insert_atom_impl(
+            &atom_id,
+            &CreateAtomRequest {
+                content: prepared.content.clone(),
+                source_url: None,
+                published_at: None,
+                tag_ids: vec![],
+            },
+            &now,
+        )?;
+
+        // Build and attach tag hierarchy
+        {
+            let conn = sqlite.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+            let mut tag_cache: HashMap<(String, Option<String>), String> = HashMap::new();
+            let mut stats = ImportResult { imported: 0, skipped: 0, errors: 0, tags_created: 0, tags_linked: 0 };
+            let mut parent_id: Option<String> = None;
+
+            for segment in &prepared.tag_path {
+                if let Some(tag_id) = get_or_create_tag(
+                    &conn,
+                    &mut tag_cache,
+                    segment,
+                    parent_id.as_deref(),
+                    &mut stats,
+                ) {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO atom_tags (atom_id, tag_id) VALUES (?1, ?2)",
+                        rusqlite::params![&atom_id, &tag_id],
+                    )?;
+                    parent_id = Some(tag_id);
+                }
+            }
+        }
+
+        // Trigger embedding
+        self.storage.set_embedding_status_sync(&atom_id, "processing").ok();
+        let storage_clone = self.storage.clone();
+        let bg_settings = self.settings_for_background();
+        let content_clone = prepared.content.clone();
+        let atom_id_clone = atom_id.clone();
+        executor::spawn(async move {
+            match bg_settings {
+                Some(s) => embedding::process_embedding_batch_with_settings(
+                    storage_clone, vec![(atom_id_clone, content_clone)], false, on_event, s,
+                ).await,
+                None => embedding::process_embedding_batch(
+                    storage_clone, vec![(atom_id_clone, content_clone)], false, on_event,
+                ).await,
+            };
+        });
+
+        Ok(atom_id)
+    }
+
+    /// Persist the current in-memory log buffer as an atom.
+    ///
+    /// This is called by the server to checkpoint recent logs before restart
+    /// or on a schedule.  The log text itself is provided by the caller (the
+    /// server owns the `LogBuffer`).
+    pub fn persist_logs_as_atom<F>(
+        &self,
+        log_text: String,
+        source_name: &str,
+        on_event: F,
+    ) -> Result<String, AtomicCoreError>
+    where
+        F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
+    {
+        let request = import::IngestLogRequest {
+            content: log_text,
+            format: import::LogFormat::PlainText,
+            source_name: source_name.to_string(),
+            tag_root: Some("Logs".to_string()),
+            tag_category: Some("Server".to_string()),
+        };
+        self.ingest_log_file(request, on_event)
     }
 
     // ==================== Content Ingestion ====================

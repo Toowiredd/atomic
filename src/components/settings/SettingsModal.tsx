@@ -34,6 +34,16 @@ import {
   type Feed,
   reembedAllAtoms,
   exportLogs,
+  persistLogs,
+  importConversations,
+  importRemote,
+  listSyncSources,
+  createSyncSource,
+  updateSyncSource,
+  deleteSyncSource,
+  runSyncSource,
+  testSyncConnection,
+  type SyncSource,
   type IngestionResult,
   type FeedPollResult,
 } from '../../lib/api';
@@ -42,7 +52,7 @@ import { pickDirectory } from '../../lib/platform';
 import { formatRelativeDate } from '../../lib/date';
 import { useDatabasesStore, type DatabaseInfo, type DatabaseStats } from '../../stores/databases';
 
-type SettingsTab = 'general' | 'ai' | 'connection' | 'feeds' | 'integrations' | 'databases';
+type SettingsTab = 'general' | 'ai' | 'connection' | 'feeds' | 'integrations' | 'sync' | 'databases';
 
 const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: 'General' },
@@ -50,8 +60,605 @@ const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'connection', label: 'Connection' },
   { id: 'feeds', label: 'Feeds' },
   { id: 'integrations', label: 'Integrations' },
+  { id: 'sync', label: 'Sync' },
   { id: 'databases', label: 'Databases' },
 ];
+
+// ==================== Sync Tab ====================
+
+const SYNC_TYPES = [
+  { value: 'chatgpt', label: 'ChatGPT Export (conversations.json)' },
+  { value: 'claude', label: 'Claude Export (JSON)' },
+  { value: 'markdown_dir', label: 'Markdown Directory' },
+  { value: 'remote_atomic', label: 'Remote Atomic Server' },
+  { value: 'log_file', label: 'Log File' },
+];
+
+const INTERVAL_OPTIONS = [
+  { value: 0, label: 'Manual only' },
+  { value: 300, label: 'Every 5 minutes' },
+  { value: 900, label: 'Every 15 minutes' },
+  { value: 1800, label: 'Every 30 minutes' },
+  { value: 3600, label: 'Every hour' },
+  { value: 21600, label: 'Every 6 hours' },
+  { value: 86400, label: 'Daily' },
+];
+
+function SyncTab() {
+  const [sources, setSources] = useState<SyncSource[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // Live sync progress state keyed by source_id
+  const [syncActivity, setSyncActivity] = useState<Record<string, {
+    status: 'running' | 'done' | 'failed';
+    message?: string;
+    current?: number;
+    total?: number;
+    elapsed_ms?: number;
+    result?: { conversations_imported: number; messages_imported: number; atoms_imported: number };
+    error?: string;
+  }>>({});
+
+  // One-off conversation import state
+  const [convImportPath, setConvImportPath] = useState('');
+  const [convImportType, setConvImportType] = useState<'chatgpt' | 'claude' | 'markdown'>('chatgpt');
+  const [convImporting, setConvImporting] = useState(false);
+  const [convImportResult, setConvImportResult] = useState<{ conversations_imported: number; messages_imported: number } | null>(null);
+
+  // Remote pull state
+  const [remoteUrl, setRemoteUrl] = useState('');
+  const [remoteToken, setRemoteToken] = useState('');
+  const [remotePulling, setRemotePulling] = useState(false);
+  const [remotePullResult, setRemotePullResult] = useState<{ conversations_imported: number; messages_imported: number } | null>(null);
+
+  // Persist logs state
+  const [persistingLogs, setPersistingLogs] = useState(false);
+
+  // New source form
+  const [newName, setNewName] = useState('');
+  const [newType, setNewType] = useState('chatgpt');
+  const [newUrl, setNewUrl] = useState('');
+  const [newPath, setNewPath] = useState('');
+  const [newToken, setNewToken] = useState('');
+  const [newInterval, setNewInterval] = useState(0);
+  const [isCreating, setIsCreating] = useState(false);
+
+  const fetchSources = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const data = await listSyncSources();
+      setSources(data);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchSources();
+  }, [fetchSources]);
+
+  // Subscribe to sync WebSocket events for live progress
+  useEffect(() => {
+    const transport = getTransport();
+
+    const unsubStarted = transport.subscribe<{ source_id: string; source_name: string }>(
+      'sync-started',
+      ({ source_id }) => {
+        setSyncActivity((prev) => ({
+          ...prev,
+          [source_id]: { status: 'running', message: 'Starting…' },
+        }));
+      }
+    );
+
+    const unsubProgress = transport.subscribe<{ source_id: string; current: number; total: number; message: string; elapsed_ms?: number }>(
+      'sync-progress',
+      ({ source_id, current, total, message, elapsed_ms }) => {
+        setSyncActivity((prev) => ({
+          ...prev,
+          [source_id]: { status: 'running', message, current, total, elapsed_ms },
+        }));
+      }
+    );
+
+    const unsubComplete = transport.subscribe<{ source_id: string; conversations_imported: number; messages_imported: number; atoms_imported: number }>(
+      'sync-complete',
+      ({ source_id, conversations_imported, messages_imported, atoms_imported }) => {
+        setSyncActivity((prev) => ({
+          ...prev,
+          [source_id]: {
+            status: 'done',
+            result: { conversations_imported, messages_imported, atoms_imported },
+          },
+        }));
+        // Refresh the source list to show updated last_synced_at
+        fetchSources();
+      }
+    );
+
+    const unsubFailed = transport.subscribe<{ source_id: string; error: string }>(
+      'sync-failed',
+      ({ source_id, error }) => {
+        setSyncActivity((prev) => ({
+          ...prev,
+          [source_id]: { status: 'failed', error },
+        }));
+        fetchSources();
+      }
+    );
+
+    return () => {
+      unsubStarted();
+      unsubProgress();
+      unsubComplete();
+      unsubFailed();
+    };
+  }, [fetchSources]);
+
+  const [testingConnectionId, setTestingConnectionId] = useState<string | null>(null);
+
+  const handleRunNow = async (id: string) => {
+    setError(null);
+    // Optimistically mark as running (server will confirm via WS)
+    setSyncActivity((prev) => ({ ...prev, [id]: { status: 'running', message: 'Starting…' } }));
+    try {
+      await runSyncSource(id);
+    } catch (e) {
+      // 409 = already running, 429 = cooldown; clear our optimistic state
+      setSyncActivity((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setError(String(e));
+    }
+  };
+
+  const handleTestConnection = async (id: string) => {
+    setTestingConnectionId(id);
+    try {
+      const result = await testSyncConnection(id);
+      if (result.ok) {
+        toast.success(result.message);
+      } else {
+        toast.error(result.message);
+      }
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setTestingConnectionId(null);
+    }
+  };
+
+  const handleToggleEnabled = async (source: SyncSource) => {
+    try {
+      await updateSyncSource(source.id, { enabled: !source.enabled });
+      fetchSources();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    setDeletingId(id);
+    try {
+      await deleteSyncSource(id);
+      setSources((prev) => prev.filter((s) => s.id !== id));
+      setSyncActivity((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const handleCreate = async () => {
+    if (!newName.trim()) return;
+    setIsCreating(true);
+    try {
+      await createSyncSource({
+        name: newName.trim(),
+        sourceType: newType,
+        sourceUrl: newUrl || undefined,
+        sourcePath: newPath || undefined,
+        sourceToken: newToken || undefined,
+        intervalSecs: newInterval,
+      });
+      setNewName('');
+      setNewType('chatgpt');
+      setNewUrl('');
+      setNewPath('');
+      setNewToken('');
+      setNewInterval(0);
+      setShowAddForm(false);
+      await fetchSources();
+      toast.success('Sync source created');
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  const handleOneOffImport = async () => {
+    if (!convImportPath.trim()) return;
+    setConvImporting(true);
+    setConvImportResult(null);
+    try {
+      const result = await importConversations(convImportType, convImportPath.trim());
+      setConvImportResult(result);
+      toast.success(`Imported ${result.conversations_imported} conversations`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setConvImporting(false);
+    }
+  };
+
+  const handleRemotePull = async () => {
+    if (!remoteUrl.trim()) return;
+    setRemotePulling(true);
+    setRemotePullResult(null);
+    try {
+      const result = await importRemote(remoteUrl.trim(), remoteToken || undefined);
+      setRemotePullResult(result);
+      toast.success(`Pulled ${result.conversations_imported} conversations`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRemotePulling(false);
+    }
+  };
+
+  const handlePersistLogs = async () => {
+    setPersistingLogs(true);
+    try {
+      const result = await persistLogs();
+      if (result.atom_id) {
+        toast.success('Logs saved as atom');
+      } else {
+        toast.info(result.message ?? 'Nothing to persist');
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setPersistingLogs(false);
+    }
+  };
+
+  const intervalLabel = (secs: number) =>
+    INTERVAL_OPTIONS.find((o) => o.value === secs)?.label ?? `${secs}s`;
+
+  const typeLabel = (t: string) =>
+    SYNC_TYPES.find((s) => s.value === t)?.label ?? t;
+
+  return (
+    <div className="space-y-6">
+      {error && (
+        <div className="text-sm text-red-400 bg-red-950/30 border border-red-800 rounded px-3 py-2">
+          {error}
+          <button className="ml-2 underline" onClick={() => setError(null)}>dismiss</button>
+        </div>
+      )}
+
+      {/* ── Scheduled sync sources ── */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <div>
+            <label className="block text-sm font-medium text-[var(--color-text-primary)]">Sync Sources</label>
+            <p className="text-xs text-[var(--color-text-secondary)]">
+              Automatically pull conversations and logs on a schedule.
+            </p>
+          </div>
+          <Button variant="secondary" onClick={() => setShowAddForm((v) => !v)}>
+            {showAddForm ? 'Cancel' : '+ Add Source'}
+          </Button>
+        </div>
+
+        {showAddForm && (
+          <div className="border border-[var(--color-border)] rounded-lg p-4 space-y-3 mb-4 bg-[var(--color-bg-main)]">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Name</label>
+                <input
+                  type="text"
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  placeholder="My ChatGPT export"
+                  className="w-full text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Type</label>
+                <select
+                  value={newType}
+                  onChange={(e) => setNewType(e.target.value)}
+                  className="w-full text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none"
+                >
+                  {SYNC_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                </select>
+              </div>
+            </div>
+
+            {(newType === 'chatgpt' || newType === 'claude' || newType === 'markdown_dir' || newType === 'log_file') && (
+              <div>
+                <label className="block text-xs text-[var(--color-text-secondary)] mb-1">File / Directory Path</label>
+                <input
+                  type="text"
+                  value={newPath}
+                  onChange={(e) => setNewPath(e.target.value)}
+                  placeholder="/path/to/conversations.json"
+                  className="w-full text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+                />
+              </div>
+            )}
+
+            {newType === 'remote_atomic' && (
+              <>
+                <div>
+                  <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Server URL</label>
+                  <input
+                    type="url"
+                    value={newUrl}
+                    onChange={(e) => setNewUrl(e.target.value)}
+                    placeholder="https://my.atomic.server"
+                    className="w-full text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-[var(--color-text-secondary)] mb-1">API Token (write-only)</label>
+                  <input
+                    type="password"
+                    value={newToken}
+                    onChange={(e) => setNewToken(e.target.value)}
+                    placeholder="at_..."
+                    className="w-full text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+                  />
+                </div>
+              </>
+            )}
+
+            <div>
+              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Schedule</label>
+              <select
+                value={newInterval}
+                onChange={(e) => setNewInterval(Number(e.target.value))}
+                className="w-full text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none"
+              >
+                {INTERVAL_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </div>
+
+            <Button variant="primary" onClick={handleCreate} disabled={isCreating || !newName.trim()}>
+              {isCreating ? 'Creating…' : 'Create Source'}
+            </Button>
+          </div>
+        )}
+
+        {isLoading ? (
+          <p className="text-xs text-[var(--color-text-secondary)]">Loading…</p>
+        ) : sources.length === 0 ? (
+          <p className="text-xs text-[var(--color-text-secondary)] py-4 text-center">
+            No sync sources configured yet.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {sources.map((source) => {
+              const activity = syncActivity[source.id];
+              const isRunning = activity?.status === 'running';
+              return (
+              <div
+                key={source.id}
+                className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-main)]"
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-[var(--color-text-primary)] truncate">{source.name}</span>
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-[var(--color-bg-panel)] text-[var(--color-text-secondary)] shrink-0">
+                      {typeLabel(source.source_type)}
+                    </span>
+                    {source.has_token && (
+                      <span className="text-xs text-green-400" title="Token configured">🔑</span>
+                    )}
+                  </div>
+                  <div className="text-xs text-[var(--color-text-secondary)] mt-0.5 space-y-0.5">
+                    {source.source_path && <div className="truncate">Path: {source.source_path}</div>}
+                    {source.source_url && <div className="truncate">URL: {source.source_url}</div>}
+                    <div className="flex items-center gap-3">
+                      <span>Schedule: {intervalLabel(source.interval_secs)}</span>
+                      {source.last_synced_at && (
+                        <span>Last sync: {formatRelativeDate(source.last_synced_at)}</span>
+                      )}
+                      {source.last_sync_status && !activity && (
+                        <span className={source.last_sync_status === 'ok' ? 'text-green-400' : 'text-red-400'}>
+                          {source.last_sync_status}
+                        </span>
+                      )}
+                    </div>
+                    {/* Live sync activity */}
+                    {activity && (
+                      <div className="mt-1">
+                        {activity.status === 'running' && (
+                          <div className="flex items-center gap-2">
+                            <span className="inline-block w-3 h-3 rounded-full bg-yellow-400 animate-pulse shrink-0" />
+                            <span className="text-yellow-400">
+                              {activity.message ?? 'Running…'}
+                              {activity.total ? ` (${activity.current}/${activity.total})` : ''}
+                              {activity.elapsed_ms != null && activity.elapsed_ms > 0
+                                ? ` — ${(activity.elapsed_ms / 1000).toFixed(1)}s`
+                                : ''}
+                            </span>
+                          </div>
+                        )}
+                        {activity.status === 'done' && activity.result && (
+                          <span className="text-green-400">
+                            ✓ {activity.result.conversations_imported} conversations, {activity.result.messages_imported} messages
+                            {activity.result.atoms_imported > 0 ? `, ${activity.result.atoms_imported} atoms` : ''}
+                          </span>
+                        )}
+                        {activity.status === 'failed' && (
+                          <span className="text-red-400">✗ {activity.error}</span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {/* Enable/disable toggle */}
+                  <button
+                    onClick={() => handleToggleEnabled(source)}
+                    className={`text-xs px-2 py-1 rounded transition-colors ${
+                      source.enabled
+                        ? 'bg-green-900/40 text-green-400 hover:bg-green-900/60'
+                        : 'bg-[var(--color-bg-panel)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
+                    }`}
+                    title={source.enabled ? 'Disable' : 'Enable'}
+                  >
+                    {source.enabled ? 'On' : 'Off'}
+                  </button>
+                  {/* Test connection */}
+                  <button
+                    onClick={() => handleTestConnection(source.id)}
+                    disabled={testingConnectionId === source.id}
+                    className="text-xs px-2 py-1 rounded bg-[var(--color-bg-panel)] text-[var(--color-text-secondary)] hover:bg-blue-900/40 hover:text-blue-400 transition-colors disabled:opacity-50"
+                    title="Test connection"
+                  >
+                    {testingConnectionId === source.id ? '…' : '🔌'}
+                  </button>
+                  {/* Run now */}
+                  <button
+                    onClick={() => handleRunNow(source.id)}
+                    disabled={isRunning}
+                    className="text-xs px-2 py-1 rounded bg-[var(--color-bg-panel)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent)] hover:text-white transition-colors disabled:opacity-50"
+                    title="Run now"
+                  >
+                    {isRunning ? '…' : '▶'}
+                  </button>
+                  {/* Delete */}
+                  <button
+                    onClick={() => handleDelete(source.id)}
+                    disabled={deletingId === source.id}
+                    className="text-xs px-2 py-1 rounded bg-[var(--color-bg-panel)] text-[var(--color-text-secondary)] hover:bg-red-900/40 hover:text-red-400 transition-colors disabled:opacity-50"
+                    title="Delete"
+                  >
+                    {deletingId === source.id ? '…' : '✕'}
+                  </button>
+                </div>
+              </div>
+            );
+            })}
+          </div>
+        )}
+      </div>
+
+      <hr className="border-[var(--color-border)]" />
+
+      {/* ── One-off conversation import ── */}
+      <div className="space-y-2">
+        <label className="block text-sm font-medium text-[var(--color-text-primary)]">
+          Import Conversations (one-off)
+        </label>
+        <p className="text-xs text-[var(--color-text-secondary)]">
+          Import a ChatGPT or Claude export file, or a directory of markdown conversation files.
+        </p>
+        <div className="flex gap-2">
+          <select
+            value={convImportType}
+            onChange={(e) => setConvImportType(e.target.value as 'chatgpt' | 'claude' | 'markdown')}
+            className="text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none"
+          >
+            <option value="chatgpt">ChatGPT</option>
+            <option value="claude">Claude</option>
+            <option value="markdown">Markdown dir</option>
+          </select>
+          <input
+            type="text"
+            value={convImportPath}
+            onChange={(e) => setConvImportPath(e.target.value)}
+            placeholder="Path to file or directory"
+            className="flex-1 text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+          />
+          <Button
+            variant="secondary"
+            onClick={handleOneOffImport}
+            disabled={convImporting || !convImportPath.trim()}
+          >
+            {convImporting ? 'Importing…' : 'Import'}
+          </Button>
+        </div>
+        {convImportResult && (
+          <p className="text-xs text-green-400">
+            ✓ {convImportResult.conversations_imported} conversations, {convImportResult.messages_imported} messages imported.
+          </p>
+        )}
+      </div>
+
+      <hr className="border-[var(--color-border)]" />
+
+      {/* ── Remote pull ── */}
+      <div className="space-y-2">
+        <label className="block text-sm font-medium text-[var(--color-text-primary)]">
+          Pull from Remote Atomic Server
+        </label>
+        <p className="text-xs text-[var(--color-text-secondary)]">
+          Import all conversations from another Atomic instance.
+        </p>
+        <div className="flex gap-2">
+          <input
+            type="url"
+            value={remoteUrl}
+            onChange={(e) => setRemoteUrl(e.target.value)}
+            placeholder="https://my.atomic.server"
+            className="flex-1 text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+          />
+          <input
+            type="password"
+            value={remoteToken}
+            onChange={(e) => setRemoteToken(e.target.value)}
+            placeholder="API token (optional)"
+            className="w-40 text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+          />
+          <Button
+            variant="secondary"
+            onClick={handleRemotePull}
+            disabled={remotePulling || !remoteUrl.trim()}
+          >
+            {remotePulling ? 'Pulling…' : 'Pull'}
+          </Button>
+        </div>
+        {remotePullResult && (
+          <p className="text-xs text-green-400">
+            ✓ {remotePullResult.conversations_imported} conversations, {remotePullResult.messages_imported} messages imported.
+          </p>
+        )}
+      </div>
+
+      <hr className="border-[var(--color-border)]" />
+
+      {/* ── Persist logs ── */}
+      <div className="space-y-2">
+        <label className="block text-sm font-medium text-[var(--color-text-primary)]">
+          Persist Server Logs
+        </label>
+        <p className="text-xs text-[var(--color-text-secondary)]">
+          Save the current in-memory log buffer as a searchable atom in your knowledge base.
+        </p>
+        <Button variant="secondary" onClick={handlePersistLogs} disabled={persistingLogs}>
+          {persistingLogs ? 'Saving…' : 'Save Logs as Atom'}
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 function DatabasesTab() {
   const { databases, activeId, fetchDatabases, renameDatabase, deleteDatabase, setDefaultDatabase, getDatabaseStats } = useDatabasesStore();
@@ -2240,6 +2847,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                     </div>
                   )}
                 </>
+              )}
+
+              {/* ===== SYNC TAB ===== */}
+              {activeTab === 'sync' && (
+                <SyncTab />
               )}
 
               {/* ===== DATABASES TAB ===== */}

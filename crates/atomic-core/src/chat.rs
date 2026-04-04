@@ -729,8 +729,23 @@ pub fn save_message(
     role: &str,
     content: &str,
 ) -> Result<(String, i32), AtomicCoreError> {
+    save_message_with_timestamp(conn, conversation_id, role, content, None)
+}
+
+/// Like `save_message` but accepts an explicit ISO-8601 timestamp.
+///
+/// Pass `Some(ts)` when importing historical conversations (ChatGPT, Claude, etc.)
+/// so the original message timestamps are preserved.  Pass `None` to default to now.
+pub fn save_message_with_timestamp(
+    conn: &Connection,
+    conversation_id: &str,
+    role: &str,
+    content: &str,
+    created_at: Option<&str>,
+) -> Result<(String, i32), AtomicCoreError> {
     let message_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
+    let ts = created_at.unwrap_or(&now);
 
     let message_index: i32 = conn.query_row(
         "SELECT COALESCE(MAX(message_index), -1) + 1 FROM chat_messages WHERE conversation_id = ?1",
@@ -741,7 +756,7 @@ pub fn save_message(
     conn.execute(
         "INSERT INTO chat_messages (id, conversation_id, role, content, created_at, message_index)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![&message_id, conversation_id, role, content, &now, message_index],
+        rusqlite::params![&message_id, conversation_id, role, content, ts, message_index],
     )?;
 
     conn.execute(

@@ -158,7 +158,7 @@ function SyncTab() {
     setDeletingId(id);
     try {
       await deleteSyncSource(id);
-      setSources((prev: SyncSource[]) => prev.filter((s: SyncSource) => s.id !== id));
+      setSources((prev) => prev.filter((s) => s.id !== id));
     } catch (e) {
       setError(String(e));
     } finally {

@@ -44,7 +44,7 @@ async fn tick_sync_sources(
     };
 
     for source in sources {
-        if source.interval_secs <= 0 {
+        if source.interval_secs == 0 {
             continue; // manual-only
         }
 

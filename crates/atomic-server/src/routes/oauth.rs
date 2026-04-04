@@ -586,6 +586,7 @@ mod tests {
             manager,
             event_tx,
             public_url: Some("https://atomic.example.com".to_string()),
+            log_buffer: crate::log_buffer::LogBuffer::new(0),
         });
         std::mem::forget(temp);
         state
@@ -601,6 +602,7 @@ mod tests {
             manager,
             event_tx,
             public_url: None,
+            log_buffer: crate::log_buffer::LogBuffer::new(0),
         });
         std::mem::forget(temp);
         state

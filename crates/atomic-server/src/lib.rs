@@ -10,7 +10,10 @@ pub mod event_bridge;
 pub mod log_buffer;
 pub mod mcp;
 pub mod mcp_auth;
+pub mod rate_limiter;
+pub mod request_logger;
 pub mod routes;
+pub mod security_headers;
 pub mod state;
 pub mod ws;
 

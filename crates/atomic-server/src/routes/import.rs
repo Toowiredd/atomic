@@ -8,6 +8,9 @@ use atomic_core::import::LogFormat;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+/// Maximum size for directly-uploaded content (100 MiB).
+const MAX_UPLOAD_CONTENT_SIZE: usize = 100 * 1024 * 1024;
+
 // ==================== Obsidian ====================
 
 #[derive(Deserialize, Serialize, ToSchema)]
@@ -199,13 +202,28 @@ pub async fn import_logs(
     let body = body.into_inner();
 
     let content = match (body.content, body.path.as_deref()) {
-        (Some(c), _) => c,
+        (Some(c), _) => {
+            if c.len() > MAX_UPLOAD_CONTENT_SIZE {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": format!("content is too large ({} bytes); maximum is {} bytes (100 MiB)", c.len(), MAX_UPLOAD_CONTENT_SIZE)
+                }));
+            }
+            c
+        }
         (None, Some(p)) => {
             let canonical = match std::path::Path::new(p).canonicalize() {
                 Ok(c) => c,
                 Err(e) => return HttpResponse::BadRequest()
                     .json(serde_json::json!({"error": format!("Invalid path '{}': {}", p, e)})),
             };
+            // Reject oversized files before reading them into memory.
+            if let Ok(meta) = std::fs::metadata(&canonical) {
+                if meta.len() > MAX_UPLOAD_CONTENT_SIZE as u64 {
+                    return HttpResponse::BadRequest().json(serde_json::json!({
+                        "error": format!("file is too large ({} bytes); maximum is {} bytes (100 MiB)", meta.len(), MAX_UPLOAD_CONTENT_SIZE)
+                    }));
+                }
+            }
             match std::fs::read_to_string(&canonical) {
                 Ok(c) => c,
                 Err(e) => {

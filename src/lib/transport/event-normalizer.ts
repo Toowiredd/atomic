@@ -53,7 +53,7 @@ export function normalizeServerEvent(data: Record<string, unknown>): NormalizedE
     case 'SyncStarted':
       return { event: 'sync-started', payload: { source_id: data.source_id, source_name: data.source_name } };
     case 'SyncProgress':
-      return { event: 'sync-progress', payload: { source_id: data.source_id, current: data.current, total: data.total, message: data.message } };
+      return { event: 'sync-progress', payload: { source_id: data.source_id, current: data.current, total: data.total, message: data.message, elapsed_ms: data.elapsed_ms } };
     case 'SyncComplete':
       return { event: 'sync-complete', payload: { source_id: data.source_id, source_name: data.source_name, conversations_imported: data.conversations_imported, messages_imported: data.messages_imported, atoms_imported: data.atoms_imported } };
     case 'SyncFailed':

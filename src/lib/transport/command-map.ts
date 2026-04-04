@@ -640,4 +640,8 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'GET',
     path: '/api/sync/status',
   },
+  test_sync_connection: {
+    method: 'POST',
+    path: (a) => `/api/sync/sources/${encodeURIComponent(a.id as string)}/test-connection`,
+  },
 };

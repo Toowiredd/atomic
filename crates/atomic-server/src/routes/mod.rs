@@ -249,6 +249,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.route("/sync/sources/{id}", web::put().to(sync::update_sync_source));
     cfg.route("/sync/sources/{id}", web::delete().to(sync::delete_sync_source));
     cfg.route("/sync/sources/{id}/run", web::post().to(sync::run_sync_source));
+    cfg.route("/sync/sources/{id}/test-connection", web::post().to(sync::test_sync_connection));
     cfg.route("/sync/status", web::get().to(sync::sync_status));
 
     // Ingestion

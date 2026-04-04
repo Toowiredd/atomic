@@ -8,7 +8,11 @@ use crate::state::AppState;
 use actix_web::{web, HttpResponse};
 use atomic_core::SyncSourceInfo;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use utoipa::ToSchema;
+
+/// Cooldown between manual "run now" triggers for the same source.
+const MANUAL_TRIGGER_COOLDOWN: Duration = Duration::from_secs(30);
 
 // ==================== Request / Response types ====================
 
@@ -197,6 +201,23 @@ pub async fn run_sync_source(
         Err(e) => return crate::error::error_response(e),
     };
 
+    // Enforce per-source cooldown between manual triggers.
+    {
+        let cooldowns = state.sync_cooldowns.lock().await;
+        if let Some(last_triggered) = cooldowns.get(&id) {
+            let elapsed = last_triggered.elapsed();
+            if elapsed < MANUAL_TRIGGER_COOLDOWN {
+                let remaining = (MANUAL_TRIGGER_COOLDOWN - elapsed).as_secs() + 1;
+                return HttpResponse::TooManyRequests().json(ApiErrorResponse {
+                    error: format!(
+                        "Sync source '{id}' was triggered {}s ago; retry in {remaining}s",
+                        elapsed.as_secs()
+                    ),
+                });
+            }
+        }
+    }
+
     // Atomically check-and-insert under the lock to avoid TOCTOU races with
     // the background scheduler.  If the ID is already present the source is
     // running; return 409.  If not, insert it here — execute_sync_source will
@@ -209,6 +230,12 @@ pub async fn run_sync_source(
             });
         }
         running.insert(id.clone());
+    }
+
+    // Record the trigger time now that we know the run will proceed.
+    {
+        let mut cooldowns = state.sync_cooldowns.lock().await;
+        cooldowns.insert(id.clone(), std::time::Instant::now());
     }
 
     let manager = state.manager.clone();
@@ -240,4 +267,127 @@ pub async fn sync_status(state: web::Data<AppState>) -> HttpResponse {
         })
     })
     .await
+}
+
+/// Response body for the test-connection endpoint.
+#[derive(Serialize, ToSchema)]
+pub struct TestConnectionResponse {
+    /// Whether the connection test passed.
+    pub ok: bool,
+    /// Human-readable message describing the outcome.
+    pub message: String,
+}
+
+#[utoipa::path(post, path = "/api/sync/sources/{id}/test-connection",
+    params(("id" = String, Path, description = "Sync source ID")),
+    responses(
+        (status = 200, description = "Test result", body = TestConnectionResponse),
+        (status = 400, description = "Missing configuration", body = ApiErrorResponse),
+        (status = 404, description = "Not found", body = ApiErrorResponse),
+    ),
+    tag = "sync")]
+pub async fn test_sync_connection(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let id = path.into_inner();
+    let registry = state.manager.registry().clone();
+
+    let source = match registry.get_sync_source_internal(&id) {
+        Ok(s) => s,
+        Err(e) => return crate::error::error_response(e),
+    };
+
+    match source.source_type.as_str() {
+        "remote_atomic" => {
+            let url = match source.source_url.as_deref() {
+                Some(u) => u.trim_end_matches('/').to_string(),
+                None => {
+                    return HttpResponse::BadRequest().json(ApiErrorResponse {
+                        error: "source_url is required for remote_atomic".to_string(),
+                    });
+                }
+            };
+            let token = source.source_token.clone();
+
+            let client = match reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    return HttpResponse::InternalServerError().json(ApiErrorResponse {
+                        error: e.to_string(),
+                    });
+                }
+            };
+
+            let mut req = client.get(format!("{url}/health"));
+            if let Some(t) = token.as_deref() {
+                req = req.bearer_auth(t);
+            }
+
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    HttpResponse::Ok().json(TestConnectionResponse {
+                        ok: true,
+                        message: format!(
+                            "Connected to {} (HTTP {})",
+                            url,
+                            resp.status()
+                        ),
+                    })
+                }
+                Ok(resp) => HttpResponse::Ok().json(TestConnectionResponse {
+                    ok: false,
+                    message: format!("Remote returned HTTP {}", resp.status()),
+                }),
+                Err(e) => HttpResponse::Ok().json(TestConnectionResponse {
+                    ok: false,
+                    message: format!("Connection failed: {e}"),
+                }),
+            }
+        }
+
+        st @ ("chatgpt" | "claude" | "log_file" | "markdown_dir") => {
+            let p = match source.source_path.as_deref() {
+                Some(p) => p,
+                None => {
+                    return HttpResponse::BadRequest().json(ApiErrorResponse {
+                        error: format!("source_path is required for {st}"),
+                    });
+                }
+            };
+
+            match std::path::Path::new(p).canonicalize() {
+                Ok(canonical) => {
+                    let expects_dir = st == "markdown_dir";
+                    if expects_dir && !canonical.is_dir() {
+                        return HttpResponse::Ok().json(TestConnectionResponse {
+                            ok: false,
+                            message: format!("'{}' exists but is not a directory", canonical.display()),
+                        });
+                    }
+                    if !expects_dir && !canonical.is_file() {
+                        return HttpResponse::Ok().json(TestConnectionResponse {
+                            ok: false,
+                            message: format!("'{}' exists but is not a regular file", canonical.display()),
+                        });
+                    }
+                    HttpResponse::Ok().json(TestConnectionResponse {
+                        ok: true,
+                        message: format!("'{}' is accessible", canonical.display()),
+                    })
+                }
+                Err(e) => HttpResponse::Ok().json(TestConnectionResponse {
+                    ok: false,
+                    message: format!("Path not accessible: {e}"),
+                }),
+            }
+        }
+
+        unknown => HttpResponse::BadRequest().json(ApiErrorResponse {
+            error: format!("Unknown source_type '{unknown}'"),
+        }),
+    }
 }

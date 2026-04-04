@@ -198,6 +198,7 @@ async fn run_server(
         public_url: public_url.clone(),
         log_buffer,
         sync_running: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+        sync_cooldowns: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     });
 
     // Create MCP service with multi-database support via ?db= query param

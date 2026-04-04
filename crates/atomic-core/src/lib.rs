@@ -1653,39 +1653,91 @@ impl AtomicCore {
         })?;
         let conn = sqlite.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
 
+        // Build a fingerprint set of existing (title, first_message_content) pairs
+        // so we can skip re-importing conversations that are already present.
+        let existing_fingerprints: std::collections::HashSet<(String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT c.title, m.content
+                 FROM conversations c
+                 JOIN chat_messages m ON m.conversation_id = c.id AND m.message_index = 0",
+            )?;
+            stmt.query_map([], |row| {
+                let title: Option<String> = row.get(0)?;
+                let content: String = row.get(1)?;
+                Ok((title.unwrap_or_default(), content))
+            })?
+            .filter_map(|r| r.ok())
+            .collect()
+        };
+
+        // Wrap the entire import in a transaction so a mid-import failure does
+        // not leave partially-imported conversations in the database.
+        conn.execute_batch("BEGIN")?;
+
         let total = conversations.len() as i32;
         let mut conv_count = 0i32;
         let mut msg_count = 0i32;
+        // Track fingerprints added during this run to also deduplicate within the
+        // input slice (e.g. if the same conversation appears twice in one export).
+        let mut added_this_run: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
 
-        for (i, imported) in conversations.iter().enumerate() {
-            if imported.messages.is_empty() {
-                continue;
+        let import_result: Result<(), AtomicCoreError> = (|| {
+            for (i, imported) in conversations.iter().enumerate() {
+                if imported.messages.is_empty() {
+                    continue;
+                }
+
+                // Deduplication: skip if title + first message content already exists
+                // either in the database or earlier in this same import batch.
+                let title_str = imported.title.as_deref().unwrap_or("");
+                let first_content = imported.messages[0].content.as_str();
+                let fp = (title_str.to_string(), first_content.to_string());
+                if existing_fingerprints.contains(&fp) || added_this_run.contains(&fp) {
+                    tracing::debug!(
+                        title = title_str,
+                        "skipping duplicate conversation"
+                    );
+                    continue;
+                }
+
+                let title = imported.title.as_deref();
+                let conv = chat::create_conversation(&conn, &[], title)?;
+                conv_count += 1;
+                added_this_run.insert(fp);
+
+                for msg in &imported.messages {
+                    chat::save_message_with_timestamp(
+                        &conn,
+                        &conv.conversation.id,
+                        &msg.role,
+                        &msg.content,
+                        msg.created_at.as_deref(),
+                    )?;
+                    msg_count += 1;
+                }
+
+                on_progress(ImportProgress {
+                    current: i as i32 + 1,
+                    total,
+                    current_file: imported.title.clone().unwrap_or_else(|| format!("Conversation {}", i + 1)),
+                    status: "importing".to_string(),
+                });
             }
+            Ok(())
+        })();
 
-            let title = imported.title.as_deref();
-            let conv = chat::create_conversation(&conn, &[], title)?;
-            conv_count += 1;
-
-            for msg in &imported.messages {
-                chat::save_message_with_timestamp(
-                    &conn,
-                    &conv.conversation.id,
-                    &msg.role,
-                    &msg.content,
-                    msg.created_at.as_deref(),
-                )?;
-                msg_count += 1;
+        match import_result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")?;
+                Ok((conv_count, msg_count))
             }
-
-            on_progress(ImportProgress {
-                current: i as i32 + 1,
-                total,
-                current_file: imported.title.clone().unwrap_or_else(|| format!("Conversation {}", i + 1)),
-                status: "importing".to_string(),
-            });
+            Err(e) => {
+                // Best-effort rollback — the lock is released after this scope.
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
         }
-
-        Ok((conv_count, msg_count))
     }
 
     /// Ingest a log file as an atom, tagged under a hierarchical tag path.

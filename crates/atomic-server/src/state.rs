@@ -3,8 +3,9 @@
 use crate::log_buffer::LogBuffer;
 use atomic_core::{AtomicCore, DatabaseManager};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{broadcast, Mutex};
 
 /// Shared application state for all route handlers
@@ -20,6 +21,12 @@ pub struct AppState {
     /// Prevents the scheduler and manual "run now" from starting a second
     /// concurrent run for the same source.
     pub sync_running: Arc<Mutex<HashSet<String>>>,
+    /// Per-source timestamp of the last manual "run now" trigger.
+    ///
+    /// Used to enforce a 30-second cooldown between manual triggers so users
+    /// cannot spam the endpoint.  Only the route handler reads/writes this map;
+    /// the background scheduler is not subject to the cooldown.
+    pub sync_cooldowns: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl AppState {
@@ -142,6 +149,8 @@ pub enum ServerEvent {
         current: i32,
         total: i32,
         message: String,
+        /// Milliseconds elapsed since the sync started — used by the UI to show progress speed.
+        elapsed_ms: u64,
     },
     SyncComplete {
         source_id: String,

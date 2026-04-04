@@ -556,3 +556,10 @@ export async function getSyncStatus(): Promise<{
 }> {
   return getTransport().invoke('get_sync_status');
 }
+
+export async function testSyncConnection(id: string): Promise<{
+  ok: boolean;
+  message: string;
+}> {
+  return getTransport().invoke('test_sync_connection', { id });
+}

@@ -42,6 +42,7 @@ import {
   updateSyncSource,
   deleteSyncSource,
   runSyncSource,
+  testSyncConnection,
   type SyncSource,
   type IngestionResult,
   type FeedPollResult,
@@ -96,6 +97,7 @@ function SyncTab() {
     message?: string;
     current?: number;
     total?: number;
+    elapsed_ms?: number;
     result?: { conversations_imported: number; messages_imported: number; atoms_imported: number };
     error?: string;
   }>>({});
@@ -154,12 +156,12 @@ function SyncTab() {
       }
     );
 
-    const unsubProgress = transport.subscribe<{ source_id: string; current: number; total: number; message: string }>(
+    const unsubProgress = transport.subscribe<{ source_id: string; current: number; total: number; message: string; elapsed_ms?: number }>(
       'sync-progress',
-      ({ source_id, current, total, message }) => {
+      ({ source_id, current, total, message, elapsed_ms }) => {
         setSyncActivity((prev) => ({
           ...prev,
-          [source_id]: { status: 'running', message, current, total },
+          [source_id]: { status: 'running', message, current, total, elapsed_ms },
         }));
       }
     );
@@ -198,6 +200,8 @@ function SyncTab() {
     };
   }, [fetchSources]);
 
+  const [testingConnectionId, setTestingConnectionId] = useState<string | null>(null);
+
   const handleRunNow = async (id: string) => {
     setError(null);
     // Optimistically mark as running (server will confirm via WS)
@@ -205,13 +209,29 @@ function SyncTab() {
     try {
       await runSyncSource(id);
     } catch (e) {
-      // 409 = already running; clear our optimistic state
+      // 409 = already running, 429 = cooldown; clear our optimistic state
       setSyncActivity((prev) => {
         const next = { ...prev };
         delete next[id];
         return next;
       });
       setError(String(e));
+    }
+  };
+
+  const handleTestConnection = async (id: string) => {
+    setTestingConnectionId(id);
+    try {
+      const result = await testSyncConnection(id);
+      if (result.ok) {
+        toast.success(result.message);
+      } else {
+        toast.error(result.message);
+      }
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setTestingConnectionId(null);
     }
   };
 
@@ -473,6 +493,9 @@ function SyncTab() {
                             <span className="text-yellow-400">
                               {activity.message ?? 'Running…'}
                               {activity.total ? ` (${activity.current}/${activity.total})` : ''}
+                              {activity.elapsed_ms != null && activity.elapsed_ms > 0
+                                ? ` — ${(activity.elapsed_ms / 1000).toFixed(1)}s`
+                                : ''}
                             </span>
                           </div>
                         )}
@@ -501,6 +524,15 @@ function SyncTab() {
                     title={source.enabled ? 'Disable' : 'Enable'}
                   >
                     {source.enabled ? 'On' : 'Off'}
+                  </button>
+                  {/* Test connection */}
+                  <button
+                    onClick={() => handleTestConnection(source.id)}
+                    disabled={testingConnectionId === source.id}
+                    className="text-xs px-2 py-1 rounded bg-[var(--color-bg-panel)] text-[var(--color-text-secondary)] hover:bg-blue-900/40 hover:text-blue-400 transition-colors disabled:opacity-50"
+                    title="Test connection"
+                  >
+                    {testingConnectionId === source.id ? '…' : '🔌'}
                   </button>
                   {/* Run now */}
                   <button

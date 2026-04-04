@@ -752,7 +752,7 @@ impl AtomicCore {
             ProviderType::OpenRouter => settings_map
                 .get("wiki_model")
                 .cloned()
-                .unwrap_or_else(|| "anthropic/claude-sonnet-4.5".to_string()),
+                .unwrap_or_else(|| "anthropic/claude-sonnet-4.6".to_string()),
         };
         let strategy = wiki::WikiStrategy::from_string(
             settings_map.get("wiki_strategy").map(|s| s.as_str()).unwrap_or("centroid"),

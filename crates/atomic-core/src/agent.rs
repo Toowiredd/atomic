@@ -559,7 +559,7 @@ where
             ProviderType::OpenRouter => settings_map
                 .get("chat_model")
                 .cloned()
-                .unwrap_or_else(|| "anthropic/claude-sonnet-4".to_string()),
+                .unwrap_or_else(|| "anthropic/claude-sonnet-4.6".to_string()),
         };
 
         (provider_config, model)

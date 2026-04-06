@@ -5,9 +5,14 @@
  * via the transport layer (works with both local and remote servers).
  */
 
-import { readDir, readTextFile, DirEntry } from '@tauri-apps/plugin-fs';
+import type { DirEntry } from '@tauri-apps/plugin-fs';
 import { getTransport } from './transport';
 import type { ImportResult } from './api';
+
+// Lazy-load Tauri FS plugin (only available in desktop app, not web builds)
+async function tauriFs() {
+  return await import('@tauri-apps/plugin-fs');
+}
 
 // ---------- Types ----------
 
@@ -47,6 +52,7 @@ async function discoverMarkdownFiles(
   const results: { absolutePath: string; relativePath: string }[] = [];
   let entries: DirEntry[];
   try {
+    const { readDir } = await tauriFs();
     entries = await readDir(dirPath);
   } catch {
     return results;
@@ -268,6 +274,9 @@ export async function importMarkdownFolder(
   const { importTags = true, onProgress } = options ?? {};
   // Derive vault name from folder path
   const vaultName = folderPath.split('/').pop() ?? 'vault';
+
+  // Load Tauri FS once
+  const { readTextFile } = await tauriFs();
 
   // Discover all .md files
   const files = await discoverMarkdownFiles(folderPath, folderPath, DEFAULT_EXCLUDES);

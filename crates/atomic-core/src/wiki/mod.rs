@@ -55,9 +55,27 @@ pub struct WikiStrategyContext {
     pub tag_id: String,
     pub tag_name: String,
     pub linkable_article_names: Vec<(String, String)>,
+    pub custom_generation_prompt: Option<String>,
+    pub custom_update_prompt: Option<String>,
 }
 
 impl WikiStrategyContext {
+    /// Returns the generation system prompt, using custom if set, otherwise the default.
+    pub fn generation_prompt(&self) -> &str {
+        self.custom_generation_prompt
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(WIKI_GENERATION_SYSTEM_PROMPT)
+    }
+
+    /// Returns the update system prompt, using custom if set, otherwise the default.
+    pub fn update_prompt(&self) -> &str {
+        self.custom_update_prompt
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(WIKI_UPDATE_SYSTEM_PROMPT)
+    }
+
     /// Returns the maximum source material tokens for wiki generation.
     /// For providers with a known context length, budgets ~60% for source material.
     /// Falls back to MAX_WIKI_SOURCE_TOKENS for providers with large/unknown context.
@@ -793,6 +811,7 @@ pub(crate) async fn synthesize_article(
     atom_count: i32,
     model: &str,
     linkable_article_names: &[(String, String)],
+    system_prompt: &str,
 ) -> Result<WikiArticleWithCitations, String> {
     // Build source materials for prompt
     let mut source_materials = String::new();
@@ -834,7 +853,7 @@ pub(crate) async fn synthesize_article(
     );
 
     let result =
-        call_llm_for_wiki(provider_config, WIKI_GENERATION_SYSTEM_PROMPT, &user_content, model)
+        call_llm_for_wiki(provider_config, system_prompt, &user_content, model)
             .await?;
 
     let article_id = Uuid::new_v4().to_string();

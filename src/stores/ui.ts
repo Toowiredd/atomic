@@ -4,7 +4,7 @@ import type { CanvasLevel } from '../lib/api';
 import { getCanvasLevel } from '../lib/api';
 
 export type DrawerMode = 'editor' | 'viewer' | 'wiki' | 'chat';
-export type ViewMode = 'grid' | 'list' | 'canvas';
+export type ViewMode = 'grid' | 'list' | 'canvas' | 'wiki';
 
 interface DrawerState {
   isOpen: boolean;

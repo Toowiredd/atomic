@@ -6,6 +6,7 @@ import { FilterBar } from '../atoms/FilterBar';
 import { SigmaCanvas } from '../canvas/SigmaCanvas';
 import { FAB } from '../ui/FAB';
 import { EmbeddingProgressBanner } from '../ui/EmbeddingProgressBanner';
+import { WikiFullView } from '../wiki/WikiFullView';
 import { useAtomsStore } from '../../stores/atoms';
 import { useUIStore } from '../../stores/ui';
 
@@ -216,7 +217,7 @@ export function MainView() {
           </button>
           <button
             onClick={() => setViewMode('canvas')}
-            className={`p-1.5 rounded-r-md transition-colors ${
+            className={`p-1.5 transition-colors ${
               viewMode === 'canvas'
                 ? 'bg-[var(--color-accent)] text-white'
                 : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
@@ -230,6 +231,19 @@ export function MainView() {
               <circle cx="18" cy="18" r="2" />
               <circle cx="12" cy="12" r="2" />
               <path strokeLinecap="round" d="M8 7l2.5 3.5M16 7l-2.5 3.5M8 17l2.5-3.5M16 17l-2.5-3.5" />
+            </svg>
+          </button>
+          <button
+            onClick={() => setViewMode('wiki')}
+            className={`p-1.5 rounded-r-md transition-colors ${
+              viewMode === 'wiki'
+                ? 'bg-[var(--color-accent)] text-white'
+                : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+            }`}
+            title="Wiki view"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
             </svg>
           </button>
         </div>
@@ -270,8 +284,8 @@ export function MainView() {
         {/* Drag region - fills available space */}
         <div data-tauri-drag-region className="flex-1 h-full drag-region" />
 
-        {/* Filter toggle + atom count — right-aligned, hide for canvas */}
-        {viewMode !== 'canvas' && (
+        {/* Filter toggle + atom count — right-aligned, hide for canvas/wiki */}
+        {viewMode !== 'canvas' && viewMode !== 'wiki' && (
           <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={() => setFilterBarOpen(!filterBarOpen)}
@@ -297,7 +311,7 @@ export function MainView() {
       </div>
 
       {/* Search results header - only show for grid/list views */}
-      {isSemanticSearch && viewMode !== 'canvas' && (
+      {isSemanticSearch && viewMode !== 'canvas' && viewMode !== 'wiki' && (
         <div className="px-4 py-2 text-sm text-[var(--color-text-secondary)] border-b border-[var(--color-border)]">
           {semanticSearchResults.length > 0 ? (
             <span>
@@ -310,11 +324,13 @@ export function MainView() {
       )}
 
       {/* Filter bar - visible for grid/list views when toggled open */}
-      {!isSemanticSearch && viewMode !== 'canvas' && filterBarOpen && <FilterBar />}
+      {!isSemanticSearch && viewMode !== 'canvas' && viewMode !== 'wiki' && filterBarOpen && <FilterBar />}
 
       {/* Content */}
       <div className="flex-1 overflow-hidden">
-        {viewMode === 'canvas' ? (
+        {viewMode === 'wiki' ? (
+          <WikiFullView />
+        ) : viewMode === 'canvas' ? (
           <SigmaCanvas />
         ) : viewMode === 'grid' ? (
           <AtomGrid
@@ -341,8 +357,8 @@ export function MainView() {
         )}
       </div>
 
-      {/* FAB */}
-      <FAB onClick={handleNewAtom} title="Create new atom" />
+      {/* FAB — hide in wiki mode */}
+      {viewMode !== 'wiki' && <FAB onClick={handleNewAtom} title="Create new atom" />}
 
       {/* Embedding progress overlay */}
       <EmbeddingProgressBanner />

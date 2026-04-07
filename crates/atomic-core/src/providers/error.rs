@@ -59,12 +59,12 @@ impl std::error::Error for ProviderError {}
 
 impl ProviderError {
     /// Check if this error is retryable (same request or smaller batch).
-    /// Server errors (5xx) and upstream proxy failures are retryable since
-    /// they may succeed with a smaller batch or on retry.
+    /// Only 400 (bad request) and 401 (auth) are permanent — everything
+    /// else (404, 413, 5xx, etc.) may succeed with a smaller batch or on retry.
     pub fn is_retryable(&self) -> bool {
         match self {
             ProviderError::RateLimited { .. } | ProviderError::Network(_) => true,
-            ProviderError::Api { status, .. } => *status >= 500,
+            ProviderError::Api { status, .. } => !matches!(status, 400 | 401),
             _ => false,
         }
     }

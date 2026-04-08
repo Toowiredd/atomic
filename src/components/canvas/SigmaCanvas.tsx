@@ -247,7 +247,14 @@ export function SigmaCanvas() {
       const sorted = [...data!.clusters].sort((a, b) => b.atom_count - a.atom_count);
       const placed: { x: number; y: number; w: number; h: number }[] = [];
 
+      // Limit total labels: at most 1 label per 40,000px² of viewport
+      const maxLabels = Math.max(4, Math.floor((width * height) / 40000));
+      // Minimum gap between labels so they don't pack edge-to-edge
+      const pad = 24;
+
       for (const cluster of sorted) {
+        if (placed.length >= maxLabels) break;
+
         // Compute centroid from actual current node positions
         let cx = 0, cy = 0, count = 0;
         for (const atomId of cluster.atom_ids) {
@@ -272,11 +279,12 @@ export function SigmaCanvas() {
           h: pillH,
         };
 
+        // Check overlap using padded bounding boxes for spacing
         const overlaps = placed.some(p =>
-          rect.x < p.x + p.w &&
-          rect.x + rect.w > p.x &&
-          rect.y < p.y + p.h &&
-          rect.y + rect.h > p.y
+          rect.x - pad < p.x + p.w &&
+          rect.x + rect.w + pad > p.x &&
+          rect.y - pad < p.y + p.h &&
+          rect.y + rect.h + pad > p.y
         );
         if (overlaps) continue;
         placed.push(rect);

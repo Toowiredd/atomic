@@ -142,7 +142,19 @@ export function WelcomeStep({ state, dispatch, onNext }: WelcomeStepProps) {
   // since claiming connects the transport)
   if (claimedToken) {
     const handleCopyToken = async () => {
-      await navigator.clipboard.writeText(claimedToken);
+      try {
+        await navigator.clipboard.writeText(claimedToken);
+      } catch {
+        // Fallback for non-secure contexts / Tauri webview
+        const textarea = document.createElement('textarea');
+        textarea.value = claimedToken;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
       setTokenCopied(true);
       setTimeout(() => setTokenCopied(false), 2000);
     };

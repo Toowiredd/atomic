@@ -52,6 +52,8 @@ export function useInlineEditor({
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isSavingRef = useRef(false);
   const isEditingRef = useRef(false);
+  const savingPromiseRef = useRef<Promise<void>>(Promise.resolve());
+  const needsPipelineRef = useRef(false);
   // Track what was last saved to detect dirty state
   const lastSavedRef = useRef({
     content: atom.content,
@@ -92,30 +94,37 @@ export function useInlineEditor({
     if (isSavingRef.current) return;
     isSavingRef.current = true;
     setSaveStatus('saving');
-    try {
-      const tagIds = editTags.map(t => t.id);
-      const saved = await updateAtomContentOnly(
-        atom.id,
-        editContent,
-        editSourceUrl || undefined,
-        tagIds,
-      );
-      lastSavedRef.current = {
-        content: editContent,
-        sourceUrl: editSourceUrl,
-        tagIds: tagIds.sort().join(','),
-      };
-      setSaveStatus('saved');
-      onAtomUpdated?.(saved);
-    } catch {
-      setSaveStatus('error');
-    } finally {
-      isSavingRef.current = false;
-    }
+    const promise = (async () => {
+      try {
+        const tagIds = editTags.map(t => t.id);
+        const saved = await updateAtomContentOnly(
+          atom.id,
+          editContent,
+          editSourceUrl || undefined,
+          tagIds,
+        );
+        lastSavedRef.current = {
+          content: editContent,
+          sourceUrl: editSourceUrl,
+          tagIds: tagIds.sort().join(','),
+        };
+        needsPipelineRef.current = true;
+        setSaveStatus('saved');
+        onAtomUpdated?.(saved);
+      } catch {
+        setSaveStatus('error');
+      } finally {
+        isSavingRef.current = false;
+      }
+    })();
+    savingPromiseRef.current = promise;
+    await promise;
   }, [atom.id, editContent, editSourceUrl, editTags, updateAtomContentOnly, onAtomUpdated]);
 
   /** Full save with pipeline (embedding + tagging). */
   const doFullSave = useCallback(async () => {
+    // Wait for any in-flight content-only save to complete first
+    await savingPromiseRef.current;
     if (isSavingRef.current) return;
     isSavingRef.current = true;
     setSaveStatus('saving');
@@ -132,6 +141,7 @@ export function useInlineEditor({
         sourceUrl: editSourceUrl,
         tagIds: tagIds.sort().join(','),
       };
+      needsPipelineRef.current = false;
       setSaveStatus('saved');
       onAtomUpdated?.(saved);
       await fetchTags();
@@ -168,6 +178,7 @@ export function useInlineEditor({
   }, [scheduleSave]);
 
   const startEditing = useCallback((offset?: number) => {
+    needsPipelineRef.current = false;
     setIsEditing(true);
     setCursorOffset(offset ?? null);
     setSaveStatus('idle');
@@ -199,7 +210,7 @@ export function useInlineEditor({
         // Phase 3: after the rendered markdown mounts, clear blur
         requestAnimationFrame(() => setIsTransitioning(false));
       };
-      if (isDirty()) {
+      if (isDirty() || needsPipelineRef.current) {
         doFullSave().then(finish, finish);
       } else {
         finish();

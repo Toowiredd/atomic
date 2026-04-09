@@ -430,21 +430,6 @@ export function MainView() {
 
             <div data-tauri-drag-region className="flex-1 h-full drag-region" />
 
-            {/* Chat sidebar toggle — right-aligned */}
-            <button
-              onClick={handleOpenChat}
-              className={`hidden md:block p-1.5 rounded-md transition-colors ${
-                chatSidebarOpen
-                  ? 'text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
-                  : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
-              }`}
-              title={chatSidebarOpen ? "Hide chat" : "Show chat"}
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-              </svg>
-            </button>
-
             {/* Filter toggle + atom count — right-aligned, hide for canvas/wiki */}
             {viewMode !== 'canvas' && viewMode !== 'wiki' && (
               <div className="flex items-center gap-2 shrink-0">
@@ -469,6 +454,21 @@ export function MainView() {
                 </span>
               </div>
             )}
+
+            {/* Chat sidebar toggle — right-aligned */}
+            <button
+              onClick={handleOpenChat}
+              className={`hidden md:block p-1.5 rounded-md transition-colors ${
+                chatSidebarOpen
+                  ? 'text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
+                  : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
+              }`}
+              title={chatSidebarOpen ? "Hide chat" : "Show chat"}
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+              </svg>
+            </button>
           </>
         )}
       </div>

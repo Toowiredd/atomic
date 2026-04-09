@@ -402,9 +402,37 @@ function AtomReaderContent({
           const end = Math.min(text.length, charOffset + 10);
           const snippet = text.slice(start, end).trim();
           if (snippet) {
-            const idx = content.indexOf(snippet);
-            if (idx >= 0) {
-              offset = idx + (charOffset - start);
+            // Find all occurrences of the snippet in the raw markdown
+            const indices: number[] = [];
+            let searchFrom = 0;
+            while (searchFrom < content.length) {
+              const idx = content.indexOf(snippet, searchFrom);
+              if (idx === -1) break;
+              indices.push(idx);
+              searchFrom = idx + 1;
+            }
+            if (indices.length === 1) {
+              offset = indices[0] + (charOffset - start);
+            } else if (indices.length > 1) {
+              // Pick the occurrence closest to the click's vertical position
+              const article = articleRef.current;
+              if (article) {
+                const rect = article.getBoundingClientRect();
+                const relativeY = (e.clientY - rect.top) / rect.height;
+                const targetPos = relativeY * content.length;
+                let bestIdx = indices[0];
+                let bestDist = Math.abs(indices[0] - targetPos);
+                for (const idx of indices) {
+                  const dist = Math.abs(idx - targetPos);
+                  if (dist < bestDist) {
+                    bestDist = dist;
+                    bestIdx = idx;
+                  }
+                }
+                offset = bestIdx + (charOffset - start);
+              } else {
+                offset = indices[0] + (charOffset - start);
+              }
             }
           }
         }

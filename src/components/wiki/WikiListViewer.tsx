@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { X, ChevronLeft, Loader2, AlertTriangle } from 'lucide-react';
 import { useWikiStore } from '../../stores/wiki';
 import { useUIStore } from '../../stores/ui';
 import { WikiArticlesList } from './WikiArticlesList';
@@ -122,9 +123,7 @@ export function WikiListViewer() {
             className="p-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
             aria-label="Close"
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <X className="w-5 h-5" strokeWidth={2} />
           </button>
         </div>
 
@@ -147,9 +146,7 @@ export function WikiListViewer() {
               className="p-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
               aria-label="Back to list"
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-              </svg>
+              <ChevronLeft className="w-5 h-5" strokeWidth={2} />
             </button>
             <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">{currentTagName}</h2>
           </div>
@@ -157,18 +154,11 @@ export function WikiListViewer() {
             onClick={closeDrawer}
             className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <X className="w-5 h-5" strokeWidth={2} />
           </button>
         </div>
         <div className="flex-1 flex items-center justify-center">
-          <div className="w-8 h-8 animate-spin">
-            <svg className="w-full h-full text-[var(--color-accent)]" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-            </svg>
-          </div>
+          <Loader2 className="w-8 h-8 text-[var(--color-accent)] animate-spin" strokeWidth={2} />
         </div>
       </div>
     );
@@ -185,9 +175,7 @@ export function WikiListViewer() {
               className="p-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
               aria-label="Back to list"
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-              </svg>
+              <ChevronLeft className="w-5 h-5" strokeWidth={2} />
             </button>
             <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">{currentTagName}</h2>
           </div>
@@ -195,16 +183,12 @@ export function WikiListViewer() {
             onClick={closeDrawer}
             className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <X className="w-5 h-5" strokeWidth={2} />
           </button>
         </div>
         <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
           <div className="w-12 h-12 mb-4 rounded-full bg-red-500/10 flex items-center justify-center">
-            <svg className="w-6 h-6 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            </svg>
+            <AlertTriangle className="w-6 h-6 text-red-500" strokeWidth={2} />
           </div>
           <p className="text-[var(--color-text-primary)] mb-2">Failed to load article</p>
           <p className="text-sm text-[var(--color-text-secondary)] mb-4">{error}</p>
@@ -234,9 +218,7 @@ export function WikiListViewer() {
               className="p-1 text-[var(--color-text-tertiary)] cursor-not-allowed"
               aria-label="Back to list"
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-              </svg>
+              <ChevronLeft className="w-5 h-5" strokeWidth={2} />
             </button>
             <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">{currentTagName}</h2>
           </div>
@@ -244,9 +226,7 @@ export function WikiListViewer() {
             onClick={closeDrawer}
             className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <X className="w-5 h-5" strokeWidth={2} />
           </button>
         </div>
         <WikiGenerating tagName={currentTagName || ''} atomCount={articleStatus?.current_atom_count || 0} />
@@ -265,9 +245,7 @@ export function WikiListViewer() {
               className="p-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
               aria-label="Back to list"
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-              </svg>
+              <ChevronLeft className="w-5 h-5" strokeWidth={2} />
             </button>
             <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">{currentTagName}</h2>
           </div>
@@ -275,9 +253,7 @@ export function WikiListViewer() {
             onClick={closeDrawer}
             className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <X className="w-5 h-5" strokeWidth={2} />
           </button>
         </div>
         <WikiEmptyState

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Clock, RefreshCw } from 'lucide-react';
 import { useWikiStore } from '../../stores/wiki';
 import { useUIStore } from '../../stores/ui';
 import { WikiArticleContent } from './WikiArticleContent';
@@ -221,9 +222,7 @@ export function WikiReader({ tagId, tagName }: WikiReaderProps) {
                 {versions.length > 0 && (
                   <div className="relative" ref={versionsRef}>
                     <Button variant="ghost" size="sm" onClick={() => setShowVersions(!showVersions)}>
-                      <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
+                      <Clock className="w-4 h-4 mr-1" strokeWidth={2} />
                       {versions.length}
                     </Button>
                     {showVersions && (
@@ -259,9 +258,7 @@ export function WikiReader({ tagId, tagName }: WikiReaderProps) {
                   onClick={() => setShowRegenerateModal(true)}
                   disabled={isUpdating || !!selectedVersion}
                 >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
+                  <RefreshCw className="w-4 h-4" strokeWidth={2} />
                 </Button>
               </>
             }

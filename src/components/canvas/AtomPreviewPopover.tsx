@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, memo } from 'react';
+import { ArrowRight, Loader2 } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -139,10 +140,7 @@ export function AtomPreviewPopover({ atomId, anchorRect, onClose, onViewAtom }: 
       {isLoading ? (
         <div className="flex items-center justify-center py-8">
           <div className="flex items-center gap-2 text-[var(--color-text-secondary)]">
-            <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-            </svg>
+            <Loader2 className="animate-spin h-4 w-4" strokeWidth={2} />
             <span className="text-sm">Loading...</span>
           </div>
         </div>
@@ -197,9 +195,7 @@ export function AtomPreviewPopover({ atomId, anchorRect, onClose, onViewAtom }: 
               className="flex items-center gap-1 text-sm text-[var(--color-accent)] hover:text-[var(--color-accent-light)] transition-colors"
             >
               Open in reader
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
-              </svg>
+              <ArrowRight className="w-4 h-4" strokeWidth={2} />
             </button>
           </div>
         </>

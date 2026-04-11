@@ -199,7 +199,7 @@ impl Database {
     ///   1. Add a new `if version < N` block at the end (before the virtual-table section)
     ///   2. End the block with `PRAGMA user_version = N;`
     ///   3. Bump LATEST_VERSION
-    const LATEST_VERSION: i32 = 11;
+    const LATEST_VERSION: i32 = 12;
 
     pub fn run_migrations(conn: &Connection) -> Result<(), AtomicCoreError> {
         let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -642,6 +642,35 @@ impl Database {
                    WHERE parent_id IS NULL
                      AND name IN ('Topics', 'People', 'Locations', 'Organizations', 'Events');
                  PRAGMA user_version = 11;",
+            )?;
+        }
+
+        // --- V11 → V12: Daily briefings + briefing citations ---
+        if version < 12 {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS briefings (
+                    id TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    atom_count INTEGER NOT NULL,
+                    last_run_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS briefing_citations (
+                    id TEXT PRIMARY KEY,
+                    briefing_id TEXT NOT NULL REFERENCES briefings(id) ON DELETE CASCADE,
+                    citation_index INTEGER NOT NULL,
+                    atom_id TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+                    excerpt TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_briefings_created ON briefings(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_briefing_citations_briefing
+                    ON briefing_citations(briefing_id);
+
+                PRAGMA user_version = 12;
+                "#,
             )?;
         }
 

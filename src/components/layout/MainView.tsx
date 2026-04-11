@@ -1,5 +1,28 @@
 import { useMemo, useCallback, useEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
+import {
+  PanelLeft,
+  X,
+  Undo2,
+  Redo2,
+  ChevronLeft,
+  ChevronRight,
+  Sun,
+  Moon,
+  Check,
+  Pencil,
+  Trash2,
+  MoreHorizontal,
+  MessageCircle,
+  LayoutDashboard,
+  LayoutGrid,
+  List as ListIcon,
+  Library,
+  Network,
+  BookOpen,
+  Search,
+  Filter,
+} from 'lucide-react';
 import { AtomGrid } from '../atoms/AtomGrid';
 import { AtomList } from '../atoms/AtomList';
 import { AtomReader } from '../atoms/AtomReader';
@@ -7,6 +30,7 @@ import { FilterBar } from '../atoms/FilterBar';
 import { FilterSheet } from '../atoms/FilterSheet';
 import { SigmaCanvas } from '../canvas/SigmaCanvas';
 import { LocalGraphView } from '../canvas/LocalGraphView';
+import { DashboardView } from '../dashboard/DashboardView';
 import { FAB } from '../ui/FAB';
 import { Modal } from '../ui/Modal';
 import { EmbeddingProgressBanner } from '../ui/EmbeddingProgressBanner';
@@ -38,15 +62,17 @@ export function MainView() {
   const search = useAtomsStore(s => s.search);
   const clearSemanticSearch = useAtomsStore(s => s.clearSemanticSearch);
 
-  const { viewMode, searchQuery } = useUIStore(
+  const { viewMode, atomsLayout, searchQuery } = useUIStore(
     useShallow(s => ({
       viewMode: s.viewMode,
+      atomsLayout: s.atomsLayout,
       searchQuery: s.searchQuery,
     }))
   );
   const leftPanelOpen = useUIStore(s => s.leftPanelOpen);
   const toggleLeftPanel = useUIStore(s => s.toggleLeftPanel);
   const setViewMode = useUIStore(s => s.setViewMode);
+  const setAtomsLayout = useUIStore(s => s.setAtomsLayout);
   const openReader = useUIStore(s => s.openReader);
   const readerState = useUIStore(s => s.readerState);
   const wikiReaderState = useUIStore(s => s.wikiReaderState);
@@ -232,10 +258,7 @@ export function MainView() {
           }`}
           title={leftPanelOpen ? "Hide sidebar" : "Show sidebar"}
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="2" />
-            <line x1="9" y1="3" x2="9" y2="21" />
-          </svg>
+          <PanelLeft className="w-4 h-4" strokeWidth={2} />
         </button>
 
         {readerState.atomId || wikiReaderState.tagId || (localGraph.isOpen && localGraph.centerAtomId) ? (
@@ -247,9 +270,7 @@ export function MainView() {
                 className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
                 title="Close"
               >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
+                <X className="w-4 h-4" strokeWidth={2} />
               </button>
               {/* In edit mode: undo/redo. In view mode: back/forward */}
               {readerState.atomId && readerState.editing ? (
@@ -259,18 +280,14 @@ export function MainView() {
                     className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
                     title="Undo (Cmd+Z)"
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a5 5 0 015 5v2M3 10l4-4M3 10l4 4" />
-                    </svg>
+                    <Undo2 className="w-4 h-4" strokeWidth={2} />
                   </button>
                   <button
                     onClick={() => readerEditorActions.current?.redo()}
                     className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
                     title="Redo (Cmd+Shift+Z)"
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 10H11a5 5 0 00-5 5v2M21 10l-4-4M21 10l-4 4" />
-                    </svg>
+                    <Redo2 className="w-4 h-4" strokeWidth={2} />
                   </button>
                 </>
               ) : (
@@ -281,9 +298,7 @@ export function MainView() {
                     className={`p-1.5 rounded-md transition-colors ${overlayNav.index > 0 ? 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]' : 'text-[var(--color-text-tertiary)] cursor-default'}`}
                     title="Back"
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                    </svg>
+                    <ChevronLeft className="w-4 h-4" strokeWidth={2} />
                   </button>
                   <button
                     onClick={overlayForward}
@@ -291,9 +306,7 @@ export function MainView() {
                     className={`p-1.5 rounded-md transition-colors ${overlayNav.index < overlayNav.stack.length - 1 ? 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]' : 'text-[var(--color-text-tertiary)] cursor-default'}`}
                     title="Forward"
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                    </svg>
+                    <ChevronRight className="w-4 h-4" strokeWidth={2} />
                   </button>
                 </>
               )}
@@ -322,13 +335,9 @@ export function MainView() {
                   title={readerTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
                 >
                   {readerTheme === 'dark' ? (
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
-                    </svg>
+                    <Sun className="w-4 h-4" strokeWidth={2} />
                   ) : (
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-                    </svg>
+                    <Moon className="w-4 h-4" strokeWidth={2} />
                   )}
                 </button>
                 {/* Edit / Done toggle */}
@@ -345,13 +354,9 @@ export function MainView() {
                   title={readerState.editing ? 'Done (Esc)' : 'Edit'}
                 >
                   {readerState.editing ? (
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                    </svg>
+                    <Check className="w-4 h-4" strokeWidth={2} />
                   ) : (
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                    </svg>
+                    <Pencil className="w-4 h-4" strokeWidth={2} />
                   )}
                 </button>
                 {/* Delete */}
@@ -360,9 +365,7 @@ export function MainView() {
                   className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-red-400 hover:bg-[var(--color-bg-hover)] transition-colors"
                   title="Delete"
                 >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                  </svg>
+                  <Trash2 className="w-4 h-4" strokeWidth={2} />
                 </button>
               </div>
             )}
@@ -385,13 +388,9 @@ export function MainView() {
                   title={readerState.editing ? 'Done (Esc)' : 'Edit'}
                 >
                   {readerState.editing ? (
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                    </svg>
+                    <Check className="w-4 h-4" strokeWidth={2} />
                   ) : (
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                    </svg>
+                    <Pencil className="w-4 h-4" strokeWidth={2} />
                   )}
                 </button>
 
@@ -404,11 +403,7 @@ export function MainView() {
                     aria-haspopup="menu"
                     aria-expanded={readerMenuOpen}
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <circle cx="5" cy="12" r="1.5" fill="currentColor" />
-                      <circle cx="12" cy="12" r="1.5" fill="currentColor" />
-                      <circle cx="19" cy="12" r="1.5" fill="currentColor" />
-                    </svg>
+                    <MoreHorizontal className="w-4 h-4" strokeWidth={2} />
                   </button>
                   {readerMenuOpen && (
                     <div
@@ -420,13 +415,11 @@ export function MainView() {
                         onClick={() => { toggleReaderTheme(); setReaderMenuOpen(false); }}
                         className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
                       >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          {readerTheme === 'dark' ? (
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
-                          ) : (
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-                          )}
-                        </svg>
+                        {readerTheme === 'dark' ? (
+                          <Sun className="w-4 h-4" strokeWidth={2} />
+                        ) : (
+                          <Moon className="w-4 h-4" strokeWidth={2} />
+                        )}
                         {readerTheme === 'dark' ? 'Light mode' : 'Dark mode'}
                       </button>
                       <button
@@ -434,9 +427,7 @@ export function MainView() {
                         onClick={() => { setShowDeleteModal(true); setReaderMenuOpen(false); }}
                         className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left text-red-400 hover:bg-[var(--color-bg-hover)] transition-colors"
                       >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
+                        <Trash2 className="w-4 h-4" strokeWidth={2} />
                         Delete
                       </button>
                     </div>
@@ -455,9 +446,7 @@ export function MainView() {
               }`}
               title={chatSidebarOpen ? "Hide chat" : "Show chat"}
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-              </svg>
+              <MessageCircle className="w-4 h-4" strokeWidth={2} />
             </button>
           </>
         ) : (
@@ -465,65 +454,82 @@ export function MainView() {
           <>
             {/* View Mode Toggle — desktop only; mobile accesses view mode via the filter sheet */}
             {!isMobile && (
-              <div className="flex items-center bg-[var(--color-bg-card)] rounded-md border border-[var(--color-border)] shrink-0">
-                <button
-                  onClick={() => setViewMode('grid')}
-                  className={`p-1.5 rounded-l-md transition-colors ${
-                    viewMode === 'grid'
-                      ? 'bg-[var(--color-accent)] text-white'
-                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
-                  }`}
-                  title="Grid view"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
-                  </svg>
-                </button>
-                <button
-                  onClick={() => setViewMode('list')}
-                  className={`p-1.5 transition-colors ${
-                    viewMode === 'list'
-                      ? 'bg-[var(--color-accent)] text-white'
-                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
-                  }`}
-                  title="List view"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-                  </svg>
-                </button>
-                <button
-                  onClick={() => setViewMode('canvas')}
-                  className={`p-1.5 transition-colors ${
-                    viewMode === 'canvas'
-                      ? 'bg-[var(--color-accent)] text-white'
-                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
-                  }`}
-                  title="Canvas view"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                    <circle cx="6" cy="6" r="2" />
-                    <circle cx="18" cy="6" r="2" />
-                    <circle cx="6" cy="18" r="2" />
-                    <circle cx="18" cy="18" r="2" />
-                    <circle cx="12" cy="12" r="2" />
-                    <path strokeLinecap="round" d="M8 7l2.5 3.5M16 7l-2.5 3.5M8 17l2.5-3.5M16 17l-2.5-3.5" />
-                  </svg>
-                </button>
-                <button
-                  onClick={() => setViewMode('wiki')}
-                  className={`p-1.5 rounded-r-md transition-colors ${
-                    viewMode === 'wiki'
-                      ? 'bg-[var(--color-accent)] text-white'
-                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
-                  }`}
-                  title="Wiki view"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-                  </svg>
-                </button>
-              </div>
+              <>
+                <div className="flex items-center bg-[var(--color-bg-card)] rounded-md border border-[var(--color-border)] shrink-0">
+                  <button
+                    onClick={() => setViewMode('dashboard')}
+                    className={`p-1.5 rounded-l-md transition-colors ${
+                      viewMode === 'dashboard'
+                        ? 'bg-[var(--color-accent)] text-white'
+                        : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                    }`}
+                    title="Dashboard"
+                  >
+                    <LayoutDashboard className="w-4 h-4" strokeWidth={2} />
+                  </button>
+                  <button
+                    onClick={() => setViewMode('atoms')}
+                    className={`p-1.5 transition-colors ${
+                      viewMode === 'atoms'
+                        ? 'bg-[var(--color-accent)] text-white'
+                        : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                    }`}
+                    title="Atoms"
+                  >
+                    <Library className="w-4 h-4" strokeWidth={2} />
+                  </button>
+                  <button
+                    onClick={() => setViewMode('canvas')}
+                    className={`p-1.5 transition-colors ${
+                      viewMode === 'canvas'
+                        ? 'bg-[var(--color-accent)] text-white'
+                        : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                    }`}
+                    title="Canvas view"
+                  >
+                    <Network className="w-4 h-4" strokeWidth={2} />
+                  </button>
+                  <button
+                    onClick={() => setViewMode('wiki')}
+                    className={`p-1.5 rounded-r-md transition-colors ${
+                      viewMode === 'wiki'
+                        ? 'bg-[var(--color-accent)] text-white'
+                        : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                    }`}
+                    title="Wiki view"
+                  >
+                    <BookOpen className="w-4 h-4" strokeWidth={2} />
+                  </button>
+                </div>
+
+                {/* Atoms layout sub-toggle — only visible when on the atoms view */}
+                {viewMode === 'atoms' && (
+                  <div className="flex items-center bg-[var(--color-bg-card)] rounded-md border border-[var(--color-border)] shrink-0">
+                    <button
+                      onClick={() => setAtomsLayout('grid')}
+                      className={`p-1.5 rounded-l-md transition-colors ${
+                        atomsLayout === 'grid'
+                          ? 'text-[var(--color-text-primary)] bg-[var(--color-bg-hover)]'
+                          : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                      }`}
+                      title="Grid layout"
+                    >
+                      <LayoutGrid className="w-4 h-4" strokeWidth={2} />
+                    </button>
+                    <button
+                      onClick={() => setAtomsLayout('list')}
+                      className={`p-1.5 rounded-r-md transition-colors ${
+                        atomsLayout === 'list'
+                          ? 'text-[var(--color-text-primary)] bg-[var(--color-bg-hover)]'
+                          : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                      }`}
+                      title="List layout"
+                    >
+                      <ListIcon className="w-4 h-4" strokeWidth={2} />
+                    </button>
+                  </div>
+                )}
+              </>
             )}
 
             {/* Search button */}
@@ -532,16 +538,14 @@ export function MainView() {
               className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
               title="Search atoms"
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-              </svg>
+              <Search className="w-4 h-4" strokeWidth={2} />
             </button>
 
             <div data-tauri-drag-region className="flex-1 h-full drag-region" />
 
             {/* Filter toggle + atom count — right-aligned. On mobile, always show the
                 filter button (it opens the filter sheet which hosts view mode too). */}
-            {(isMobile || (viewMode !== 'canvas' && viewMode !== 'wiki')) && (
+            {(isMobile || viewMode === 'atoms') && (
               <div className="flex items-center gap-2 shrink-0">
                 <button
                   onClick={() => setFilterBarOpen(!filterBarOpen)}
@@ -552,9 +556,7 @@ export function MainView() {
                   }`}
                   title="Filter & sort"
                 >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
-                  </svg>
+                  <Filter className="w-4 h-4" strokeWidth={2} />
                   {hasActiveFilter && !filterBarOpen && (
                     <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 bg-[var(--color-accent)] rounded-full" />
                   )}
@@ -577,16 +579,14 @@ export function MainView() {
               }`}
               title={chatSidebarOpen ? "Hide chat" : "Show chat"}
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-              </svg>
+              <MessageCircle className="w-4 h-4" strokeWidth={2} />
             </button>
           </>
         )}
       </div>
 
-      {/* Search results header - only show for grid/list views */}
-      {isSemanticSearch && viewMode !== 'canvas' && viewMode !== 'wiki' && (
+      {/* Search results header - only show in atoms view */}
+      {isSemanticSearch && viewMode === 'atoms' && (
         <div className="px-4 py-2 text-sm text-[var(--color-text-secondary)] border-b border-[var(--color-border)]">
           {semanticSearchResults.length > 0 ? (
             <span>
@@ -598,8 +598,8 @@ export function MainView() {
         </div>
       )}
 
-      {/* Filter bar — desktop inline strip, grid/list views only */}
-      {!isMobile && !isSemanticSearch && viewMode !== 'canvas' && viewMode !== 'wiki' && filterBarOpen && <FilterBar />}
+      {/* Filter bar — desktop inline strip, atoms view only */}
+      {!isMobile && !isSemanticSearch && viewMode === 'atoms' && filterBarOpen && <FilterBar />}
 
       {/* Filter sheet — mobile bottom sheet hosts view mode + filter + sort */}
       {isMobile && (
@@ -618,11 +618,13 @@ export function MainView() {
           <AtomReader atomId={readerState.atomId} highlightText={readerState.highlightText} initialEditing={readerState.editing} />
         ) : wikiReaderState.tagId && wikiReaderState.tagName ? (
           <WikiReader tagId={wikiReaderState.tagId} tagName={wikiReaderState.tagName} />
+        ) : viewMode === 'dashboard' ? (
+          <DashboardView />
         ) : viewMode === 'wiki' ? (
           <WikiFullView />
         ) : viewMode === 'canvas' ? (
           <SigmaCanvas />
-        ) : viewMode === 'grid' ? (
+        ) : atomsLayout === 'grid' ? (
           <AtomGrid
             atoms={displayAtoms}
             onAtomClick={handleAtomClick}
@@ -647,8 +649,8 @@ export function MainView() {
         )}
       </div>
 
-      {/* FAB — hide in wiki, canvas, reader, and graph */}
-      {viewMode !== 'wiki' && viewMode !== 'canvas' && !readerState.atomId && !wikiReaderState.tagId && !localGraph.isOpen && <FAB onClick={handleNewAtom} title="Create new atom" />}
+      {/* FAB — only on atoms view, and only when no overlay is open */}
+      {viewMode === 'atoms' && !readerState.atomId && !wikiReaderState.tagId && !localGraph.isOpen && <FAB onClick={handleNewAtom} title="Create new atom" />}
 
       {/* Embedding progress overlay */}
       <EmbeddingProgressBanner />

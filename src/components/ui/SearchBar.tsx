@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { Search, ChevronUp, ChevronDown, X, Loader2 } from 'lucide-react';
 
 const DEBOUNCE_MS = 200;
 
@@ -84,10 +85,7 @@ export function SearchBar({
     if (isPending) {
       // Animated ring loader
       return (
-        <svg className="w-4 h-4 animate-spin text-[var(--color-accent)]" fill="none" viewBox="0 0 24 24">
-          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
-          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-        </svg>
+        <Loader2 className="w-4 h-4 animate-spin text-[var(--color-accent)]" strokeWidth={2} />
       );
     }
     if (totalMatches === 0) return 'No matches';
@@ -98,19 +96,7 @@ export function SearchBar({
     <div className="sticky left-0 right-0 top-0 z-20 px-4 py-2 bg-[var(--color-bg-card)] border-b border-[var(--color-border)] shadow-lg">
       <div className="flex items-center gap-2">
         {/* Search icon */}
-        <svg
-          className="w-4 h-4 text-[var(--color-text-secondary)] flex-shrink-0"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={2}
-            d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-          />
-        </svg>
+        <Search className="w-4 h-4 text-[var(--color-text-secondary)] flex-shrink-0" strokeWidth={2} />
 
         {/* Search input */}
         <input
@@ -142,9 +128,7 @@ export function SearchBar({
             className="p-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             title="Previous match (Shift+Enter)"
           >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
-            </svg>
+            <ChevronUp className="w-4 h-4" strokeWidth={2} />
           </button>
           <button
             onClick={onNext}
@@ -152,9 +136,7 @@ export function SearchBar({
             className="p-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             title="Next match (Enter)"
           >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-            </svg>
+            <ChevronDown className="w-4 h-4" strokeWidth={2} />
           </button>
         </div>
 
@@ -164,9 +146,7 @@ export function SearchBar({
           className="p-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
           title="Close (Escape)"
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-          </svg>
+          <X className="w-4 h-4" strokeWidth={2} />
         </button>
       </div>
     </div>

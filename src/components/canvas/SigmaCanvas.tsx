@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { Loader2 } from 'lucide-react';
 import { useUIStore } from '../../stores/ui';
 import { useDatabasesStore } from '../../stores/databases';
 import { getGlobalCanvas, type GlobalCanvasData } from '../../lib/api';
@@ -20,7 +21,18 @@ function truncLabel(str: string, max: number): string {
   return str.length > max ? str.substring(0, max - 1) + '\u2026' : str;
 }
 
-export function SigmaCanvas() {
+export type SigmaCanvasMode = 'main' | 'preview';
+
+interface SigmaCanvasProps {
+  /** 'main' runs the full interactive canvas; 'preview' renders a static thumbnail
+   *  with no chrome, no mount animation, no pan/zoom, and no chat controller. */
+  mode?: SigmaCanvasMode;
+  /** Click handler for preview mode — fires on any click inside the container. */
+  onPreviewClick?: () => void;
+}
+
+export function SigmaCanvas({ mode = 'main', onPreviewClick }: SigmaCanvasProps = {}) {
+  const isPreview = mode === 'preview';
   const openReader = useUIStore(s => s.openReader);
   const selectedTagId = useUIStore(s => s.selectedTagId);
   const activeDbId = useDatabasesStore(s => s.activeId);
@@ -328,32 +340,43 @@ export function SigmaCanvas() {
     }
     sigma.setCustomBBox({ x: [xMin, xMax], y: [yMin, yMax] });
 
-    // Animate nodes outward from center + fade edges in
-    edgeAnimProgress.current = 0;
-    const animStart = performance.now();
+    // Animate nodes outward from center + fade edges in.
+    // Preview mode skips the animation and snaps to final state so the thumbnail
+    // shows the real layout immediately on mount.
     let cancelledAnim = false;
-    function animateTick(now: number) {
-      if (cancelledAnim) return;
-      const elapsed = now - animStart;
-
-      // Node positions: 0 → target over 2.5s, cubic ease-out
-      const nt = Math.min(1, elapsed / 2000);
-      const ne = 1 - (1 - nt) ** 3;
+    if (isPreview) {
       for (const [id, target] of Object.entries(targetPositions)) {
         if (!graph.hasNode(id)) continue;
-        graph.setNodeAttribute(id, 'x', target.x * ne);
-        graph.setNodeAttribute(id, 'y', target.y * ne);
+        graph.setNodeAttribute(id, 'x', target.x);
+        graph.setNodeAttribute(id, 'y', target.y);
       }
+      edgeAnimProgress.current = 1;
+    } else {
+      edgeAnimProgress.current = 0;
+      const animStart = performance.now();
+      function animateTick(now: number) {
+        if (cancelledAnim) return;
+        const elapsed = now - animStart;
 
-      // Edge fade: 0 → 1 over 3s, ease-in
-      const et = Math.min(1, elapsed / 2500);
-      edgeAnimProgress.current = et * et;
+        // Node positions: 0 → target over 2.5s, cubic ease-out
+        const nt = Math.min(1, elapsed / 2000);
+        const ne = 1 - (1 - nt) ** 3;
+        for (const [id, target] of Object.entries(targetPositions)) {
+          if (!graph.hasNode(id)) continue;
+          graph.setNodeAttribute(id, 'x', target.x * ne);
+          graph.setNodeAttribute(id, 'y', target.y * ne);
+        }
 
-      if (nt < 1 || et < 1) {
-        requestAnimationFrame(animateTick);
+        // Edge fade: 0 → 1 over 3s, ease-in
+        const et = Math.min(1, elapsed / 2500);
+        edgeAnimProgress.current = et * et;
+
+        if (nt < 1 || et < 1) {
+          requestAnimationFrame(animateTick);
+        }
       }
+      requestAnimationFrame(animateTick);
     }
-    requestAnimationFrame(animateTick);
     const cancelAnim = () => { cancelledAnim = true; };
 
     // Helper to show atom preview popover at a node's screen position
@@ -374,12 +397,10 @@ export function SigmaCanvas() {
       setPreviewAtomId(atomId);
     };
 
-    sigma.on('clickNode', ({ node }) => {
-      showAtomPreview(node);
-    });
-
-    // Register canvas controller for chat tools
-    // Sigma camera uses normalized [0,1] coords; convert graph coords through the BBox
+    // Build a controller both modes use. Main mode registers it in the global
+    // `controller` slot (driven by the chat agent). Preview mode registers it
+    // in the separate `previewController` slot so dashboard widgets can drive
+    // thumbnail focus without touching the chat agent's target.
     const bboxW = xMax - xMin || 1;
     const bboxH = yMax - yMin || 1;
     const graphToCamera = (gx: number, gy: number) => ({
@@ -387,9 +408,7 @@ export function SigmaCanvas() {
       y: (gy - yMin) / bboxH,
     });
 
-    const { registerController, setCanvasData } = useCanvasStore.getState();
-    setCanvasData(data);
-    registerController({
+    const controller = {
       zoomToCluster: (clusterLabel: string) => {
         const cluster = data.clusters.find(
           (c) => c.label.toLowerCase() === clusterLabel.toLowerCase()
@@ -414,20 +433,36 @@ export function SigmaCanvas() {
         const gy = graph.getNodeAttribute(atomId, 'y') as number;
         const cam = graphToCamera(gx, gy);
         sigma.getCamera().animate({ x: cam.x, y: cam.y, ratio: 0.15 }, { duration: 600 });
-        // Show preview after camera animation settles
-        setTimeout(() => showAtomPreview(atomId), 650);
+        // Main view shows the popover after the camera settles; preview stays quiet.
+        if (!isPreview) setTimeout(() => showAtomPreview(atomId), 650);
       },
-    });
+    };
+
+    if (isPreview) {
+      useCanvasStore.getState().registerPreviewController(controller);
+    } else {
+      sigma.on('clickNode', ({ node }) => {
+        showAtomPreview(node);
+      });
+      const { registerController, setCanvasData } = useCanvasStore.getState();
+      setCanvasData(data);
+      registerController(controller);
+    }
 
     return () => {
       cancelAnim();
-      useCanvasStore.getState().unregisterController();
+      const store = useCanvasStore.getState();
+      if (isPreview) {
+        store.unregisterPreviewController();
+      } else {
+        store.unregisterController();
+      }
       sigma.kill();
       labelCanvas.remove();
       sigmaRef.current = null;
       graphRef.current = null;
     };
-  }, [data]); // intentionally exclude theme — handled below
+  }, [data, isPreview]); // intentionally exclude theme — handled below
 
   // Update colors when theme changes (without recreating graph)
   useEffect(() => {
@@ -470,8 +505,10 @@ export function SigmaCanvas() {
     return () => cancelAnimationFrame(raf);
   }, [chatSidebarOpen]);
 
-  // Subscribe to canvas action events from the chat agent
+  // Subscribe to canvas action events from the chat agent.
+  // Preview instances don't own the controller and shouldn't react to chat actions.
   useEffect(() => {
+    if (isPreview) return;
     const transport = getTransport();
     const unsub = transport.subscribe<{ conversation_id: string; action: string; params: Record<string, string> }>(
       'chat-canvas-action',
@@ -486,7 +523,7 @@ export function SigmaCanvas() {
       }
     );
     return () => unsub();
-  }, []);
+  }, [isPreview]);
 
   // Animate edge threshold changes
   const thresholdAnimRef = useRef<number | null>(null);
@@ -521,16 +558,13 @@ export function SigmaCanvas() {
     <div className="flex flex-col h-full w-full">
       <div
         className="flex-1 relative overflow-hidden"
-        style={{ backgroundColor: theme.background }}
+        style={{ backgroundColor: isPreview ? 'var(--color-bg-main)' : theme.background }}
       >
         {isLoading && (
           <div className="absolute inset-0 flex items-center justify-center z-10">
             <div className="flex items-center gap-2 text-[var(--color-text-secondary)]">
-              <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-              </svg>
-              <span className="text-sm">Computing layout...</span>
+              <Loader2 className={`animate-spin ${isPreview ? 'h-4 w-4' : 'h-5 w-5'}`} strokeWidth={2} />
+              {!isPreview && <span className="text-sm">Computing layout...</span>}
             </div>
           </div>
         )}
@@ -538,8 +572,14 @@ export function SigmaCanvas() {
         {error && (
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="text-center text-[var(--color-text-secondary)]">
-              <p className="text-lg mb-2">Error loading canvas</p>
-              <p className="text-sm">{error}</p>
+              {isPreview ? (
+                <p className="text-xs">Canvas unavailable</p>
+              ) : (
+                <>
+                  <p className="text-lg mb-2">Error loading canvas</p>
+                  <p className="text-sm">{error}</p>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -547,20 +587,36 @@ export function SigmaCanvas() {
         {!isLoading && data && data.atoms.length === 0 && (
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="text-center text-[var(--color-text-secondary)]">
-              <p className="text-lg mb-2">No atoms with embeddings</p>
-              <p className="text-sm">Create some atoms and wait for embeddings to generate</p>
+              {isPreview ? (
+                <p className="text-xs">No atoms with embeddings yet</p>
+              ) : (
+                <>
+                  <p className="text-lg mb-2">No atoms with embeddings</p>
+                  <p className="text-sm">Create some atoms and wait for embeddings to generate</p>
+                </>
+              )}
             </div>
           </div>
         )}
 
         <div
           ref={containerRef}
-          className="w-full h-full"
-          style={{ minHeight: 200 }}
+          className={`w-full h-full ${isPreview ? 'pointer-events-none' : ''}`}
+          style={isPreview ? undefined : { minHeight: 200 }}
         />
 
-        {/* Theme picker + edge slider */}
-        {!isLoading && data && data.atoms.length > 0 && (
+        {/* Click-through overlay in preview mode — whole widget navigates to the main canvas */}
+        {isPreview && (
+          <button
+            type="button"
+            onClick={onPreviewClick}
+            className="absolute inset-0 z-20 cursor-pointer bg-transparent hover:bg-white/[0.03] transition-colors"
+            aria-label="Open canvas view"
+          />
+        )}
+
+        {/* Theme picker + edge slider — main view only */}
+        {!isPreview && !isLoading && data && data.atoms.length > 0 && (
           <div className="absolute bottom-4 left-4 z-20 flex flex-col gap-2">
             <div className="flex items-center gap-1.5">
               <button
@@ -608,8 +664,8 @@ export function SigmaCanvas() {
           </div>
         )}
 
-        {/* Atom preview popover */}
-        {previewAtomId && previewAnchorRect && (
+        {/* Atom preview popover — main view only */}
+        {!isPreview && previewAtomId && previewAnchorRect && (
           <AtomPreviewPopover
             atomId={previewAtomId}
             anchorRect={previewAnchorRect}

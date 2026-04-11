@@ -1,4 +1,5 @@
 import { useEffect, useCallback, useRef, useState, useMemo } from 'react';
+import { Loader2, Plus, Minus, RotateCcw } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
 import { useUIStore } from '../../stores/ui';
@@ -184,10 +185,7 @@ export function HierarchicalCanvas() {
         {isLoading && (
           <div className="absolute inset-0 flex items-center justify-center z-10 bg-[var(--color-bg-main)]/50">
             <div className="flex items-center gap-2 text-[var(--color-text-secondary)]">
-              <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-              </svg>
+              <Loader2 className="animate-spin h-5 w-5" strokeWidth={2} />
               <span className="text-sm">Loading...</span>
             </div>
           </div>
@@ -303,10 +301,7 @@ export function HierarchicalCanvas() {
                         className="absolute pointer-events-none"
                         style={{ left: pos.x, top: pos.y, transform: 'translate(-50%, -50%)' }}
                       >
-                        <svg className="animate-spin h-4 w-4 text-[var(--color-accent)]" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                        </svg>
+                        <Loader2 className="animate-spin h-4 w-4 text-[var(--color-accent)]" strokeWidth={2} />
                       </div>
                     );
                   })()}
@@ -351,27 +346,21 @@ export function HierarchicalCanvas() {
                     className="w-8 h-8 rounded-md bg-[var(--color-bg-card)] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] flex items-center justify-center transition-colors"
                     title="Zoom in"
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-                    </svg>
+                    <Plus className="w-4 h-4" strokeWidth={2} />
                   </button>
                   <button
                     onClick={() => zoomOut()}
                     className="w-8 h-8 rounded-md bg-[var(--color-bg-card)] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] flex items-center justify-center transition-colors"
                     title="Zoom out"
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M20 12H4" />
-                    </svg>
+                    <Minus className="w-4 h-4" strokeWidth={2} />
                   </button>
                   <button
                     onClick={() => resetTransform()}
                     className="w-8 h-8 rounded-md bg-[var(--color-bg-card)] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] flex items-center justify-center transition-colors"
                     title="Reset view"
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
+                    <RotateCcw className="w-4 h-4" strokeWidth={2} />
                   </button>
                 </div>
               </>

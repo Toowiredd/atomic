@@ -4,7 +4,8 @@ import type { CanvasLevel } from '../lib/api';
 import { getCanvasLevel } from '../lib/api';
 
 export type DrawerMode = 'editor' | 'viewer' | 'wiki';
-export type ViewMode = 'grid' | 'list' | 'canvas' | 'wiki';
+export type ViewMode = 'dashboard' | 'atoms' | 'canvas' | 'wiki';
+export type AtomsLayout = 'grid' | 'list';
 
 interface DrawerState {
   isOpen: boolean;
@@ -63,6 +64,7 @@ interface UIStore {
   wikiReaderState: WikiReaderState;
   overlayNav: OverlayNav;
   viewMode: ViewMode;
+  atomsLayout: AtomsLayout;
   searchQuery: string;
   loadingOperations: LoadingOperation[];
   // Panel state
@@ -113,6 +115,7 @@ interface UIStore {
   openChatSidebar: (tagId?: string, conversationId?: string) => void;
   clearChatSidebarInitial: () => void;
   setViewMode: (mode: ViewMode) => void;
+  setAtomsLayout: (layout: AtomsLayout) => void;
   setSearchQuery: (query: string) => void;
   addLoadingOperation: (id: string, message: string) => void;
   removeLoadingOperation: (id: string) => void;
@@ -160,7 +163,8 @@ export const useUIStore = create<UIStore>()(
         stack: [],
         index: -1,
       },
-      viewMode: 'grid',
+      viewMode: 'atoms',
+      atomsLayout: 'grid',
       searchQuery: '',
       loadingOperations: [],
       localGraph: {
@@ -438,6 +442,8 @@ export const useUIStore = create<UIStore>()(
         viewMode: mode,
       }),
 
+      setAtomsLayout: (layout: AtomsLayout) => set({ atomsLayout: layout }),
+
       setSearchQuery: (query: string) => set({ searchQuery: query }),
 
       addLoadingOperation: (id: string, message: string) =>
@@ -540,7 +546,23 @@ export const useUIStore = create<UIStore>()(
     }),
     {
       name: 'atomic-ui-storage',
-      partialize: (state) => ({ viewMode: state.viewMode, readerTheme: state.readerTheme, chatSidebarOpen: state.chatSidebarOpen }),
+      version: 1,
+      partialize: (state) => ({
+        viewMode: state.viewMode,
+        atomsLayout: state.atomsLayout,
+        readerTheme: state.readerTheme,
+        chatSidebarOpen: state.chatSidebarOpen,
+      }),
+      // v0 → v1: 'grid' and 'list' were top-level ViewMode values. They're now
+      // collapsed into a single 'atoms' view with a separate atomsLayout field.
+      migrate: (persistedState: unknown, _version: number) => {
+        const state = (persistedState ?? {}) as Record<string, unknown>;
+        if (state.viewMode === 'grid' || state.viewMode === 'list') {
+          state.atomsLayout = state.viewMode;
+          state.viewMode = 'atoms';
+        }
+        return state;
+      },
     }
   )
 );

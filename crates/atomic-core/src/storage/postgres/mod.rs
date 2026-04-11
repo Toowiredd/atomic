@@ -17,6 +17,8 @@ mod chat;
 #[cfg(feature = "postgres")]
 mod wiki;
 #[cfg(feature = "postgres")]
+mod briefings;
+#[cfg(feature = "postgres")]
 mod feeds;
 #[cfg(feature = "postgres")]
 mod clusters;

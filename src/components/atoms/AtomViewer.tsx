@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useLayoutEffect, ReactNode, useRef, useMemo } from 'react';
+import { X, Network, Pencil, Trash2, ChevronDown, Link2, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { openExternalUrl } from '../../lib/platform';
@@ -386,36 +387,23 @@ export function AtomViewer({ atom, onClose, onEdit, highlightText }: AtomViewerP
           onClick={onClose}
           className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
         >
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-          </svg>
+          <X className="w-5 h-5" strokeWidth={2} />
         </button>
         <div className="flex items-center gap-2">
           {atom.embedding_status === 'complete' && (
             <>
               <Button variant="ghost" size="sm" onClick={handleViewNeighborhood} title="View neighborhood graph">
-                <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <circle cx="12" cy="12" r="3" strokeWidth={2} />
-                  <circle cx="5" cy="8" r="2" strokeWidth={2} />
-                  <circle cx="19" cy="8" r="2" strokeWidth={2} />
-                  <circle cx="7" cy="18" r="2" strokeWidth={2} />
-                  <circle cx="17" cy="18" r="2" strokeWidth={2} />
-                  <path strokeLinecap="round" strokeWidth={2} d="M9.5 10.5L6.5 9M14.5 10.5L17.5 9M10 14L8 16.5M14 14L16 16.5" />
-                </svg>
+                <Network className="w-4 h-4 mr-1.5" strokeWidth={2} />
                 Graph
               </Button>
             </>
           )}
           <Button variant="ghost" size="sm" onClick={onEdit}>
-            <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-            </svg>
+            <Pencil className="w-4 h-4 mr-1.5" strokeWidth={2} />
             Edit
           </Button>
           <Button variant="ghost" size="sm" onClick={() => setShowDeleteModal(true)}>
-            <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-            </svg>
+            <Trash2 className="w-4 h-4 mr-1.5" strokeWidth={2} />
             Delete
           </Button>
         </div>
@@ -456,7 +444,7 @@ export function AtomViewer({ atom, onClose, onEdit, highlightText }: AtomViewerP
           <div className="h-8">
             {!isFullyRendered && (
               <div className="flex items-center gap-2 text-[var(--color-text-tertiary)]">
-                <div className="w-4 h-4 border-2 border-[var(--color-text-tertiary)] border-t-transparent rounded-full animate-spin" />
+                <Loader2 className="w-4 h-4 animate-spin" strokeWidth={2} />
                 <span className="text-sm">Loading...</span>
               </div>
             )}
@@ -469,9 +457,7 @@ export function AtomViewer({ atom, onClose, onEdit, highlightText }: AtomViewerP
         {/* Source URL - always visible when present */}
         {atom.source_url && (
           <div className="flex items-center gap-2 text-sm mb-3">
-            <svg className="w-3.5 h-3.5 text-[var(--color-text-tertiary)] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-            </svg>
+            <Link2 className="w-3.5 h-3.5 text-[var(--color-text-tertiary)] shrink-0" strokeWidth={2} />
             {atom.source && (
               <span className="text-xs text-[var(--color-text-tertiary)] bg-[var(--color-bg-panel)] px-1.5 py-0.5 rounded shrink-0">
                 {atom.source}
@@ -518,14 +504,10 @@ export function AtomViewer({ atom, onClose, onEdit, highlightText }: AtomViewerP
               </>
             )}
           </div>
-          <svg
+          <ChevronDown
             className={`w-4 h-4 text-[var(--color-text-secondary)] transition-transform ml-2 flex-shrink-0 ${metadataExpanded ? 'rotate-180' : ''}`}
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-          </svg>
+            strokeWidth={2}
+          />
         </button>
 
         {/* Expanded metadata */}

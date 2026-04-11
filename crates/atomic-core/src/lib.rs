@@ -28,6 +28,7 @@
 //! ```
 
 pub mod agent;
+pub mod briefing;
 pub mod canvas_level;
 pub mod chunking;
 pub mod chat;
@@ -45,6 +46,7 @@ pub mod models;
 pub mod projection;
 pub mod providers;
 pub mod registry;
+pub mod scheduler;
 pub mod search;
 pub mod storage;
 pub mod settings;
@@ -53,6 +55,7 @@ pub mod wiki;
 
 // Re-exports for convenience
 pub use agent::{ChatEvent, CanvasContext, CanvasClusterSummary};
+pub use briefing::{Briefing, BriefingCitation, BriefingWithCitations};
 pub use db::Database;
 pub use embedding::EmbeddingEvent;
 pub use error::AtomicCoreError;
@@ -463,6 +466,13 @@ impl AtomicCore {
     /// Returns None for Postgres backend.
     pub fn database(&self) -> Option<Arc<Database>> {
         self.storage.as_sqlite().map(|s| Arc::clone(&s.db))
+    }
+
+    /// Get a reference to the underlying storage backend. Used by sibling
+    /// modules (briefing, scheduler helpers) that need to issue storage
+    /// calls directly without going through the full facade surface.
+    pub(crate) fn storage(&self) -> &storage::StorageBackend {
+        &self.storage
     }
 
     // ==================== Settings ====================
@@ -1324,6 +1334,37 @@ impl AtomicCore {
     /// Get a specific wiki article version
     pub fn get_wiki_version(&self, version_id: &str) -> Result<Option<WikiArticleVersion>, AtomicCoreError> {
         self.storage.get_wiki_version_sync(version_id)
+    }
+
+    // ==================== Daily Briefing ====================
+
+    /// Run the daily briefing pipeline immediately. Used by the scheduled
+    /// task and the `/briefings/run` route. Computes `since` from the
+    /// persisted `task.daily_briefing.last_run` (or a 7-day lookback on the
+    /// first run), invokes the agentic loop, and persists the result.
+    ///
+    /// Updates `task.daily_briefing.last_run` on success so the next
+    /// scheduled tick correctly waits for the full interval. On failure the
+    /// error bubbles up and `last_run` is left unchanged — the scheduler
+    /// will retry on the next tick.
+    pub async fn run_daily_briefing(&self) -> Result<briefing::BriefingWithCitations, AtomicCoreError> {
+        let since = scheduler::state::get_last_run(self, "daily_briefing")?
+            .unwrap_or_else(|| chrono::Utc::now() - chrono::Duration::days(7));
+        let result = briefing::run_briefing(self, since).await?;
+        if let Err(e) = scheduler::state::set_last_run(self, "daily_briefing", chrono::Utc::now()) {
+            tracing::warn!(error = %e, "[briefing] Failed to persist daily_briefing last_run");
+        }
+        Ok(result)
+    }
+
+    /// Get the most recent briefing joined with citations.
+    pub fn get_latest_briefing(&self) -> Result<Option<briefing::BriefingWithCitations>, AtomicCoreError> {
+        self.storage.get_latest_briefing_sync()
+    }
+
+    /// List recent briefings (without citations) for a lightweight history view.
+    pub fn list_briefings(&self, limit: i32) -> Result<Vec<briefing::Briefing>, AtomicCoreError> {
+        self.storage.list_briefings_sync(limit)
     }
 
     // ==================== Embedding Management ====================

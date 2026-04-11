@@ -676,6 +676,44 @@ pub trait WikiStore: Send + Sync {
     async fn delete_wiki_proposal(&self, tag_id: &str) -> StorageResult<()>;
 }
 
+// ==================== Briefing Storage ====================
+
+/// Storage operations for daily briefings (the scheduled-task briefing feature).
+#[async_trait]
+pub trait BriefingStore: Send + Sync {
+    /// Fetch up to `limit` atoms with `created_at > since`, newest first.
+    async fn list_new_atoms_since(
+        &self,
+        since: &str,
+        limit: i32,
+    ) -> StorageResult<Vec<AtomWithTags>>;
+
+    /// Count atoms with `created_at > since`.
+    async fn count_new_atoms_since(&self, since: &str) -> StorageResult<i32>;
+
+    /// Insert a new briefing plus its citations. Returns the briefing joined
+    /// with citations (citations have `source_url` populated via JOIN).
+    async fn insert_briefing(
+        &self,
+        briefing: &crate::briefing::Briefing,
+        citations: &[crate::briefing::BriefingCitation],
+    ) -> StorageResult<crate::briefing::BriefingWithCitations>;
+
+    /// Fetch the most recent briefing (joined with citations).
+    async fn get_latest_briefing(
+        &self,
+    ) -> StorageResult<Option<crate::briefing::BriefingWithCitations>>;
+
+    /// List recent briefings (without citations) for a lightweight history view.
+    async fn list_briefings(
+        &self,
+        limit: i32,
+    ) -> StorageResult<Vec<crate::briefing::Briefing>>;
+
+    /// Delete a briefing by id. Briefing citations cascade.
+    async fn delete_briefing(&self, id: &str) -> StorageResult<()>;
+}
+
 // ==================== Feed Storage ====================
 
 /// Storage operations for RSS/Atom feed subscriptions.
@@ -875,6 +913,7 @@ pub trait Storage:
     + SearchStore
     + ChatStore
     + WikiStore
+    + BriefingStore
     + FeedStore
     + ClusterStore
     + SettingsStore

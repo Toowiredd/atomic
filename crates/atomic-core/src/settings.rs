@@ -32,6 +32,9 @@ pub const DEFAULT_SETTINGS: &[(&str, &str)] = &[
     ("openai_compat_timeout_secs", "300"), // 5 minutes default for OpenAI-compatible servers
     ("wiki_generation_prompt", ""),
     ("wiki_update_prompt", ""),
+    // Scheduled tasks — see crate::scheduler::state for key format
+    ("task.daily_briefing.enabled", "true"),
+    ("task.daily_briefing.interval_hours", "24"),
 ];
 
 /// Migrate settings - add any missing default settings

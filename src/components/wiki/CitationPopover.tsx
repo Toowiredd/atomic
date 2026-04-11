@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { ArrowRight } from 'lucide-react';
 import { useKeyboard } from '../../hooks/useKeyboard';
 
 // Generic citation interface that works with both WikiCitation and ChatCitation
@@ -129,9 +130,7 @@ export function CitationPopover({ citation, anchorRect, onClose, onViewAtom }: C
           className="flex items-center gap-1 text-sm text-[var(--color-accent)] hover:text-[var(--color-accent-light)] transition-colors"
         >
           View full atom
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
-          </svg>
+          <ArrowRight className="w-4 h-4" strokeWidth={2} />
         </button>
       </div>
     </div>,

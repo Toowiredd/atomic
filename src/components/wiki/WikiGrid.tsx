@@ -1,4 +1,5 @@
 import { memo, useRef, useMemo } from 'react';
+import { BookOpen } from 'lucide-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { WikiArticleSummary, SuggestedArticle } from '../../stores/wiki';
 import { WikiCard } from './WikiCard';
@@ -84,19 +85,7 @@ export const WikiGrid = memo(function WikiGrid({
   if (gridItems.length === 0) {
     return (
       <div ref={parentRef} className="flex flex-col items-center justify-center h-full text-center p-8">
-        <svg
-          className="w-16 h-16 text-[var(--color-border)] mb-4"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={1.5}
-            d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"
-          />
-        </svg>
+        <BookOpen className="w-16 h-16 text-[var(--color-border)] mb-4" strokeWidth={1.5} />
         <h3 className="text-lg font-medium text-[var(--color-text-primary)] mb-2">No wiki articles yet</h3>
         <p className="text-sm text-[var(--color-text-secondary)] max-w-sm">
           Generate a wiki article from your atoms to synthesize knowledge across related notes.

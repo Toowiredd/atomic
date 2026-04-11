@@ -349,6 +349,59 @@ async fn run_server(
         });
     }
 
+    // Spawn scheduled-tasks runner (ticks every 60 seconds across all databases).
+    // Each registered task checks its own due-ness and state; we just hand it
+    // a core + context. A per-(task, db) lock in the registry prevents the
+    // next tick from re-entering a still-running task.
+    {
+        let task_manager = Arc::clone(&manager);
+        let task_tx = event_tx.clone();
+        tokio::spawn(async move {
+            let mut registry = atomic_core::scheduler::TaskRegistry::new();
+            registry.register(Arc::new(atomic_core::briefing::DailyBriefingTask));
+            let registry = Arc::new(registry);
+
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let databases = match task_manager.list_databases() {
+                    Ok((dbs, _)) => dbs,
+                    Err(_) => continue,
+                };
+                for db_info in &databases {
+                    let db_core = match task_manager.get_core(&db_info.id) {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+                    for task in registry.tasks() {
+                        let Some(guard) = registry.try_lock(task.id(), &db_info.id) else {
+                            continue;
+                        };
+                        let task_clone = Arc::clone(task);
+                        let db_core_clone = db_core.clone();
+                        let tx = task_tx.clone();
+                        let db_id = db_info.id.clone();
+                        tokio::spawn(async move {
+                            let ctx = atomic_core::scheduler::TaskContext {
+                                event_cb: event_bridge::task_event_callback(tx),
+                            };
+                            if let Err(e) = task_clone.run(&db_core_clone, &ctx).await {
+                                tracing::debug!(
+                                    task = task_clone.id(),
+                                    db = %db_id,
+                                    error = %e,
+                                    "task run ended"
+                                );
+                            }
+                            drop(guard);
+                        });
+                    }
+                }
+            }
+        });
+    }
+
     let bind_owned = bind.to_string();
     let shutdown_manager = Arc::clone(&manager);
 

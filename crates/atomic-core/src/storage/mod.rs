@@ -405,6 +405,20 @@ dispatch! {
     fn delete_wiki_proposal_sync(&self, tag_id: &str) -> Result<(), AtomicCoreError>
         => sqlite: delete_wiki_proposal_sync, pg_trait: WikiStore, pg_method: delete_wiki_proposal;
 
+    // ---- BriefingStore ----
+    fn list_new_atoms_since_sync(&self, since: &str, limit: i32) -> Result<Vec<AtomWithTags>, AtomicCoreError>
+        => sqlite: list_new_atoms_since_sync, pg_trait: BriefingStore, pg_method: list_new_atoms_since;
+    fn count_new_atoms_since_sync(&self, since: &str) -> Result<i32, AtomicCoreError>
+        => sqlite: count_new_atoms_since_sync, pg_trait: BriefingStore, pg_method: count_new_atoms_since;
+    fn insert_briefing_sync(&self, briefing: &crate::briefing::Briefing, citations: &[crate::briefing::BriefingCitation]) -> Result<crate::briefing::BriefingWithCitations, AtomicCoreError>
+        => sqlite: insert_briefing_sync, pg_trait: BriefingStore, pg_method: insert_briefing;
+    fn get_latest_briefing_sync(&self) -> Result<Option<crate::briefing::BriefingWithCitations>, AtomicCoreError>
+        => sqlite: get_latest_briefing_sync, pg_trait: BriefingStore, pg_method: get_latest_briefing;
+    fn list_briefings_sync(&self, limit: i32) -> Result<Vec<crate::briefing::Briefing>, AtomicCoreError>
+        => sqlite: list_briefings_sync, pg_trait: BriefingStore, pg_method: list_briefings;
+    fn delete_briefing_sync(&self, id: &str) -> Result<(), AtomicCoreError>
+        => sqlite: delete_briefing_sync, pg_trait: BriefingStore, pg_method: delete_briefing;
+
     // ---- FeedStore ----
     fn list_feeds_sync(&self) -> Result<Vec<Feed>, AtomicCoreError>
         => sqlite: list_feeds_sync, pg_trait: FeedStore, pg_method: list_feeds;

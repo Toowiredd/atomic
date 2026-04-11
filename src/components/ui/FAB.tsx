@@ -1,4 +1,5 @@
 import { ButtonHTMLAttributes } from 'react';
+import { Plus } from 'lucide-react';
 
 interface FABProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   icon?: React.ReactNode;
@@ -11,9 +12,7 @@ export function FAB({ icon, className = '', ...props }: FABProps) {
       {...props}
     >
       {icon || (
-        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-        </svg>
+        <Plus className="w-6 h-6" strokeWidth={2} />
       )}
     </button>
   );

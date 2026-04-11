@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Network, Plus, Minus, Maximize2 } from 'lucide-react';
 import { useControls } from 'react-zoom-pan-pinch';
 import { ConnectionOptions } from './CanvasView';
 
@@ -123,11 +124,7 @@ export function CanvasControls({ connectionOptions, onConnectionOptionsChange }:
           }`}
           title="Connection options"
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <circle cx="6" cy="12" r="2" strokeWidth={2} />
-            <circle cx="18" cy="12" r="2" strokeWidth={2} />
-            <path strokeLinecap="round" strokeWidth={2} d="M8 12h8" />
-          </svg>
+          <Network className="w-4 h-4" strokeWidth={2} />
         </button>
 
         <div className="h-px bg-[var(--color-bg-hover)] my-1" />
@@ -137,27 +134,21 @@ export function CanvasControls({ connectionOptions, onConnectionOptionsChange }:
           className="w-8 h-8 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors flex items-center justify-center"
           title="Zoom in"
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
+          <Plus className="w-4 h-4" strokeWidth={2} />
         </button>
         <button
           onClick={() => zoomOut()}
           className="w-8 h-8 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors flex items-center justify-center"
           title="Zoom out"
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
-          </svg>
+          <Minus className="w-4 h-4" strokeWidth={2} />
         </button>
         <button
           onClick={() => resetTransform()}
           className="w-8 h-8 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors flex items-center justify-center"
           title="Reset view"
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
-          </svg>
+          <Maximize2 className="w-4 h-4" strokeWidth={2} />
         </button>
       </div>
     </>

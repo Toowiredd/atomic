@@ -1,6 +1,22 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { toast } from 'sonner';
+import {
+  X,
+  Check,
+  Copy,
+  Eye,
+  EyeOff,
+  Loader2,
+  Pause,
+  Play,
+  Pencil,
+  RefreshCw,
+  Trash2,
+  Upload,
+  ChevronRight,
+  AlertCircle,
+} from 'lucide-react';
 import { Button } from '../ui/Button';
 import { CustomSelect } from '../ui/CustomSelect';
 import { SearchableSelect } from '../ui/SearchableSelect';
@@ -317,9 +333,7 @@ function DatabasesTab() {
                   className="p-1.5 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] rounded transition-colors"
                   title="Rename"
                 >
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                    <path d="M12.146.854a.5.5 0 0 1 .708 0l2.292 2.292a.5.5 0 0 1 0 .708l-9.5 9.5a.5.5 0 0 1-.168.11l-4 1.5a.5.5 0 0 1-.65-.65l1.5-4a.5.5 0 0 1 .11-.168l9.5-9.5z"/>
-                  </svg>
+                  <Pencil width="14" height="14" strokeWidth={2} />
                 </button>
                 {!db.is_default && (
                   <button
@@ -327,10 +341,7 @@ function DatabasesTab() {
                     className="p-1.5 text-[var(--color-text-tertiary)] hover:text-red-400 hover:bg-[var(--color-bg-hover)] rounded transition-colors"
                     title="Delete database"
                   >
-                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                      <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-                      <path fillRule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118z"/>
-                    </svg>
+                    <Trash2 width="14" height="14" strokeWidth={2} />
                   </button>
                 )}
               </div>
@@ -1077,9 +1088,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
               onClick={onClose}
               className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
+              <X className="w-5 h-5" strokeWidth={2} />
             </button>
           </div>
 
@@ -1212,10 +1221,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                     {/* Connection status — shown inline after provider */}
                     {provider === 'openrouter' && isTesting && (
                       <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
-                        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                        </svg>
+                        <Loader2 className="w-4 h-4 animate-spin" strokeWidth={2} />
                         Testing connection...
                       </div>
                     )}
@@ -1258,14 +1264,9 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                             className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
                           >
                             {showApiKey ? (
-                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
-                              </svg>
+                              <EyeOff className="w-5 h-5" strokeWidth={2} />
                             ) : (
-                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                              </svg>
+                              <Eye className="w-5 h-5" strokeWidth={2} />
                             )}
                           </button>
                         </div>
@@ -1608,10 +1609,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                         />
                         {openaiCompatStatus === 'checking' && (
                           <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
-                            <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                            </svg>
+                            <Loader2 className="w-4 h-4 animate-spin" strokeWidth={2} />
                             Testing connection...
                           </div>
                         )}
@@ -1651,14 +1649,9 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                             className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
                           >
                             {openaiCompatShowApiKey ? (
-                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
-                              </svg>
+                              <EyeOff className="w-5 h-5" strokeWidth={2} />
                             ) : (
-                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                              </svg>
+                              <Eye className="w-5 h-5" strokeWidth={2} />
                             )}
                           </button>
                         </div>
@@ -1822,10 +1815,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                           >
                             {reembedding ? (
                               <>
-                                <svg className="w-4 h-4 animate-spin mr-1" fill="none" viewBox="0 0 24 24">
-                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                                </svg>
+                                <Loader2 className="w-4 h-4 animate-spin mr-1" strokeWidth={2} />
                                 Starting...
                               </>
                             ) : 'Confirm Re-embed'}
@@ -1994,14 +1984,10 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                         onClick={() => setShowTokenSection(!showTokenSection)}
                         className="flex items-center gap-2 text-sm font-medium text-[var(--color-text-primary)] hover:text-white transition-colors w-full"
                       >
-                        <svg
+                        <ChevronRight
                           className={`w-4 h-4 transition-transform ${showTokenSection ? 'rotate-90' : ''}`}
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                        </svg>
+                          strokeWidth={2}
+                        />
                         API Tokens
                         {apiTokens.filter(t => !t.is_revoked).length > 0 && (
                           <span className="text-xs text-[var(--color-text-secondary)]">
@@ -2019,10 +2005,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                           {/* Token list */}
                           {isLoadingTokens ? (
                             <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
-                              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                              </svg>
+                              <Loader2 className="w-4 h-4 animate-spin" strokeWidth={2} />
                               Loading tokens...
                             </div>
                           ) : apiTokens.length === 0 ? (
@@ -2101,13 +2084,9 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                                   title="Copy to clipboard"
                                 >
                                   {tokenCopied ? (
-                                    <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                                    </svg>
+                                    <Check className="w-4 h-4 text-green-500" strokeWidth={2} />
                                   ) : (
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                                    </svg>
+                                    <Copy className="w-4 h-4" strokeWidth={2} />
                                   )}
                                 </button>
                               </div>
@@ -2165,10 +2144,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                       <Button onClick={handleIngestUrl} disabled={!ingestUrlValue.trim() || ingesting}>
                         {ingesting ? (
                           <>
-                            <svg className="w-4 h-4 animate-spin mr-1" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                            </svg>
+                            <Loader2 className="w-4 h-4 animate-spin mr-1" strokeWidth={2} />
                             Ingesting...
                           </>
                         ) : 'Ingest'}
@@ -2221,10 +2197,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                     {/* Feed list */}
                     {feedsLoading ? (
                       <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)] py-4">
-                        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                        </svg>
+                        <Loader2 className="w-4 h-4 animate-spin" strokeWidth={2} />
                         Loading feeds...
                       </div>
                     ) : feeds.length === 0 ? (
@@ -2276,14 +2249,9 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                                   title="Poll now"
                                 >
                                   {pollingFeedId === feed.id ? (
-                                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                                    </svg>
+                                    <Loader2 className="w-4 h-4 animate-spin" strokeWidth={2} />
                                   ) : (
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                                    </svg>
+                                    <RefreshCw className="w-4 h-4" strokeWidth={2} />
                                   )}
                                 </button>
                                 <button
@@ -2293,14 +2261,9 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                                   title={feed.is_paused ? 'Resume' : 'Pause'}
                                 >
                                   {feed.is_paused ? (
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                    </svg>
+                                    <Play className="w-4 h-4" strokeWidth={2} />
                                   ) : (
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                    </svg>
+                                    <Pause className="w-4 h-4" strokeWidth={2} />
                                   )}
                                 </button>
                                 <button
@@ -2310,9 +2273,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                                   className="p-1.5 text-[var(--color-text-secondary)] hover:text-red-400 hover:bg-[var(--color-bg-hover)] rounded transition-colors disabled:opacity-50"
                                   title="Delete feed"
                                 >
-                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                  </svg>
+                                  <Trash2 className="w-4 h-4" strokeWidth={2} />
                                 </button>
                               </div>
                             </div>
@@ -2334,10 +2295,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                       <Button variant="secondary" onClick={handleAddFeed} disabled={!newFeedUrl.trim() || addingFeed}>
                         {addingFeed ? (
                           <>
-                            <svg className="w-4 h-4 animate-spin mr-1" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                            </svg>
+                            <Loader2 className="w-4 h-4 animate-spin mr-1" strokeWidth={2} />
                             Adding...
                           </>
                         ) : 'Add Feed'}
@@ -2381,19 +2339,14 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                       >
                         {isImporting ? (
                           <>
-                            <svg className="w-4 h-4 animate-spin mr-2" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                            </svg>
+                            <Loader2 className="w-4 h-4 animate-spin mr-2" strokeWidth={2} />
                             {importProgress
                               ? `Importing ${importProgress.current}/${importProgress.total}...`
                               : 'Importing...'}
                           </>
                         ) : (
                           <>
-                            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                            </svg>
+                            <Upload className="w-4 h-4 mr-2" strokeWidth={2} />
                             Import Markdown Folder
                           </>
                         )}
@@ -2436,14 +2389,10 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                         onClick={handleMcpExpand}
                         className="flex items-center gap-2 text-sm font-medium text-[var(--color-text-primary)] hover:text-white transition-colors w-full"
                       >
-                        <svg
+                        <ChevronRight
                           className={`w-4 h-4 transition-transform ${showMcpSetup ? 'rotate-90' : ''}`}
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                        </svg>
+                          strokeWidth={2}
+                        />
                         Claude Desktop Integration
                       </button>
 
@@ -2478,13 +2427,9 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                               title="Copy to clipboard"
                             >
                               {mcpConfigCopied ? (
-                                <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                                </svg>
+                                <Check className="w-4 h-4 text-green-500" strokeWidth={2} />
                               ) : (
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                                </svg>
+                                <Copy className="w-4 h-4" strokeWidth={2} />
                               )}
                             </button>
                           </div>
@@ -2516,9 +2461,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
         {saveError && (
           <div className="px-6 py-3 border-t border-[var(--color-border)]">
             <div className="flex items-start gap-2 text-sm text-red-500">
-              <svg className="w-4 h-4 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
+              <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" strokeWidth={2} />
               <span>{saveError}</span>
             </div>
           </div>

@@ -54,6 +54,8 @@ export function normalizeServerEvent(data: Record<string, unknown>): NormalizedE
       return { event: 'feed-poll-failed', payload: { feed_id: data.feed_id, error: data.error } };
     case 'BatchProgress':
       return { event: 'batch-progress', payload: { batch_id: data.batch_id, phase: data.phase, completed: data.completed, total: data.total } };
+    case 'BriefingReady':
+      return { event: 'briefing-ready', payload: { db_id: data.db_id, briefing_id: data.briefing_id } };
     default:
       console.warn('Unknown server event type:', type);
       return null;

@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod atoms;
+pub mod briefings;
 pub mod canvas;
 pub mod chat;
 pub mod clustering;
@@ -95,6 +96,11 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         "/wiki/recompute-tag-embeddings",
         web::post().to(wiki::recompute_all_tag_embeddings),
     );
+
+    // Briefings
+    cfg.route("/briefings/latest", web::get().to(briefings::get_latest_briefing));
+    cfg.route("/briefings", web::get().to(briefings::list_briefings));
+    cfg.route("/briefings/run", web::post().to(briefings::run_briefing_now));
 
     // Settings
     cfg.route("/settings", web::get().to(settings::get_settings));

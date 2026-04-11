@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { ChevronDown } from 'lucide-react';
 import { Button } from '../../ui/Button';
 import { QRCode } from '../QRCode';
 import {
@@ -69,14 +70,10 @@ function Section({
           <h3 className="text-sm font-medium text-[var(--color-text-primary)]">{title}</h3>
           <p className="text-xs text-[var(--color-text-secondary)]">{description}</p>
         </div>
-        <svg
+        <ChevronDown
           className={`w-4 h-4 text-[var(--color-text-secondary)] transition-transform duration-200 shrink-0 ml-3 ${isOpen ? 'rotate-180' : ''}`}
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-        </svg>
+          strokeWidth={2}
+        />
       </button>
       {isOpen && <div className="p-4 border-t border-[var(--color-border)] space-y-3">{children}</div>}
     </div>

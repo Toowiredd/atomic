@@ -200,6 +200,24 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     transformResponse: (d: any) => d.status as string,
   },
 
+  // ==================== Briefings ====================
+  get_latest_briefing: {
+    method: 'GET',
+    path: '/api/briefings/latest',
+  },
+  list_briefings: {
+    method: 'GET',
+    path: (a) => {
+      const params = new URLSearchParams();
+      if (a.limit != null) params.set('limit', String(a.limit));
+      return `/api/briefings${params.toString() ? `?${params}` : ''}`;
+    },
+  },
+  run_briefing_now: {
+    method: 'POST',
+    path: '/api/briefings/run',
+  },
+
   // ==================== Wiki ====================
   get_all_wiki_articles: {
     method: 'GET',

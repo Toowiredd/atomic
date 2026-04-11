@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { ChevronDown, Loader2 } from 'lucide-react';
 import type { AvailableModel } from '../../lib/api';
 
 // Fuzzy search function - checks if search chars appear in order in target
@@ -147,14 +148,10 @@ export function SearchableSelect({ value, onChange, options, isLoading, placehol
         <span className={selectedOption ? '' : 'text-[var(--color-text-secondary)]'}>
           {isLoading ? 'Loading models...' : (selectedOption?.name || value || placeholder)}
         </span>
-        <svg
+        <ChevronDown
           className={`w-4 h-4 text-[var(--color-text-secondary)] transition-transform ${isOpen ? 'rotate-180' : ''}`}
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-        </svg>
+          strokeWidth={2}
+        />
       </button>
 
       {/* Dropdown */}
@@ -181,10 +178,7 @@ export function SearchableSelect({ value, onChange, options, isLoading, placehol
           <div ref={listRef} className="max-h-60 overflow-y-auto">
             {isLoading ? (
               <div className="px-3 py-4 text-center text-sm text-[var(--color-text-secondary)]">
-                <svg className="w-5 h-5 animate-spin mx-auto mb-2" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                </svg>
+                <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2" strokeWidth={2} />
                 Loading models...
               </div>
             ) : filteredOptions.length === 0 ? (

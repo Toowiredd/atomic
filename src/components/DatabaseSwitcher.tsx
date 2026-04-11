@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { Database, ChevronDown, Pencil, Trash2 } from 'lucide-react';
 import { useDatabasesStore, DatabaseInfo } from '../stores/databases';
 
 export function DatabaseSwitcher() {
@@ -67,13 +68,9 @@ export function DatabaseSwitcher() {
         className="w-full flex items-center gap-1.5 px-2 py-1.5 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] rounded transition-colors"
         title={activeName}
       >
-        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" className="flex-shrink-0 opacity-60">
-          <path d="M8 1L1 4.5 8 8l7-3.5L8 1zM1 8l7 3.5L15 8M1 11.5l7 3.5 7-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/>
-        </svg>
+        <Database className="w-3 h-3 flex-shrink-0 opacity-60" strokeWidth={2} />
         <span className="truncate">{activeName}</span>
-        <svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor" className="flex-shrink-0 opacity-40">
-          <path d="M1 2.5L4 5.5L7 2.5" stroke="currentColor" strokeWidth="1.5" fill="none"/>
-        </svg>
+        <ChevronDown className="w-2 h-2 flex-shrink-0 opacity-40" strokeWidth={2} />
       </button>
 
       {isOpen && (
@@ -110,9 +107,7 @@ export function DatabaseSwitcher() {
                     className="opacity-0 group-hover:opacity-100 hover:text-[var(--color-text-primary)] text-[var(--color-text-tertiary)]"
                     title="Rename"
                   >
-                    <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
-                      <path d="M12.146.854a.5.5 0 0 1 .708 0l2.292 2.292a.5.5 0 0 1 0 .708l-9.5 9.5a.5.5 0 0 1-.168.11l-4 1.5a.5.5 0 0 1-.65-.65l1.5-4a.5.5 0 0 1 .11-.168l9.5-9.5z"/>
-                    </svg>
+                    <Pencil className="w-2.5 h-2.5" strokeWidth={2} />
                   </button>
                   {!db.is_default && (
                     <button
@@ -120,10 +115,7 @@ export function DatabaseSwitcher() {
                       className="opacity-0 group-hover:opacity-100 hover:text-red-400 text-[var(--color-text-tertiary)]"
                       title="Delete"
                     >
-                      <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
-                        <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-                        <path fillRule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118z"/>
-                      </svg>
+                      <Trash2 className="w-2.5 h-2.5" strokeWidth={2} />
                     </button>
                   )}
                 </>

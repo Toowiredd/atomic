@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, ReactNode, useRef, useMemo, memo } from 'react';
+import { ChevronDown, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import CodeMirror, { type ReactCodeMirrorRef } from '@uiw/react-codemirror';
@@ -557,7 +558,7 @@ function AtomReaderContent({
                 <div className="h-8">
                   {!isFullyRendered && (
                     <div className="flex items-center gap-2 text-[var(--color-text-tertiary)]">
-                      <div className="w-4 h-4 border-2 border-[var(--color-text-tertiary)] border-t-transparent rounded-full animate-spin" />
+                      <Loader2 className="w-4 h-4 animate-spin" strokeWidth={2} />
                       <span className="text-sm">Loading...</span>
                     </div>
                   )}
@@ -691,9 +692,7 @@ function SidebarRelatedAtoms({ atomId, onAtomClick }: { atomId: string; onAtomCl
         className="flex items-center justify-between w-full text-xs font-medium text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
       >
         <span>Related atoms</span>
-        <svg className={`w-3 h-3 transition-transform ${isCollapsed ? '' : 'rotate-180'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-        </svg>
+        <ChevronDown className={`w-3 h-3 transition-transform ${isCollapsed ? '' : 'rotate-180'}`} strokeWidth={2} />
       </button>
       {!isCollapsed && (
         <div className="mt-2 space-y-1.5">

@@ -1,7 +1,8 @@
 import { useEffect } from 'react';
+import { X, Check } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { useAtomsStore, SourceFilterType, SortField, SortOrder } from '../../stores/atoms';
-import { useUIStore, ViewMode } from '../../stores/ui';
+import { useUIStore, ViewMode, AtomsLayout } from '../../stores/ui';
 
 interface FilterSheetProps {
   isOpen: boolean;
@@ -21,15 +22,22 @@ const SORT_OPTIONS: { field: SortField; order: SortOrder; label: string }[] = [
 ];
 
 const VIEW_MODES: { id: ViewMode; label: string }[] = [
-  { id: 'grid', label: 'Grid' },
-  { id: 'list', label: 'List' },
+  { id: 'dashboard', label: 'Dashboard' },
+  { id: 'atoms', label: 'Atoms' },
   { id: 'canvas', label: 'Canvas' },
   { id: 'wiki', label: 'Wiki' },
+];
+
+const ATOM_LAYOUTS: { id: AtomsLayout; label: string }[] = [
+  { id: 'grid', label: 'Grid' },
+  { id: 'list', label: 'List' },
 ];
 
 export function FilterSheet({ isOpen, onClose, displayCount }: FilterSheetProps) {
   const viewMode = useUIStore(s => s.viewMode);
   const setViewMode = useUIStore(s => s.setViewMode);
+  const atomsLayout = useUIStore(s => s.atomsLayout);
+  const setAtomsLayout = useUIStore(s => s.setAtomsLayout);
 
   const sourceFilter = useAtomsStore(s => s.sourceFilter);
   const sourceValue = useAtomsStore(s => s.sourceValue);
@@ -98,9 +106,7 @@ export function FilterSheet({ isOpen, onClose, displayCount }: FilterSheetProps)
             className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
             aria-label="Close"
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <X className="w-5 h-5" strokeWidth={2} />
           </button>
         </div>
 
@@ -111,7 +117,7 @@ export function FilterSheet({ isOpen, onClose, displayCount }: FilterSheetProps)
             <h3 className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
               View
             </h3>
-            <div className="grid grid-cols-4 gap-2">
+            <div className="grid grid-cols-2 gap-2">
               {VIEW_MODES.map(vm => (
                 <button
                   key={vm.id}
@@ -126,6 +132,29 @@ export function FilterSheet({ isOpen, onClose, displayCount }: FilterSheetProps)
                 </button>
               ))}
             </div>
+
+            {viewMode === 'atoms' && (
+              <div className="mt-3">
+                <h4 className="text-[11px] font-medium uppercase tracking-wider text-[var(--color-text-tertiary)] mb-2">
+                  Layout
+                </h4>
+                <div className="grid grid-cols-2 gap-2">
+                  {ATOM_LAYOUTS.map(l => (
+                    <button
+                      key={l.id}
+                      onClick={() => setAtomsLayout(l.id)}
+                      className={`py-2 px-3 rounded-md text-sm transition-colors border ${
+                        atomsLayout === l.id
+                          ? 'bg-[var(--color-accent)]/15 text-[var(--color-accent-light)] border-[var(--color-accent)]/40'
+                          : 'bg-[var(--color-bg-card)] text-[var(--color-text-primary)] border-[var(--color-border)] hover:bg-[var(--color-bg-hover)]'
+                      }`}
+                    >
+                      {l.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </section>
 
           {/* Source filter */}
@@ -194,9 +223,7 @@ export function FilterSheet({ isOpen, onClose, displayCount }: FilterSheetProps)
                   >
                     <span>{opt.label}</span>
                     {isActive && (
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
+                      <Check className="w-4 h-4" strokeWidth={2} />
                     )}
                   </button>
                 );

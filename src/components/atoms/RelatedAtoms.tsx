@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { ChevronDown } from 'lucide-react';
 import { getTransport } from '../../lib/transport';
 import { SimilarAtomResult } from '../../stores/atoms';
 import { MiniGraphPreview } from '../canvas/MiniGraphPreview';
@@ -69,14 +70,10 @@ export function RelatedAtoms({ atomId, onAtomClick, onViewGraph }: RelatedAtomsP
             </span>
           )}
         </div>
-        <svg
+        <ChevronDown
           className={`w-4 h-4 transition-transform ${isCollapsed ? '' : 'rotate-180'}`}
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-        </svg>
+          strokeWidth={2}
+        />
       </button>
 
       {!isCollapsed && (

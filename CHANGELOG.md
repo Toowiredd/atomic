@@ -2,6 +2,14 @@
 
 All notable changes to Atomic are documented here.
 
+## v1.21.0 — 2026-04-11
+
+- Add Dashboard view with AI daily briefing — a new home screen featuring a scheduled, LLM-generated summary of recently captured atoms with clickable inline citations and an embedded canvas preview
+- Add briefing history navigation with prev/next controls to browse past daily briefings
+- Consolidate Grid and List into a single Atoms view with a compact layout sub-toggle, simplifying the top-level navigation to four modes: Dashboard, Atoms, Canvas, and Wiki
+- Migrate ~170 inline SVG icons to Lucide React, reducing frontend bundle size by ~4 kB gzipped
+- Improve reliability of structured LLM outputs (wiki synthesis, tag extraction, briefing) with unified retry logic, tolerant JSON parsing, and a prompt-based fallback for providers that ignore response_format
+
 ## v1.20.2 — 2026-04-11
 
 - Cache the global canvas payload in memory with automatic invalidation on atom, tag, and edge changes — eliminates redundant PCA recomputation and makes the canvas load significantly faster after the first request

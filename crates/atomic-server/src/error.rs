@@ -27,6 +27,11 @@ pub fn error_response(e: atomic_core::AtomicCoreError) -> HttpResponse {
                 error: e.to_string(),
             })
         }
+        atomic_core::AtomicCoreError::Conflict(_) => {
+            HttpResponse::Conflict().json(ApiErrorResponse {
+                error: e.to_string(),
+            })
+        }
         _ => HttpResponse::InternalServerError().json(ApiErrorResponse {
             error: e.to_string(),
         }),
@@ -66,6 +71,7 @@ pub fn status_code_for(e: &atomic_core::AtomicCoreError) -> actix_web::http::Sta
         atomic_core::AtomicCoreError::NotFound(_) => StatusCode::NOT_FOUND,
         atomic_core::AtomicCoreError::Validation(_) => StatusCode::BAD_REQUEST,
         atomic_core::AtomicCoreError::Configuration(_) => StatusCode::BAD_REQUEST,
+        atomic_core::AtomicCoreError::Conflict(_) => StatusCode::CONFLICT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

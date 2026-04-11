@@ -37,6 +37,10 @@ pub enum AtomicCoreError {
     #[error("Lock error: {0}")]
     Lock(String),
 
+    /// Conflict with existing in-flight operation (e.g., a concurrent request).
+    #[error("Conflict: {0}")]
+    Conflict(String),
+
     /// Embedding generation error
     #[error("Embedding error: {0}")]
     Embedding(String),

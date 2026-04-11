@@ -18,11 +18,13 @@ use utoipa::{IntoParams, ToSchema};
 )]
 pub async fn get_latest_briefing(db: Db) -> HttpResponse {
     let core = db.0;
-    match core.get_latest_briefing() {
-        Ok(Some(b)) => HttpResponse::Ok().json(b),
-        Ok(None) => HttpResponse::NotFound()
+    match web::block(move || core.get_latest_briefing()).await {
+        Ok(Ok(Some(b))) => HttpResponse::Ok().json(b),
+        Ok(Ok(None)) => HttpResponse::NotFound()
             .json(serde_json::json!({"error": "No briefings yet"})),
-        Err(e) => error_response(e),
+        Ok(Err(e)) => error_response(e),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": format!("Thread pool error: {}", e)})),
     }
 }
 

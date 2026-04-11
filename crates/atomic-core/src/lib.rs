@@ -239,6 +239,11 @@ pub struct AtomicCore {
     /// created lazily and persist for the lifetime of the process — the
     /// working set is bounded by the number of wiki articles touched.
     wiki_tag_locks: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Single-flight guard for `run_daily_briefing`. Both the scheduler tick
+    /// loop and the `POST /api/briefings/run` route contend for this lock —
+    /// `try_lock` rejects the loser with `Conflict` so we never fire two
+    /// overlapping LLM calls for the same coverage window.
+    briefing_lock: Arc<tokio::sync::Mutex<()>>,
     /// In-memory cache for `compute_and_get_canvas_data`. Shared across clones
     /// so every handle sees the same cached payload.
     canvas_cache: CanvasCache,
@@ -253,6 +258,7 @@ impl AtomicCore {
             storage,
             registry: None,
             wiki_tag_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            briefing_lock: Arc::new(tokio::sync::Mutex::new(())),
             canvas_cache: CanvasCache::new(),
         };
         core.register_canvas_rebuilder();
@@ -323,6 +329,7 @@ impl AtomicCore {
             storage,
             registry,
             wiki_tag_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            briefing_lock: Arc::new(tokio::sync::Mutex::new(())),
             canvas_cache: CanvasCache::new(),
         };
         core.register_canvas_rebuilder();
@@ -336,6 +343,7 @@ impl AtomicCore {
             storage: storage::StorageBackend::Postgres(pg),
             registry: None,
             wiki_tag_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            briefing_lock: Arc::new(tokio::sync::Mutex::new(())),
             canvas_cache: CanvasCache::new(),
         };
         core.register_canvas_rebuilder();
@@ -445,6 +453,7 @@ impl AtomicCore {
             storage,
             registry,
             wiki_tag_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            briefing_lock: Arc::new(tokio::sync::Mutex::new(())),
             canvas_cache: CanvasCache::new(),
         };
         core.register_canvas_rebuilder();
@@ -1348,6 +1357,9 @@ impl AtomicCore {
     /// error bubbles up and `last_run` is left unchanged — the scheduler
     /// will retry on the next tick.
     pub async fn run_daily_briefing(&self) -> Result<briefing::BriefingWithCitations, AtomicCoreError> {
+        let _guard = self.briefing_lock.try_lock().map_err(|_| {
+            AtomicCoreError::Conflict("A daily briefing is already running".to_string())
+        })?;
         let since = scheduler::state::get_last_run(self, "daily_briefing")?
             .unwrap_or_else(|| chrono::Utc::now() - chrono::Duration::days(7));
         let result = briefing::run_briefing(self, since).await?;
@@ -3725,6 +3737,25 @@ mod tests {
         let topics_tag = all_tags.iter().find(|t| t.tag.name == "Topics").unwrap();
 
         assert_eq!(topics_tag.atom_count, 3);
+    }
+
+    #[tokio::test]
+    async fn run_daily_briefing_rejects_concurrent_call_with_conflict() {
+        let (db, _temp) = create_test_db();
+
+        // Simulate an in-flight briefing by holding the single-flight lock.
+        // The lock is acquired as the very first step of `run_daily_briefing`
+        // (before any DB or LLM work), so we don't need a working provider to
+        // exercise the contention path.
+        let _held = db.briefing_lock.clone().lock_owned().await;
+
+        let result = db.run_daily_briefing().await;
+        match result {
+            Err(AtomicCoreError::Conflict(msg)) => {
+                assert!(msg.contains("already running"), "unexpected message: {msg}");
+            }
+            other => panic!("expected Conflict, got {:?}", other.err()),
+        }
     }
 
     #[test]

@@ -78,8 +78,8 @@ export function BriefingWidget() {
   // ===== Fallback stub used when no briefing exists yet =====
 
   const stats = useMemo(() => {
-    const newAtoms24h = atoms.filter(a => withinHours(a.updated_at, 24)).length;
-    const newAtoms7d = atoms.filter(a => withinHours(a.updated_at, 24 * 7)).length;
+    const newAtoms24h = atoms.filter(a => withinHours(a.created_at, 24)).length;
+    const newAtoms7d = atoms.filter(a => withinHours(a.created_at, 24 * 7)).length;
     const latestAtom = atoms[0] ?? null;
     return { newAtoms24h, newAtoms7d, latestAtom, wikiCount: articles.length };
   }, [atoms, articles]);

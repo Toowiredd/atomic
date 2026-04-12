@@ -2,6 +2,14 @@
 
 All notable changes to Atomic are documented here.
 
+## v1.21.3 — 2026-04-12
+
+- Bundle the MCP bridge with the desktop app and auto-discover auth tokens, so local MCP setup requires no manual token configuration
+- Split MCP onboarding and settings into local (stdio) and remote (HTTP + token) modes, with a one-click token provisioning flow for remote connections
+- Fix desktop users connected to a remote server seeing the local sidecar URL instead of the active server URL in Mobile and MCP setup sections
+- Fix stale MCP config showing after switching between local and remote server modes in settings
+- Fix SSE stream handling for multi-line data events in the MCP bridge
+
 ## v1.21.2 — 2026-04-12
 
 - Add resizable chat sidebar with drag handle, default width increased to 480px (adjustable 320–800px), persisted across sessions

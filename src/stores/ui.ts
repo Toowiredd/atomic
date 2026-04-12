@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { CanvasLevel } from '../lib/api';
 import { getCanvasLevel } from '../lib/api';
+import { navigateTo, navigateBack, navigateForward } from '../router/navigate-ref';
+import { viewPath, atomReaderPath, wikiReaderPath } from '../router/routes';
 
 export type DrawerMode = 'editor' | 'viewer' | 'wiki';
 export type ViewMode = 'dashboard' | 'atoms' | 'canvas' | 'wiki';
@@ -142,7 +144,7 @@ interface UIStore {
 
 export const useUIStore = create<UIStore>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       selectedTagId: null,
       expandedTagIds: {} as Record<string, boolean>,
       drawerState: {
@@ -201,7 +203,20 @@ export const useUIStore = create<UIStore>()(
       toggleWikiSidebar: () => set((state) => ({ wikiSidebarOpen: !state.wikiSidebarOpen })),
       setServerConnected: (connected: boolean) => set({ serverConnected: connected }),
 
-      setSelectedTag: (tagId: string | null) => set({ selectedTagId: tagId }),
+      setSelectedTag: (tagId: string | null) => {
+        set({ selectedTagId: tagId });
+        // Preserve the current route shape — if an overlay is open the tag
+        // scope lives in its URL; otherwise it attaches to the current view.
+        const state = get();
+        if (state.readerState.atomId) {
+          navigateTo(atomReaderPath(state.readerState.atomId, tagId), { replace: true });
+        } else if (state.wikiReaderState.tagId) {
+          // wiki reader's URL is already keyed on its own tagId; selectedTagId
+          // as a scope-only concept doesn't apply here. Skip.
+        } else {
+          navigateTo(viewPath(state.viewMode, tagId), { replace: true });
+        }
+      },
 
       expandTagPath: (tagIds: string[]) =>
         set((state) => {
@@ -234,6 +249,7 @@ export const useUIStore = create<UIStore>()(
             ...(isFirstOpen && state.leftPanelOpen ? { leftPanelOpen: false, leftPanelOpenBeforeReader: true } : {}),
           };
         });
+        navigateTo(atomReaderPath(atomId, get().selectedTagId));
       },
 
       openReaderEditing: (atomId: string) => {
@@ -250,6 +266,7 @@ export const useUIStore = create<UIStore>()(
             ...(isFirstOpen && state.leftPanelOpen ? { leftPanelOpen: false, leftPanelOpenBeforeReader: true } : {}),
           };
         });
+        navigateTo(atomReaderPath(atomId, get().selectedTagId));
       },
 
       setReaderEditState: (editing: boolean, saveStatus?: 'idle' | 'saving' | 'saved' | 'error') =>
@@ -257,12 +274,15 @@ export const useUIStore = create<UIStore>()(
           readerState: { ...state.readerState, editing, ...(saveStatus !== undefined ? { saveStatus } : {}) },
         })),
 
-      closeReader: () =>
+      closeReader: () => {
         set({
           readerState: { atomId: null, highlightText: null, editing: false, saveStatus: 'idle' as const },
           wikiReaderState: { tagId: null, tagName: null },
           overlayNav: { stack: [], index: -1 },
-        }),
+        });
+        const state = get();
+        navigateBack(viewPath(state.viewMode, state.selectedTagId));
+      },
 
       openWikiReader: (tagId: string, tagName: string) => {
         const entry: OverlayNavEntry = { type: 'wiki', tagId, tagName };
@@ -278,9 +298,10 @@ export const useUIStore = create<UIStore>()(
             ...(isFirstOpen && state.leftPanelOpen ? { leftPanelOpen: false, leftPanelOpenBeforeReader: true } : {}),
           };
         });
+        navigateTo(wikiReaderPath(tagId, tagName));
       },
 
-      overlayNavigate: (entry: OverlayNavEntry) =>
+      overlayNavigate: (entry: OverlayNavEntry) => {
         set((state) => {
           const stack = state.overlayNav.stack.slice(0, state.overlayNav.index + 1);
           stack.push(entry);
@@ -308,83 +329,37 @@ export const useUIStore = create<UIStore>()(
               localGraph: { isOpen: true, centerAtomId: entry.atomId, depth: 1, navigationHistory: [entry.atomId] },
             };
           }
-        }),
+        });
+        // localGraph stays UI-only (no URL) — only reader/wiki entries route.
+        if (entry.type === 'reader') {
+          navigateTo(atomReaderPath(entry.atomId, get().selectedTagId));
+        } else if (entry.type === 'wiki') {
+          navigateTo(wikiReaderPath(entry.tagId, entry.tagName));
+        }
+      },
 
-      overlayBack: () =>
-        set((state) => {
-          const newIndex = state.overlayNav.index - 1;
-          if (newIndex < 0) {
-            // Nothing to go back to — dismiss
-            return {
-              overlayNav: { stack: [], index: -1 },
-              readerState: { atomId: null, highlightText: null, editing: false, saveStatus: 'idle' as const },
-              wikiReaderState: { tagId: null, tagName: null },
-              localGraph: { ...state.localGraph, isOpen: false },
-              ...(state.leftPanelOpenBeforeReader ? { leftPanelOpen: true, leftPanelOpenBeforeReader: false } : {}),
-            };
-          }
-          const entry = state.overlayNav.stack[newIndex];
-          if (entry.type === 'reader') {
-            return {
-              overlayNav: { ...state.overlayNav, index: newIndex },
-              readerState: { atomId: entry.atomId, highlightText: entry.highlightText || null, editing: false, saveStatus: 'idle' as const },
-              wikiReaderState: { tagId: null, tagName: null },
-              localGraph: { ...state.localGraph, isOpen: false },
-            };
-          } else if (entry.type === 'wiki') {
-            return {
-              overlayNav: { ...state.overlayNav, index: newIndex },
-              readerState: { atomId: null, highlightText: null, editing: false, saveStatus: 'idle' as const },
-              wikiReaderState: { tagId: entry.tagId, tagName: entry.tagName },
-              localGraph: { ...state.localGraph, isOpen: false },
-            };
-          } else {
-            return {
-              overlayNav: { ...state.overlayNav, index: newIndex },
-              readerState: { atomId: null, highlightText: null, editing: false, saveStatus: 'idle' as const },
-              wikiReaderState: { tagId: null, tagName: null },
-              localGraph: { isOpen: true, centerAtomId: entry.atomId, depth: 1, navigationHistory: [entry.atomId] },
-            };
-          }
-        }),
+      // Overlay back/forward now delegate to browser history so the in-app
+      // chrome and the device's back button agree. RouterBridge reconciles
+      // state from the resulting URL. These are always-enabled in the UI —
+      // we don't try to track "is there forward history" from JS.
+      overlayBack: () => {
+        const state = get();
+        navigateBack(viewPath(state.viewMode, state.selectedTagId));
+      },
 
-      overlayForward: () =>
-        set((state) => {
-          const newIndex = state.overlayNav.index + 1;
-          if (newIndex >= state.overlayNav.stack.length) return {};
-          const entry = state.overlayNav.stack[newIndex];
-          if (entry.type === 'reader') {
-            return {
-              overlayNav: { ...state.overlayNav, index: newIndex },
-              readerState: { atomId: entry.atomId, highlightText: entry.highlightText || null, editing: false, saveStatus: 'idle' as const },
-              wikiReaderState: { tagId: null, tagName: null },
-              localGraph: { ...state.localGraph, isOpen: false },
-            };
-          } else if (entry.type === 'wiki') {
-            return {
-              overlayNav: { ...state.overlayNav, index: newIndex },
-              readerState: { atomId: null, highlightText: null, editing: false, saveStatus: 'idle' as const },
-              wikiReaderState: { tagId: entry.tagId, tagName: entry.tagName },
-              localGraph: { ...state.localGraph, isOpen: false },
-            };
-          } else {
-            return {
-              overlayNav: { ...state.overlayNav, index: newIndex },
-              readerState: { atomId: null, highlightText: null, editing: false, saveStatus: 'idle' as const },
-              wikiReaderState: { tagId: null, tagName: null },
-              localGraph: { isOpen: true, centerAtomId: entry.atomId, depth: 1, navigationHistory: [entry.atomId] },
-            };
-          }
-        }),
+      overlayForward: () => {
+        navigateForward();
+      },
 
-      overlayDismiss: () =>
+      overlayDismiss: () => {
+        // Clear local-graph state synchronously (it's URL-less); the router
+        // sync path handles readerState / wikiReaderState / leftPanel restore.
         set((state) => ({
-          overlayNav: { stack: [], index: -1 },
-          readerState: { atomId: null, highlightText: null, editing: false, saveStatus: 'idle' as const },
-          wikiReaderState: { tagId: null, tagName: null },
           localGraph: { ...state.localGraph, isOpen: false },
-          ...(state.leftPanelOpenBeforeReader ? { leftPanelOpen: true, leftPanelOpenBeforeReader: false } : {}),
-        })),
+        }));
+        const state = get();
+        navigateBack(viewPath(state.viewMode, state.selectedTagId));
+      },
 
 
       openDrawer: (mode: DrawerMode, atomId?: string, highlightText?: string) =>
@@ -446,9 +421,10 @@ export const useUIStore = create<UIStore>()(
       clearChatSidebarInitial: () =>
         set({ chatSidebarInitialTagId: null, chatSidebarInitialConversationId: null }),
 
-      setViewMode: (mode: ViewMode) => set({
-        viewMode: mode,
-      }),
+      setViewMode: (mode: ViewMode) => {
+        set({ viewMode: mode });
+        navigateTo(viewPath(mode, get().selectedTagId));
+      },
 
       setAtomsLayout: (layout: AtomsLayout) => set({ atomsLayout: layout }),
 

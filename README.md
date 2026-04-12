@@ -114,21 +114,47 @@ Captures are queued offline and synced when the server is available.
 
 Atomic exposes an MCP endpoint for Claude and other AI tools to search and create atoms.
 
-The endpoint runs at `/mcp` on your server (e.g., `http://localhost:8080/mcp`).
+### Desktop App (Local Mode)
 
-**Claude Desktop config** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+The desktop app bundles `atomic-mcp-bridge`, a stdio-to-HTTP bridge that reads the local auth token automatically. No token configuration needed — just point your MCP client at the binary:
 
 ```json
 {
   "mcpServers": {
     "atomic": {
-      "url": "http://localhost:44380/mcp"
+      "command": "/Applications/Atomic.app/Contents/MacOS/atomic-mcp-bridge"
     }
   }
 }
 ```
 
-**Available tools:** `semantic_search`, `read_atom`, `create_atom`
+The app's Settings > Integrations page shows the exact path for your system.
+
+### Remote / Self-Hosted
+
+For remote servers or the web app, connect via the HTTP endpoint at `/mcp` with a Bearer token:
+
+```json
+{
+  "mcpServers": {
+    "atomic": {
+      "type": "url",
+      "url": "https://your-server.com/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN"
+      }
+    }
+  }
+}
+```
+
+Create a token from Settings > Connection > API Tokens, or via the CLI:
+
+```bash
+atomic-server token create --name "claude"
+```
+
+**Available tools:** `semantic_search`, `read_atom`, `create_atom`, `update_atom`
 
 ## Architecture
 
@@ -144,17 +170,17 @@ All business logic lives in `atomic-core`, a standalone Rust crate with no frame
                     |  atomic-server   |
                     | (REST + WS + MCP)|
                     +--------+---------+
-              +--------------+--------------+
-              v              v              v
-    +-----------+    +------------+    +----------+
-    | src-tauri |    |  React UI  |    | iOS app  |
-    | (sidecar) |    |  (browser) |    | (SwiftUI)|
-    +-----+-----+    +------------+    +----------+
-          |
-    +-----v-----+
-    |  React UI  |
-    | (desktop)  |
-    +------------+
+              +---------+----+----+---------+
+              v          v        v         v
+    +-----------+  +----------+  +------+  +----------+
+    | src-tauri |  | React UI |  | iOS  |  |mcp-bridge|
+    | (sidecar) |  | (browser)|  | app  |  | (stdio)  |
+    +-----+-----+  +----------+  +------+  +-----+----+
+          |                                       |
+    +-----v-----+                           +-----v-----+
+    |  React UI  |                          | MCP clients|
+    | (desktop)  |                          |(Claude,etc)|
+    +------------+                          +------------+
 ```
 
 ## Project Structure

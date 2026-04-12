@@ -40,7 +40,8 @@
       "icons/icon.ico"
     ],
     "externalBin": [
-      "binaries/atomic-server"
+      "binaries/atomic-server",
+      "binaries/atomic-mcp-bridge"
     ],
     "macOS": {
       "entitlements": "Entitlements.plist",

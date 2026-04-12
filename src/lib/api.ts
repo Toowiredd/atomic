@@ -427,14 +427,27 @@ export async function pollFeed(id: string): Promise<FeedPollResult> {
   return getTransport().invoke('poll_feed', { id });
 }
 
-// MCP config — now HTTP-based via the server's /mcp endpoint
-export interface McpConfig {
+// MCP config — stdio for local desktop, HTTP+auth for remote/web
+export interface McpStdioConfig {
   mcpServers: {
     atomic: {
-      url: string;
+      command: string;
     };
   };
 }
+
+export interface McpHttpConfig {
+  mcpServers: {
+    atomic: {
+      url: string;
+      headers: {
+        Authorization: string;
+      };
+    };
+  };
+}
+
+export type McpConfig = McpStdioConfig | McpHttpConfig;
 
 // Logs
 export async function exportLogs(): Promise<string> {
@@ -442,11 +455,24 @@ export async function exportLogs(): Promise<string> {
   return result.logs;
 }
 
-export function getMcpConfig(serverBaseUrl: string): McpConfig {
+export function getMcpStdioConfig(bridgePath: string): McpStdioConfig {
+  return {
+    mcpServers: {
+      atomic: {
+        command: bridgePath,
+      },
+    },
+  };
+}
+
+export function getMcpHttpConfig(serverBaseUrl: string, token: string): McpHttpConfig {
   return {
     mcpServers: {
       atomic: {
         url: `${serverBaseUrl}/mcp`,
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
       },
     },
   };

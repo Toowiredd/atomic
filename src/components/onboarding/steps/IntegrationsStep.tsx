@@ -3,7 +3,8 @@ import { ChevronDown } from 'lucide-react';
 import { Button } from '../../ui/Button';
 import { QRCode } from '../QRCode';
 import {
-  getMcpConfig,
+  getMcpStdioConfig,
+  getMcpHttpConfig,
   createApiToken,
   createFeed,
   ingestUrl as apiIngestUrl,
@@ -12,7 +13,7 @@ import {
   type ImportResult,
   type IngestionResult,
 } from '../../../lib/api';
-import { isDesktopApp, getLocalServerConfig, getTransport } from '../../../lib/transport';
+import { isDesktopApp, getLocalServerConfig, getTransport, isLocalServer, getMcpBridgePath } from '../../../lib/transport';
 import type { HttpTransport } from '../../../lib/transport/http';
 import { pickDirectory } from '../../../lib/platform';
 import type { OnboardingState, OnboardingAction } from '../useOnboardingState';
@@ -82,13 +83,14 @@ function Section({
 
 // --- MCP content ---
 
-function McpContent() {
+function McpLocalContent() {
   const [mcpConfig, setMcpConfig] = useState<McpConfig | null>(null);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    const { url } = getServerInfo();
-    setMcpConfig(getMcpConfig(url));
+    getMcpBridgePath().then((path) => {
+      if (path) setMcpConfig(getMcpStdioConfig(path));
+    });
   }, []);
 
   const handleCopy = async () => {
@@ -102,24 +104,100 @@ function McpContent() {
 
   return (
     <>
+      <p className="text-sm text-[var(--color-text-secondary)]">
+        The Atomic MCP bridge is bundled with the desktop app. It connects to the local server automatically — no token configuration needed.
+      </p>
       <ol className="space-y-1.5 text-sm text-[var(--color-text-secondary)] list-decimal list-inside">
-        <li>Open Claude Desktop settings</li>
-        <li>Navigate to <span className="text-[var(--color-text-primary)]">Developer &gt; Edit Config</span></li>
+        <li>Open your MCP client settings (e.g. Claude Desktop &gt; <span className="text-[var(--color-text-primary)]">Developer &gt; Edit Config</span>)</li>
         <li>Add the following to your configuration file:</li>
       </ol>
       <div className="relative">
         <pre className="p-3 bg-[var(--color-bg-main)] border border-[var(--color-border)] rounded-lg text-xs text-[var(--color-text-primary)] overflow-x-auto font-mono">
-          {configJson}
+          {configJson || 'Loading...'}
         </pre>
-        <Button variant="secondary" size="sm" onClick={handleCopy} className="absolute top-2 right-2">
+        <Button variant="secondary" size="sm" onClick={handleCopy} className="absolute top-2 right-2" disabled={!mcpConfig}>
           {copied ? 'Copied!' : 'Copy'}
         </Button>
       </div>
       <p className="text-xs text-[var(--color-text-secondary)]">
-        After saving, restart Claude Desktop. Atomic will appear as an available MCP tool.
+        After saving, restart your MCP client. Atomic will appear as an available MCP tool.
       </p>
     </>
   );
+}
+
+function McpRemoteContent() {
+  const [mcpConfig, setMcpConfig] = useState<McpConfig | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleCreateToken = async () => {
+    setIsCreating(true);
+    setError(null);
+    try {
+      const result = await createApiToken('mcp-integration');
+      const { url } = getServerInfo();
+      setMcpConfig(getMcpHttpConfig(url, result.token));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  const handleCopy = async () => {
+    if (!mcpConfig) return;
+    await copyToClipboard(JSON.stringify(mcpConfig, null, 2));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const configJson = mcpConfig ? JSON.stringify(mcpConfig, null, 2) : '';
+
+  return (
+    <>
+      <p className="text-sm text-[var(--color-text-secondary)]">
+        Connect your MCP client to this Atomic server's HTTP endpoint. A dedicated API token is required for authentication.
+      </p>
+      {!mcpConfig ? (
+        <div className="space-y-2">
+          <Button variant="secondary" onClick={handleCreateToken} disabled={isCreating}>
+            {isCreating ? 'Creating...' : 'Create MCP Token'}
+          </Button>
+          {error && <p className="text-xs text-red-500">{error}</p>}
+        </div>
+      ) : (
+        <>
+          <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-md text-xs text-amber-400">
+            Save this config now — the token won't be shown again.
+          </div>
+          <ol className="space-y-1.5 text-sm text-[var(--color-text-secondary)] list-decimal list-inside">
+            <li>Open your MCP client settings (e.g. Claude Desktop &gt; <span className="text-[var(--color-text-primary)]">Developer &gt; Edit Config</span>)</li>
+            <li>Add the following to your configuration file:</li>
+          </ol>
+          <div className="relative">
+            <pre className="p-3 bg-[var(--color-bg-main)] border border-[var(--color-border)] rounded-lg text-xs text-[var(--color-text-primary)] overflow-x-auto font-mono">
+              {configJson}
+            </pre>
+            <Button variant="secondary" size="sm" onClick={handleCopy} className="absolute top-2 right-2">
+              {copied ? 'Copied!' : 'Copy'}
+            </Button>
+          </div>
+          <p className="text-xs text-[var(--color-text-secondary)]">
+            After saving, restart your MCP client. Atomic will appear as an available MCP tool.
+          </p>
+        </>
+      )}
+    </>
+  );
+}
+
+function McpContent() {
+  if (isDesktopApp() && isLocalServer()) {
+    return <McpLocalContent />;
+  }
+  return <McpRemoteContent />;
 }
 
 // --- Mobile content ---
@@ -407,8 +485,8 @@ export function IntegrationsStep({ state, dispatch }: IntegrationsStepProps) {
       </div>
 
       <Section
-        title="Claude Desktop (MCP)"
-        description="Let Claude search your knowledge base"
+        title="MCP Integration"
+        description="Connect AI assistants to your knowledge base"
         isOpen={openSection === 'mcp'}
         onToggle={() => toggle('mcp')}
       >

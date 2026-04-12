@@ -32,6 +32,14 @@ fn get_local_server_config(
     config.inner().clone()
 }
 
+#[tauri::command]
+fn get_mcp_bridge_path() -> Result<String, String> {
+    let exe_path = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_dir = exe_path.parent().ok_or("Cannot determine executable directory")?;
+    let bridge_path = exe_dir.join("atomic-mcp-bridge");
+    Ok(bridge_path.to_string_lossy().to_string())
+}
+
 const PID_FILE_NAME: &str = "sidecar.pid";
 
 /// Kill a stale sidecar from a previous run using the PID file.
@@ -222,6 +230,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_local_server_config,
+            get_mcp_bridge_path,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

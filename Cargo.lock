@@ -619,6 +619,7 @@ dependencies = [
 name = "atomic-mcp-bridge"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "futures",
  "reqwest 0.12.26",
  "serde",

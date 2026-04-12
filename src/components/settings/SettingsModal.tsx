@@ -32,7 +32,8 @@ import {
   testOllamaConnection,
   testOpenAICompatConnection,
   getOllamaModels,
-  getMcpConfig,
+  getMcpStdioConfig,
+  getMcpHttpConfig,
   listApiTokens,
   createApiToken,
   revokeApiToken,
@@ -55,7 +56,7 @@ import {
   type IngestionResult,
   type FeedPollResult,
 } from '../../lib/api';
-import { getTransport, switchTransport, switchToLocal, isDesktopApp, isLocalServer, type HttpTransportConfig } from '../../lib/transport';
+import { getTransport, switchTransport, switchToLocal, isDesktopApp, isLocalServer, getMcpBridgePath, type HttpTransportConfig } from '../../lib/transport';
 import { pickDirectory } from '../../lib/platform';
 import { importMarkdownFolder, type ImportProgress } from '../../lib/import';
 import { formatRelativeDate } from '../../lib/date';
@@ -486,6 +487,8 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
   const [showMcpSetup, setShowMcpSetup] = useState(false);
   const [mcpConfig, setMcpConfig] = useState<McpConfig | null>(null);
   const [mcpConfigCopied, setMcpConfigCopied] = useState(false);
+  const [isCreatingMcpToken, setIsCreatingMcpToken] = useState(false);
+  const [mcpTokenError, setMcpTokenError] = useState<string | null>(null);
 
   // Remote server state
   const [serverUrl, setServerUrl] = useState('');
@@ -999,13 +1002,29 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
   };
 
   // Handle MCP setup expand
-  const handleMcpExpand = () => {
+  const handleMcpExpand = async () => {
     const newState = !showMcpSetup;
     setShowMcpSetup(newState);
-    if (newState && !mcpConfig) {
+    if (newState && !mcpConfig && isDesktopApp() && isLocalServer()) {
+      const bridgePath = await getMcpBridgePath();
+      if (bridgePath) {
+        setMcpConfig(getMcpStdioConfig(bridgePath));
+      }
+    }
+  };
+
+  const handleCreateMcpToken = async () => {
+    setIsCreatingMcpToken(true);
+    setMcpTokenError(null);
+    try {
+      const result = await createApiToken('mcp-integration');
       const transport = getTransport() as import('../../lib/transport/http').HttpTransport;
-      const config = getMcpConfig(transport.getConfig().baseUrl);
+      const config = getMcpHttpConfig(transport.getConfig().baseUrl, result.token);
       setMcpConfig(config);
+    } catch (e) {
+      setMcpTokenError(String(e));
+    } finally {
+      setIsCreatingMcpToken(false);
     }
   };
 
@@ -2393,58 +2412,108 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                           className={`w-4 h-4 transition-transform ${showMcpSetup ? 'rotate-90' : ''}`}
                           strokeWidth={2}
                         />
-                        Claude Desktop Integration
+                        MCP Integration
                       </button>
 
                       {showMcpSetup && (
                         <div className="space-y-4 pl-6 border-l-2 border-[var(--color-border)]">
-                          <p className="text-xs text-[var(--color-text-secondary)]">
-                            Connect Atomic to Claude Desktop as an MCP server. This allows Claude to search and create notes in your knowledge base.
-                          </p>
+                          {isDesktopApp() && isLocalServer() ? (
+                            <>
+                              <p className="text-xs text-[var(--color-text-secondary)]">
+                                The Atomic MCP bridge is bundled with the desktop app. It connects to the local server automatically — no token configuration needed.
+                              </p>
 
-                          <div className="space-y-2">
-                            <div className="text-sm font-medium text-[var(--color-text-primary)]">Setup Instructions</div>
-                            <ol className="text-xs text-[var(--color-text-secondary)] space-y-2 list-decimal list-inside">
-                              <li>
-                                Open Claude Desktop settings
-                                <span className="text-[var(--color-text-tertiary)]"> (Claude → Settings → Developer)</span>
-                              </li>
-                              <li>Click "Edit Config" to open claude_desktop_config.json</li>
-                              <li>Add the following configuration:</li>
-                            </ol>
-                          </div>
+                              <div className="space-y-2">
+                                <div className="text-sm font-medium text-[var(--color-text-primary)]">Setup Instructions</div>
+                                <ol className="text-xs text-[var(--color-text-secondary)] space-y-2 list-decimal list-inside">
+                                  <li>Open your MCP client settings (e.g. Claude Desktop &gt; <span className="text-[var(--color-text-primary)]">Developer &gt; Edit Config</span>)</li>
+                                  <li>Add the following configuration:</li>
+                                </ol>
+                              </div>
 
-                          {/* Config JSON */}
-                          <div className="relative">
-                            <pre className="p-3 bg-[var(--color-bg-main)] border border-[var(--color-border)] rounded-md text-xs text-[var(--color-text-primary)] overflow-x-auto">
-                              {mcpConfig ? JSON.stringify(mcpConfig, null, 2) : 'Loading...'}
-                            </pre>
-                            <button
-                              type="button"
-                              onClick={handleCopyMcpConfig}
-                              disabled={!mcpConfig}
-                              className="absolute top-2 right-2 p-1.5 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors disabled:opacity-50"
-                              title="Copy to clipboard"
-                            >
-                              {mcpConfigCopied ? (
-                                <Check className="w-4 h-4 text-green-500" strokeWidth={2} />
+                              <div className="relative">
+                                <pre className="p-3 bg-[var(--color-bg-main)] border border-[var(--color-border)] rounded-md text-xs text-[var(--color-text-primary)] overflow-x-auto">
+                                  {mcpConfig ? JSON.stringify(mcpConfig, null, 2) : 'Loading...'}
+                                </pre>
+                                <button
+                                  type="button"
+                                  onClick={handleCopyMcpConfig}
+                                  disabled={!mcpConfig}
+                                  className="absolute top-2 right-2 p-1.5 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors disabled:opacity-50"
+                                  title="Copy to clipboard"
+                                >
+                                  {mcpConfigCopied ? (
+                                    <Check className="w-4 h-4 text-green-500" strokeWidth={2} />
+                                  ) : (
+                                    <Copy className="w-4 h-4" strokeWidth={2} />
+                                  )}
+                                </button>
+                              </div>
+
+                              <ol start={3} className="text-xs text-[var(--color-text-secondary)] space-y-2 list-decimal list-inside">
+                                <li>Save the config file and restart your MCP client</li>
+                              </ol>
+
+                              <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-md text-xs text-green-400">
+                                <strong>Note:</strong> The Atomic desktop app must be running for the MCP bridge to connect.
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <p className="text-xs text-[var(--color-text-secondary)]">
+                                Connect your MCP client to this Atomic server's HTTP endpoint. A dedicated API token is required for authentication.
+                              </p>
+
+                              {!mcpConfig ? (
+                                <div className="space-y-2">
+                                  <Button variant="secondary" size="sm" onClick={handleCreateMcpToken} disabled={isCreatingMcpToken}>
+                                    {isCreatingMcpToken ? 'Creating...' : 'Create MCP Token'}
+                                  </Button>
+                                  {mcpTokenError && <p className="text-xs text-red-500">{mcpTokenError}</p>}
+                                </div>
                               ) : (
-                                <Copy className="w-4 h-4" strokeWidth={2} />
+                                <>
+                                  <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-md text-xs text-amber-400">
+                                    Save this config now — the token won't be shown again.
+                                  </div>
+
+                                  <div className="space-y-2">
+                                    <div className="text-sm font-medium text-[var(--color-text-primary)]">Setup Instructions</div>
+                                    <ol className="text-xs text-[var(--color-text-secondary)] space-y-2 list-decimal list-inside">
+                                      <li>Open your MCP client settings (e.g. Claude Desktop &gt; <span className="text-[var(--color-text-primary)]">Developer &gt; Edit Config</span>)</li>
+                                      <li>Add the following configuration:</li>
+                                    </ol>
+                                  </div>
+
+                                  <div className="relative">
+                                    <pre className="p-3 bg-[var(--color-bg-main)] border border-[var(--color-border)] rounded-md text-xs text-[var(--color-text-primary)] overflow-x-auto">
+                                      {JSON.stringify(mcpConfig, null, 2)}
+                                    </pre>
+                                    <button
+                                      type="button"
+                                      onClick={handleCopyMcpConfig}
+                                      className="absolute top-2 right-2 p-1.5 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+                                      title="Copy to clipboard"
+                                    >
+                                      {mcpConfigCopied ? (
+                                        <Check className="w-4 h-4 text-green-500" strokeWidth={2} />
+                                      ) : (
+                                        <Copy className="w-4 h-4" strokeWidth={2} />
+                                      )}
+                                    </button>
+                                  </div>
+
+                                  <ol start={3} className="text-xs text-[var(--color-text-secondary)] space-y-2 list-decimal list-inside">
+                                    <li>Save the config file and restart your MCP client</li>
+                                  </ol>
+
+                                  <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-md text-xs text-green-400">
+                                    <strong>Note:</strong> The Atomic server must be running and reachable for MCP clients to connect.
+                                  </div>
+                                </>
                               )}
-                            </button>
-                          </div>
-
-                          <ol start={4} className="text-xs text-[var(--color-text-secondary)] space-y-2 list-decimal list-inside">
-                            <li>Save the config file and restart Claude Desktop</li>
-                            <li>
-                              Verify by checking for "atomic" in Claude's MCP servers
-                              <span className="text-[var(--color-text-tertiary)]"> (hammer icon)</span>
-                            </li>
-                          </ol>
-
-                          <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-md text-xs text-green-400">
-                            <strong>Note:</strong> The MCP server is served over HTTP by the Atomic server. The server must be running for Claude to access your notes.
-                          </div>
+                            </>
+                          )}
                         </div>
                       )}
                     </div>

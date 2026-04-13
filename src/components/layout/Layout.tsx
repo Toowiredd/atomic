@@ -1,22 +1,24 @@
 import { useEffect, useState } from 'react';
 import { LeftPanel } from './LeftPanel';
 import { MainView } from './MainView';
-import { RightDrawer } from './RightDrawer';
 import { LoadingIndicator } from '../ui/LoadingIndicator';
 import { ServerConnectionStatus } from '../ui/ServerConnectionStatus';
+import { RouterBridge } from '../../router/RouterBridge';
 import { SettingsModal } from '../settings/SettingsModal';
 import { OnboardingWizard } from '../onboarding';
 import { CommandPalette } from '../command-palette';
 import { useAtomsStore } from '../../stores/atoms';
 import { useTagsStore } from '../../stores/tags';
+import { useDatabasesStore } from '../../stores/databases';
 import { useUIStore } from '../../stores/ui';
-import { useTheme } from '../../hooks';
+import { useTheme, useFont } from '../../hooks';
 import { verifyProviderConfigured } from '../../lib/api';
 import { isTauri } from '../../lib/platform';
 
 
 export function Layout() {
   useTheme(); // Initialize theme
+  useFont(); // Initialize font
   const fetchAtoms = useAtomsStore(s => s.fetchAtoms);
   const fetchTags = useTagsStore(s => s.fetchTags);
   const [isSetupRequired, setIsSetupRequired] = useState<boolean | null>(null); // null = checking
@@ -28,7 +30,6 @@ export function Layout() {
   const toggleCommandPalette = useUIStore((state) => state.toggleCommandPalette);
   const closeCommandPalette = useUIStore((state) => state.closeCommandPalette);
   const openCommandPalette = useUIStore((state) => state.openCommandPalette);
-  const openDrawer = useUIStore((state) => state.openDrawer);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -66,14 +67,17 @@ export function Layout() {
       // Cmd+N or Ctrl+N to create new atom (only when palette is closed)
       if ((e.metaKey || e.ctrlKey) && e.key === 'n' && !commandPaletteOpen) {
         e.preventDefault();
-        openDrawer('editor');
+        const { createAtom } = useAtomsStore.getState();
+        createAtom('').then((newAtom) => {
+          useUIStore.getState().openReaderEditing(newAtom.id);
+        }).catch(console.error);
         return;
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [toggleCommandPalette, openCommandPalette, openDrawer, commandPaletteOpen]);
+  }, [toggleCommandPalette, openCommandPalette, commandPaletteOpen]);
 
   // Listen for custom settings event from command palette
   useEffect(() => {
@@ -111,6 +115,19 @@ export function Layout() {
   }, []);
 
   const initializeApp = async () => {
+    // Paint cached tag tree + atoms first (if any) so the UI has something
+    // to show while the network call races. Hydration reads the persisted
+    // `activeId`; it no-ops on first-ever session (no cache yet).
+    //
+    // `fetchDatabases` runs in parallel so `activeId` is fresh by the time
+    // atoms/tags fetches finish and want to write to the cache. We don't
+    // await it because we don't want cache hydration to block on a network
+    // round-trip — the offline case still needs to paint instantly.
+    void useDatabasesStore.getState().fetchDatabases();
+    await Promise.all([
+      useAtomsStore.getState().hydrateFromCache(),
+      useTagsStore.getState().hydrateFromCache(),
+    ]);
     await Promise.all([fetchAtoms(), fetchTags()]);
   };
 
@@ -140,9 +157,9 @@ export function Layout() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-[var(--color-bg-main)]">
+      <RouterBridge />
       <LeftPanel />
       <MainView />
-      <RightDrawer />
       <LoadingIndicator />
       <ServerConnectionStatus />
       <CommandPalette

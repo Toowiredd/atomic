@@ -8,6 +8,12 @@ members = [
     "crates/atomic-cloud",
 ]
 
+[profile.dev]
+debug = 1                  # Line tables only (enough for backtraces, much smaller)
+
+[profile.dev.package."*"]
+debug = false              # No debug info for dependencies
+
 [profile.release]
 opt-level = "z"        # Optimize for size
 lto = true             # Enable Link Time Optimization

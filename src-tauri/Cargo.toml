@@ -1,6 +1,6 @@
 [package]
 name = "atomic"
-version = "1.11.1"
+version = "1.21.4"
 description = "A note-taking desktop application"
 authors = ["you"]
 edition = "2021"
@@ -17,6 +17,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
 atomic-core = { path = "../crates/atomic-core" }
 serde = { version = "1", features = ["derive"] }
 reqwest = { version = "0.12", features = ["blocking"] }

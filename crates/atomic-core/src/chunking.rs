@@ -1,48 +1,62 @@
 //! Markdown-aware content chunking for embedding generation
 //!
 //! Chunking strategy:
-//! - Respects code blocks, headers, lists, paragraphs
+//! - Uses pulldown-cmark to parse markdown structure
 //! - Never splits code blocks (kept atomic for syntax integrity)
 //! - Headers create natural chunk boundaries
-//! - Target chunk size: 2500 tokens
-//! - Minimum chunk size: 100 tokens (smaller merged with adjacent)
-//! - Maximum chunk size: 3000 tokens (except code blocks)
-//! - Overlap: 200 tokens from next chunk appended to each chunk
+//! - Target chunk size: ~3200 chars (~800 tokens)
+//! - Minimum chunk size: ~240 chars (~60 tokens)
+//! - Maximum chunk size: ~4000 chars (~1000 tokens, except code blocks)
+//! - Overlap: ~320 chars (~80 tokens) from next chunk appended to each chunk
+//!
+//! Uses character counts for fast size estimation (~4 chars/token).
+//! Exact token counts (via `count_tokens`) are available for callers that
+//! need precision (e.g. LLM context budgets).
 
 use std::sync::LazyLock;
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use tiktoken_rs::{cl100k_base, CoreBPE};
 
-/// Configuration constants for chunking
-const TARGET_CHUNK_TOKENS: usize = 2500;
-const OVERLAP_TOKENS: usize = 200;
-const MIN_CHUNK_TOKENS: usize = 100;
-const MAX_CHUNK_TOKENS: usize = 3000;
+/// Approximate characters per token (~4 for English text).
+const CHARS_PER_TOKEN: usize = 4;
+
+/// Configuration constants for chunking (in characters)
+const TARGET_CHUNK_CHARS: usize = 800 * CHARS_PER_TOKEN;
+const OVERLAP_CHARS: usize = 80 * CHARS_PER_TOKEN;
+const MIN_CHUNK_CHARS: usize = 60 * CHARS_PER_TOKEN;
+const MAX_CHUNK_CHARS: usize = 1000 * CHARS_PER_TOKEN;
 
 /// Lazily initialized tokenizer (loaded once, reused for all operations)
 static BPE: LazyLock<CoreBPE> = LazyLock::new(|| {
     cl100k_base().expect("Failed to load tiktoken encoding")
 });
 
-/// Count tokens using tiktoken's cl100k_base encoding (used by OpenAI embedding models)
+/// Count tokens using tiktoken's cl100k_base encoding (used by OpenAI embedding models).
+/// This is the precise, slower path — used for LLM context budgets, NOT for chunking.
 pub fn count_tokens(text: &str) -> usize {
     BPE.encode_with_special_tokens(text).len()
 }
 
-/// Get the first N tokens of text as a string
-fn get_first_n_tokens(text: &str, n: usize) -> String {
-    let tokens = BPE.encode_with_special_tokens(text);
-    let take_count = tokens.len().min(n);
-    BPE.decode(tokens[..take_count].to_vec())
-        .unwrap_or_else(|_| text.chars().take(n * 4).collect())
+/// Get the first N characters of text (char-boundary safe)
+fn get_first_n_chars(text: &str, n: usize) -> String {
+    if text.len() <= n {
+        return text.to_string();
+    }
+    // Find a char boundary at or before n
+    let mut end = n;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 /// Types of markdown blocks
 #[derive(Debug, Clone, PartialEq)]
 enum BlockType {
-    CodeBlock,  // Fenced code blocks (```)
-    Header,     // Lines starting with #
-    List,       // Consecutive lines starting with -, *, or numbers
-    Paragraph,  // Regular text
+    CodeBlock,
+    Header,
+    List,
+    Paragraph,
 }
 
 /// A parsed markdown block
@@ -52,165 +66,145 @@ struct MarkdownBlock {
     content: String,
 }
 
-/// Parse content into markdown blocks
+/// Parse content into markdown blocks using pulldown-cmark
 fn parse_markdown_blocks(content: &str) -> Vec<MarkdownBlock> {
+    let parser = Parser::new(content).into_offset_iter();
     let mut blocks = Vec::new();
-    let lines: Vec<&str> = content.lines().collect();
-    let mut i = 0;
 
-    while i < lines.len() {
-        let line = lines[i];
+    // Track block-level ranges: (block_type, start_offset, end_offset)
+    let mut current_block: Option<(BlockType, usize, usize)> = None;
 
-        // Check for fenced code block
-        if line.trim_start().starts_with("```") {
-            let indent = line.len() - line.trim_start().len();
-            let mut code_content = vec![line.to_string()];
-            i += 1;
-
-            // Find closing fence
-            while i < lines.len() {
-                let current = lines[i];
-                code_content.push(current.to_string());
-                if current.trim_start().starts_with("```")
-                    && (current.len() - current.trim_start().len()) <= indent + 1 {
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-
-            blocks.push(MarkdownBlock {
-                block_type: BlockType::CodeBlock,
-                content: code_content.join("\n"),
-            });
-            continue;
-        }
-
-        // Check for header
-        if line.starts_with('#') {
-            blocks.push(MarkdownBlock {
-                block_type: BlockType::Header,
-                content: line.to_string(),
-            });
-            i += 1;
-            continue;
-        }
-
-        // Check for list item
-        let trimmed = line.trim_start();
-        let is_list_item = trimmed.starts_with("- ")
-            || trimmed.starts_with("* ")
-            || trimmed.starts_with("+ ")
-            || (trimmed.len() > 2
-                && trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
-                && (trimmed.contains(". ") || trimmed.contains(") ")));
-
-        if is_list_item {
-            let mut list_content = vec![line.to_string()];
-            i += 1;
-
-            // Collect consecutive list items and their continuation lines
-            while i < lines.len() {
-                let next_line = lines[i];
-                let next_trimmed = next_line.trim_start();
-
-                // Check if it's a list item or continuation (indented)
-                let is_next_list = next_trimmed.starts_with("- ")
-                    || next_trimmed.starts_with("* ")
-                    || next_trimmed.starts_with("+ ")
-                    || (next_trimmed.len() > 2
-                        && next_trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
-                        && (next_trimmed.contains(". ") || next_trimmed.contains(") ")));
-
-                // Continue if list item, indented continuation, or empty line within list
-                let indent_level = next_line.len() - next_trimmed.len();
-                if is_next_list || (indent_level > 0 && !next_trimmed.is_empty()) {
-                    list_content.push(next_line.to_string());
-                    i += 1;
-                } else if next_trimmed.is_empty() && i + 1 < lines.len() {
-                    // Check if there's more list after empty line
-                    let after_empty = lines[i + 1].trim_start();
-                    let is_list_after = after_empty.starts_with("- ")
-                        || after_empty.starts_with("* ")
-                        || after_empty.starts_with("+ ")
-                        || (after_empty.len() > 2
-                            && after_empty.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
-                            && (after_empty.contains(". ") || after_empty.contains(") ")));
-                    if is_list_after {
-                        list_content.push(next_line.to_string());
-                        i += 1;
-                    } else {
-                        break;
+    for (event, range) in parser {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) => {
+                // If inside a container block (e.g. list), just extend it
+                // rather than splitting the container.
+                if matches!(current_block, Some((BlockType::List, ..))) {
+                    if let Some((_, _, ref mut end)) = current_block {
+                        *end = range.end;
                     }
                 } else {
-                    break;
+                    // Flush any pending block
+                    if let Some((bt, start, end)) = current_block.take() {
+                        let text = content[start..end].trim().to_string();
+                        if !text.is_empty() {
+                            blocks.push(MarkdownBlock { block_type: bt, content: text });
+                        }
+                    }
+                    current_block = Some((BlockType::CodeBlock, range.start, range.end));
                 }
             }
-
-            blocks.push(MarkdownBlock {
-                block_type: BlockType::List,
-                content: list_content.join("\n"),
-            });
-            continue;
-        }
-
-        // Regular paragraph - collect until empty line or structure change
-        if !line.trim().is_empty() {
-            let mut para_content = vec![line.to_string()];
-            i += 1;
-
-            while i < lines.len() {
-                let next_line = lines[i];
-
-                // Stop at empty line, header, code block, or list
-                if next_line.trim().is_empty()
-                    || next_line.starts_with('#')
-                    || next_line.trim_start().starts_with("```") {
-                    break;
+            Event::End(TagEnd::CodeBlock) => {
+                match current_block {
+                    Some((BlockType::List, _, ref mut end)) => {
+                        // Code block ended inside list — just extend the list range
+                        *end = range.end;
+                    }
+                    Some((BlockType::CodeBlock, start, _)) => {
+                        current_block = None;
+                        let text = content[start..range.end].trim().to_string();
+                        if !text.is_empty() {
+                            blocks.push(MarkdownBlock { block_type: BlockType::CodeBlock, content: text });
+                        }
+                    }
+                    _ => {}
                 }
-
-                let next_trimmed = next_line.trim_start();
-                let is_list = next_trimmed.starts_with("- ")
-                    || next_trimmed.starts_with("* ")
-                    || next_trimmed.starts_with("+ ")
-                    || (next_trimmed.len() > 2
-                        && next_trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
-                        && (next_trimmed.contains(". ") || next_trimmed.contains(") ")));
-
-                if is_list {
-                    break;
-                }
-
-                para_content.push(next_line.to_string());
-                i += 1;
             }
-
-            blocks.push(MarkdownBlock {
-                block_type: BlockType::Paragraph,
-                content: para_content.join("\n"),
-            });
-            continue;
+            Event::Start(Tag::Heading { .. }) => {
+                // Flush any pending block
+                if let Some((bt, start, end)) = current_block.take() {
+                    let text = content[start..end].trim().to_string();
+                    if !text.is_empty() {
+                        blocks.push(MarkdownBlock { block_type: bt, content: text });
+                    }
+                }
+                current_block = Some((BlockType::Header, range.start, range.end));
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if let Some((BlockType::Header, start, _)) = current_block.take() {
+                    let text = content[start..range.end].trim().to_string();
+                    if !text.is_empty() {
+                        blocks.push(MarkdownBlock { block_type: BlockType::Header, content: text });
+                    }
+                }
+            }
+            Event::Start(Tag::List(_)) => {
+                // Flush any pending block
+                if let Some((bt, start, end)) = current_block.take() {
+                    let text = content[start..end].trim().to_string();
+                    if !text.is_empty() {
+                        blocks.push(MarkdownBlock { block_type: bt, content: text });
+                    }
+                }
+                current_block = Some((BlockType::List, range.start, range.end));
+            }
+            Event::End(TagEnd::List(_)) => {
+                if let Some((BlockType::List, start, _)) = current_block.take() {
+                    let text = content[start..range.end].trim().to_string();
+                    if !text.is_empty() {
+                        blocks.push(MarkdownBlock { block_type: BlockType::List, content: text });
+                    }
+                }
+            }
+            Event::Start(Tag::Paragraph) => {
+                // Only start a new paragraph if we're not inside another block
+                if current_block.is_none() {
+                    current_block = Some((BlockType::Paragraph, range.start, range.end));
+                } else {
+                    // Extend current block (e.g. paragraph inside list item)
+                    if let Some((_, _, ref mut end)) = current_block {
+                        *end = range.end;
+                    }
+                }
+            }
+            Event::End(TagEnd::Paragraph) => {
+                match current_block {
+                    Some((BlockType::Paragraph, start, _)) => {
+                        let text = content[start..range.end].trim().to_string();
+                        if !text.is_empty() {
+                            blocks.push(MarkdownBlock { block_type: BlockType::Paragraph, content: text });
+                        }
+                        current_block = None;
+                    }
+                    _ => {
+                        // Paragraph inside list/blockquote — extend parent
+                        if let Some((_, _, ref mut end)) = current_block {
+                            *end = range.end;
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Extend current block's end offset for any content events
+                if let Some((_, _, ref mut end)) = current_block {
+                    if range.end > *end {
+                        *end = range.end;
+                    }
+                }
+            }
         }
+    }
 
-        // Skip empty lines
-        i += 1;
+    // Flush remaining block
+    if let Some((bt, start, end)) = current_block {
+        let text = content[start..end].trim().to_string();
+        if !text.is_empty() {
+            blocks.push(MarkdownBlock { block_type: bt, content: text });
+        }
     }
 
     blocks
 }
 
-/// Split a block by sentences if it exceeds the token limit
-fn split_block_by_sentences(content: &str, max_tokens: usize) -> Vec<String> {
+/// Split a block by sentences if it exceeds the character limit
+fn split_block_by_sentences(content: &str, max_chars: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current_chunk = String::new();
-    let mut current_tokens = 0;
 
-    // Split by sentence boundaries
     let sentence_endings = [". ", "! ", "? ", ".\n", "!\n", "?\n"];
     let mut remaining = content;
 
     while !remaining.is_empty() {
-        // Find the next sentence boundary
         let mut best_pos = None;
         for ending in &sentence_endings {
             if let Some(pos) = remaining.find(ending) {
@@ -228,28 +222,22 @@ fn split_block_by_sentences(content: &str, max_tokens: usize) -> Vec<String> {
             None => (remaining, ""),
         };
 
-        let sentence_tokens = count_tokens(sentence);
-
         // If adding this sentence exceeds limit, start new chunk
-        if current_tokens + sentence_tokens > max_tokens && !current_chunk.is_empty() {
+        if current_chunk.len() + sentence.len() > max_chars && !current_chunk.is_empty() {
             chunks.push(current_chunk.clone());
             current_chunk = String::new();
-            current_tokens = 0;
         }
 
         // If single sentence is too large, hard split it
-        if sentence_tokens > max_tokens {
+        if sentence.len() > max_chars {
             if !current_chunk.is_empty() {
                 chunks.push(current_chunk.clone());
                 current_chunk = String::new();
-                current_tokens = 0;
             }
-            // Hard split the large sentence
-            let hard_splits = hard_split_by_tokens(sentence, max_tokens);
+            let hard_splits = hard_split_by_chars(sentence, max_chars);
             chunks.extend(hard_splits);
         } else {
             current_chunk.push_str(sentence);
-            current_tokens += sentence_tokens;
         }
 
         remaining = rest;
@@ -262,99 +250,91 @@ fn split_block_by_sentences(content: &str, max_tokens: usize) -> Vec<String> {
     chunks
 }
 
-/// Hard split text by token count (last resort)
-fn hard_split_by_tokens(text: &str, max_tokens: usize) -> Vec<String> {
-    let tokens = BPE.encode_with_special_tokens(text);
-
-    if tokens.len() <= max_tokens {
+/// Hard split text by character count (last resort, char-boundary safe)
+fn hard_split_by_chars(text: &str, max_chars: usize) -> Vec<String> {
+    if text.len() <= max_chars {
         return vec![text.to_string()];
     }
 
     let mut chunks = Vec::new();
     let mut start = 0;
 
-    while start < tokens.len() {
-        let end = (start + max_tokens).min(tokens.len());
-        if let Ok(chunk) = BPE.decode(tokens[start..end].to_vec()) {
-            chunks.push(chunk);
+    while start < text.len() {
+        let mut end = (start + max_chars).min(text.len());
+        // Ensure we're at a char boundary
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
         }
+        if end == start {
+            // Shouldn't happen with valid UTF-8, but avoid infinite loop
+            break;
+        }
+        chunks.push(text[start..end].to_string());
         start = end;
     }
 
     chunks
 }
 
-/// Merge adjacent small blocks into chunks respecting token limits
+/// Merge adjacent small blocks into chunks respecting character limits
 fn merge_blocks_into_chunks(blocks: Vec<MarkdownBlock>) -> Vec<String> {
     let mut chunks: Vec<String> = Vec::new();
     let mut current_chunk = String::new();
-    let mut current_tokens = 0;
 
     for block in blocks {
-        let block_tokens = count_tokens(&block.content);
+        let block_len = block.content.len();
 
         // Code blocks are never split - add as their own chunk if large
         if block.block_type == BlockType::CodeBlock {
-            // If we have accumulated content, save it first
             if !current_chunk.is_empty() {
                 chunks.push(current_chunk.clone());
                 current_chunk = String::new();
-                current_tokens = 0;
             }
 
-            // Code blocks stay intact even if they exceed max
-            // (This is intentional for syntax integrity)
-            if block_tokens > MAX_CHUNK_TOKENS {
+            // Code blocks stay intact even if they exceed MAX_CHUNK_CHARS
+            // (intentional for syntax integrity)
+            if block_len > MAX_CHUNK_CHARS {
                 chunks.push(block.content);
-            } else if block_tokens > TARGET_CHUNK_TOKENS {
+            } else if block_len > TARGET_CHUNK_CHARS {
                 chunks.push(block.content);
             } else {
                 // Small code block - can be combined
                 current_chunk = block.content;
-                current_tokens = block_tokens;
             }
             continue;
         }
 
         // Headers start new chunks (natural boundaries)
         if block.block_type == BlockType::Header {
-            if !current_chunk.is_empty() && current_tokens >= MIN_CHUNK_TOKENS {
+            if !current_chunk.is_empty() && current_chunk.len() >= MIN_CHUNK_CHARS {
                 chunks.push(current_chunk.clone());
                 current_chunk = String::new();
-                current_tokens = 0;
             }
         }
 
         // Check if block fits in current chunk
-        if current_tokens + block_tokens <= TARGET_CHUNK_TOKENS {
+        if current_chunk.len() + block_len <= TARGET_CHUNK_CHARS {
             if !current_chunk.is_empty() {
                 current_chunk.push_str("\n\n");
             }
             current_chunk.push_str(&block.content);
-            current_tokens += block_tokens;
-        } else if block_tokens > TARGET_CHUNK_TOKENS {
+        } else if block_len > TARGET_CHUNK_CHARS {
             // Block is too large - need to split it
             if !current_chunk.is_empty() {
                 chunks.push(current_chunk.clone());
                 current_chunk = String::new();
-                current_tokens = 0;
             }
 
-            // Split large block by sentences
-            let sub_chunks = split_block_by_sentences(&block.content, TARGET_CHUNK_TOKENS);
+            let sub_chunks = split_block_by_sentences(&block.content, TARGET_CHUNK_CHARS);
 
             for (i, sub_chunk) in sub_chunks.into_iter().enumerate() {
-                let sub_tokens = count_tokens(&sub_chunk);
-
-                if i == 0 || current_tokens + sub_tokens > TARGET_CHUNK_TOKENS {
+                if i == 0 || current_chunk.len() + sub_chunk.len() > TARGET_CHUNK_CHARS {
                     if !current_chunk.is_empty() {
                         chunks.push(current_chunk.clone());
                     }
                     current_chunk = sub_chunk;
-                    current_tokens = sub_tokens;
                 } else {
                     current_chunk.push_str(&sub_chunk);
-                    current_tokens += sub_tokens;
                 }
             }
         } else {
@@ -363,11 +343,9 @@ fn merge_blocks_into_chunks(blocks: Vec<MarkdownBlock>) -> Vec<String> {
                 chunks.push(current_chunk.clone());
             }
             current_chunk = block.content;
-            current_tokens = block_tokens;
         }
     }
 
-    // Don't forget the last chunk
     if !current_chunk.is_empty() {
         chunks.push(current_chunk);
     }
@@ -385,49 +363,42 @@ fn merge_small_chunks(chunks: Vec<String>) -> Vec<String> {
     let mut pending: Option<String> = None;
 
     for chunk in chunks {
-        let chunk_tokens = count_tokens(&chunk);
-
         if let Some(prev) = pending.take() {
             let merged = format!("{}\n\n{}", prev, chunk);
-            let merged_tokens = count_tokens(&merged);
 
-            if merged_tokens <= TARGET_CHUNK_TOKENS {
-                if merged_tokens < MIN_CHUNK_TOKENS {
+            if merged.len() <= TARGET_CHUNK_CHARS {
+                if merged.len() < MIN_CHUNK_CHARS {
                     pending = Some(merged);
                 } else {
                     result.push(merged);
                 }
             } else {
-                // Can't merge - push previous and handle current
-                if count_tokens(&prev) >= MIN_CHUNK_TOKENS {
+                if prev.len() >= MIN_CHUNK_CHARS {
                     result.push(prev);
                 } else if !result.is_empty() {
-                    // Merge with last result
                     let last = result.pop().unwrap();
                     result.push(format!("{}\n\n{}", last, prev));
                 } else {
                     result.push(prev);
                 }
 
-                if chunk_tokens < MIN_CHUNK_TOKENS {
+                if chunk.len() < MIN_CHUNK_CHARS {
                     pending = Some(chunk);
                 } else {
                     result.push(chunk);
                 }
             }
-        } else if chunk_tokens < MIN_CHUNK_TOKENS {
+        } else if chunk.len() < MIN_CHUNK_CHARS {
             pending = Some(chunk);
         } else {
             result.push(chunk);
         }
     }
 
-    // Handle any remaining pending chunk
     if let Some(remaining) = pending {
         if !result.is_empty() {
             let last = result.pop().unwrap();
-            let merged = format!("{}\n\n{}", last, remaining);
-            result.push(merged);
+            result.push(format!("{}\n\n{}", last, remaining));
         } else {
             result.push(remaining);
         }
@@ -437,8 +408,8 @@ fn merge_small_chunks(chunks: Vec<String>) -> Vec<String> {
 }
 
 /// Apply overlap between consecutive chunks
-fn apply_overlap(chunks: Vec<String>, overlap_tokens: usize) -> Vec<String> {
-    if chunks.len() <= 1 || overlap_tokens == 0 {
+fn apply_overlap(chunks: Vec<String>) -> Vec<String> {
+    if chunks.len() <= 1 || OVERLAP_CHARS == 0 {
         return chunks;
     }
 
@@ -446,14 +417,9 @@ fn apply_overlap(chunks: Vec<String>, overlap_tokens: usize) -> Vec<String> {
 
     for (i, chunk) in chunks.iter().enumerate() {
         if i < chunks.len() - 1 {
-            // Get overlap from next chunk
-            let next_overlap = get_first_n_tokens(&chunks[i + 1], overlap_tokens);
-
-            // Append overlap with a marker
-            let with_overlap = format!("{}\n\n{}", chunk, next_overlap);
-            result.push(with_overlap);
+            let next_overlap = get_first_n_chars(&chunks[i + 1], OVERLAP_CHARS);
+            result.push(format!("{}\n\n{}", chunk, next_overlap));
         } else {
-            // Last chunk - no overlap needed
             result.push(chunk.clone());
         }
     }
@@ -463,14 +429,8 @@ fn apply_overlap(chunks: Vec<String>, overlap_tokens: usize) -> Vec<String> {
 
 /// Chunks content into smaller pieces for embedding generation.
 ///
-/// Chunking strategy:
-/// - Markdown-aware: Respects code blocks, headers, lists, paragraphs
-/// - Never splits code blocks (kept atomic for syntax integrity)
-/// - Headers create natural chunk boundaries
-/// - Target chunk size: 2500 tokens
-/// - Minimum chunk size: 100 tokens (smaller merged with adjacent)
-/// - Maximum chunk size: 3000 tokens (except code blocks)
-/// - Overlap: 200 tokens from next chunk appended to each chunk
+/// Uses pulldown-cmark for markdown parsing and character-based size estimates
+/// for fast chunking without tokenization overhead.
 pub fn chunk_content(content: &str) -> Vec<String> {
     if content.is_empty() {
         return Vec::new();
@@ -483,14 +443,14 @@ pub fn chunk_content(content: &str) -> Vec<String> {
         return Vec::new();
     }
 
-    // 2. Merge blocks into chunks respecting token limits
+    // 2. Merge blocks into chunks respecting size limits
     let chunks = merge_blocks_into_chunks(blocks);
 
     // 3. Merge any remaining small chunks
     let chunks = merge_small_chunks(chunks);
 
     // 4. Apply overlap
-    let chunks = apply_overlap(chunks, OVERLAP_TOKENS);
+    let chunks = apply_overlap(chunks);
 
     chunks
 }
@@ -517,7 +477,6 @@ mod tests {
     fn test_simple_paragraphs() {
         let content = "First paragraph with enough content to stand alone.\n\nSecond paragraph also with content.";
         let chunks = chunk_content(content);
-        // Should be one chunk since both are small
         assert!(!chunks.is_empty());
     }
 
@@ -539,7 +498,6 @@ fn main() {
 Some outro text."#;
         let chunks = chunk_content(content);
 
-        // Find the chunk containing the code block
         let code_chunk = chunks.iter().find(|c| c.contains("fn main()"));
         assert!(code_chunk.is_some(), "Code block should be in output");
 
@@ -560,7 +518,6 @@ This is content under the second section with different information."#;
 
         let blocks = parse_markdown_blocks(content);
 
-        // Should have headers identified
         let header_count = blocks.iter().filter(|b| b.block_type == BlockType::Header).count();
         assert_eq!(header_count, 2, "Should identify 2 headers");
     }
@@ -577,7 +534,6 @@ After the list."#;
 
         let blocks = parse_markdown_blocks(content);
 
-        // Should have a list block
         let list_block = blocks.iter().find(|b| b.block_type == BlockType::List);
         assert!(list_block.is_some(), "Should identify list block");
 
@@ -588,17 +544,14 @@ After the list."#;
 
     #[test]
     fn test_overlap_applied() {
-        // Create content that will produce multiple chunks
-        let long_para = "This is a test sentence with enough content. ".repeat(200);
-        let content = format!("{}\n\n{}", long_para, "Final paragraph with unique content.");
+        let long_para = "This is a test sentence with enough content. ".repeat(500);
+        let content = format!("{}\n\nFinal paragraph with unique content.", long_para);
 
         let chunks = chunk_content(&content);
 
         if chunks.len() > 1 {
-            // First chunk should contain overlap from second
-            // (if chunks are created)
             let first = &chunks[0];
-            assert!(first.len() > 0);
+            assert!(!first.is_empty());
         }
     }
 
@@ -618,34 +571,20 @@ Done!"#;
     }
 
     #[test]
-    fn test_nested_code_in_list() {
-        let content = r#"- Item with code:
-  ```
-  code here
-  ```
-- Next item"#;
-
-        let blocks = parse_markdown_blocks(content);
-        // Code block inside list should be handled
-        assert!(!blocks.is_empty());
-    }
-
-    #[test]
     fn test_small_chunks_merged() {
         let content = "Title\n\nSubtitle\n\nA longer paragraph with actual meaningful content that should stand alone.";
         let chunks = chunk_content(content);
 
-        // Small title/subtitle should merge with content
         assert!(!chunks.is_empty());
         assert!(chunks[0].contains("Title"));
     }
 
     #[test]
-    fn test_get_first_n_tokens() {
+    fn test_get_first_n_chars() {
         let text = "Hello world, this is a test sentence.";
-        let first = get_first_n_tokens(text, 3);
-        assert!(!first.is_empty());
-        assert!(first.len() < text.len());
+        let first = get_first_n_chars(text, 10);
+        assert_eq!(first.len(), 10);
+        assert_eq!(first, "Hello worl");
     }
 
     #[test]
@@ -659,7 +598,6 @@ def foo():
         let chunks = chunk_content(content);
         assert!(!chunks.is_empty());
 
-        // Check indentation preserved
         let chunk = &chunks[0];
         assert!(chunk.contains("    if True:"));
         assert!(chunk.contains("        print"));
@@ -690,12 +628,10 @@ print("second")
     #[test]
     fn test_sentence_splitting() {
         let long_text = "This is sentence one. This is sentence two! Is this sentence three? Yes it is. ".repeat(50);
-        let splits = split_block_by_sentences(&long_text, 500);
+        let splits = split_block_by_sentences(&long_text, 2000);
 
-        // Should have multiple splits
         assert!(splits.len() > 1);
 
-        // Each split should end at sentence boundary (mostly)
         for (i, split) in splits.iter().enumerate() {
             if i < splits.len() - 1 {
                 let trimmed = split.trim();
@@ -707,5 +643,43 @@ print("second")
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_hard_split_multibyte() {
+        // Ensure hard split handles multi-byte chars
+        let text = "ñ".repeat(100);
+        let splits = hard_split_by_chars(&text, 10);
+        for split in &splits {
+            assert!(split.len() <= 10 || split.len() <= "ñ".len()); // May slightly exceed due to char boundary
+        }
+    }
+
+    #[test]
+    fn test_nested_code_in_list() {
+        let content = r#"- Item with code:
+  ```
+  code here
+  ```
+- Next item"#;
+
+        let blocks = parse_markdown_blocks(content);
+
+        // The list should remain a single List block, not be split by the code block
+        let list_blocks: Vec<_> = blocks.iter()
+            .filter(|b| b.block_type == BlockType::List)
+            .collect();
+        assert_eq!(list_blocks.len(), 1, "Should be a single list block");
+
+        let list = &list_blocks[0];
+        assert!(list.content.contains("Item with code"), "List should contain first item");
+        assert!(list.content.contains("code here"), "List should contain code block");
+        assert!(list.content.contains("Next item"), "List should contain item after code");
+
+        // No standalone code blocks should be produced
+        let code_blocks: Vec<_> = blocks.iter()
+            .filter(|b| b.block_type == BlockType::CodeBlock)
+            .collect();
+        assert_eq!(code_blocks.len(), 0, "Code inside list should not produce standalone CodeBlock");
     }
 }

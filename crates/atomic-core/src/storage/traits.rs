@@ -55,6 +55,17 @@ pub trait AtomStore: Send + Sync {
         updated_at: &str,
     ) -> StorageResult<AtomWithTags>;
 
+    /// Update atom content/metadata without resetting embedding status.
+    /// Used by auto-save during inline editing. Defaults to regular update_atom.
+    async fn update_atom_content_only(
+        &self,
+        id: &str,
+        request: &UpdateAtomRequest,
+        updated_at: &str,
+    ) -> StorageResult<AtomWithTags> {
+        self.update_atom(id, request, updated_at).await
+    }
+
     /// Delete an atom and all associated data (tags, chunks, embeddings, edges).
     async fn delete_atom(&self, id: &str) -> StorageResult<()>;
 
@@ -70,6 +81,9 @@ pub trait AtomStore: Send + Sync {
     /// Get embedding status for a specific atom.
     async fn get_embedding_status(&self, atom_id: &str) -> StorageResult<String>;
 
+    /// Get tagging status for a specific atom.
+    async fn get_tagging_status(&self, atom_id: &str) -> StorageResult<String>;
+
     /// Get all atom canvas positions.
     async fn get_atom_positions(&self) -> StorageResult<Vec<AtomPosition>>;
 
@@ -82,8 +96,22 @@ pub trait AtomStore: Send + Sync {
     /// Get just the tag IDs for an atom (lightweight, no full atom fetch).
     async fn get_atom_tag_ids(&self, atom_id: &str) -> StorageResult<Vec<String>>;
 
+    /// Get distinct tag IDs for a batch of atoms in a single query.
+    async fn get_tag_ids_for_atoms_batch(&self, atom_ids: &[String]) -> StorageResult<Vec<String>> {
+        let mut all = Vec::new();
+        for id in atom_ids {
+            all.extend(self.get_atom_tag_ids(id).await?);
+        }
+        all.sort();
+        all.dedup();
+        Ok(all)
+    }
+
     /// Get just the content for an atom (lightweight, for embedding pipeline).
     async fn get_atom_content(&self, atom_id: &str) -> StorageResult<Option<String>>;
+
+    /// Get content for multiple atoms in a single query.
+    async fn get_atom_contents_batch(&self, atom_ids: &[String]) -> StorageResult<Vec<(String, String)>>;
 
     /// Check which source URLs already exist in the database.
     /// Returns the set of URLs that are already present.
@@ -91,6 +119,9 @@ pub trait AtomStore: Send + Sync {
 
     /// Check if a specific source URL already exists.
     async fn source_url_exists(&self, url: &str) -> StorageResult<bool>;
+
+    /// Get an atom by its source URL. Returns None if not found.
+    async fn get_atom_by_source_url(&self, url: &str) -> StorageResult<Option<AtomWithTags>>;
 
     /// Count atoms with pending embedding status.
     async fn count_pending_embeddings(&self) -> StorageResult<i32>;
@@ -109,6 +140,9 @@ pub trait AtomStore: Send + Sync {
 
     /// Get atom metadata for canvas display (title, primary tag, tag count) by position.
     async fn get_canvas_atom_metadata(&self) -> StorageResult<Vec<CanvasAtomPosition>>;
+
+    /// Lightweight canvas metadata: (atom_id, title, primary_tag_name, tag_count).
+    async fn get_canvas_atom_metadata_light(&self) -> StorageResult<Vec<(String, String, Option<String>, i32)>>;
 }
 
 // ==================== Tag Storage ====================
@@ -148,6 +182,17 @@ pub trait TagStore: Send + Sync {
 
     /// Delete a tag. If recursive, also deletes child tags.
     async fn delete_tag(&self, id: &str, recursive: bool) -> StorageResult<()>;
+
+    /// Mark or unmark a tag as a candidate for AI auto-tagging to extend with sub-tags.
+    async fn set_tag_autotag_target(&self, id: &str, value: bool) -> StorageResult<()>;
+
+    /// Apply a full auto-tag-target configuration in a single transaction.
+    /// See `AtomicCore::configure_autotag_targets` for semantics.
+    async fn configure_autotag_targets(
+        &self,
+        keep_default_names: &[String],
+        add_custom_names: &[String],
+    ) -> StorageResult<Vec<Tag>>;
 
     /// Get tags semantically related to a given tag (via centroid similarity).
     async fn get_related_tags(
@@ -222,13 +267,28 @@ pub trait ChunkStore: Send + Sync {
         &self,
         atom_id: &str,
         status: &str,
+        error: Option<&str>,
     ) -> StorageResult<()>;
+
+    /// Mark embedding status for multiple atoms in a single operation.
+    async fn set_embedding_status_batch(
+        &self,
+        atom_ids: &[String],
+        status: &str,
+        error: Option<&str>,
+    ) -> StorageResult<()> {
+        for id in atom_ids {
+            self.set_embedding_status(id, status, error).await?;
+        }
+        Ok(())
+    }
 
     /// Mark an atom's tagging status.
     async fn set_tagging_status(
         &self,
         atom_id: &str,
         status: &str,
+        error: Option<&str>,
     ) -> StorageResult<()>;
 
     /// Save chunks and their embeddings for an atom (replaces existing).
@@ -238,11 +298,28 @@ pub trait ChunkStore: Send + Sync {
         chunks: &[(String, Vec<f32>)], // (chunk_content, embedding)
     ) -> StorageResult<()>;
 
+    /// Save chunks and embeddings for multiple atoms in a single transaction.
+    async fn save_chunks_and_embeddings_batch(
+        &self,
+        atoms: &[(String, Vec<(String, Vec<f32>)>)],
+    ) -> StorageResult<Vec<String>> {
+        let mut succeeded = Vec::new();
+        for (atom_id, chunks) in atoms {
+            if self.save_chunks_and_embeddings(atom_id, chunks).await.is_ok() {
+                succeeded.push(atom_id.clone());
+            }
+        }
+        Ok(succeeded)
+    }
+
     /// Delete all chunks and embeddings for an atom.
     async fn delete_chunks(&self, atom_id: &str) -> StorageResult<()>;
 
     /// Reset atoms stuck in 'processing' status back to 'pending'.
     async fn reset_stuck_processing(&self) -> StorageResult<i32>;
+
+    /// Reset failed embedding atoms back to pending (for auto-retry on config fix).
+    async fn reset_failed_embeddings(&self) -> StorageResult<i32>;
 
     /// Rebuild semantic edges between all atoms with embeddings.
     async fn rebuild_semantic_edges(&self) -> StorageResult<i32>;
@@ -252,6 +329,18 @@ pub trait ChunkStore: Send + Sync {
         &self,
         min_similarity: f32,
     ) -> StorageResult<Vec<SemanticEdge>>;
+
+    /// Lightweight edge triples (source, target, score) sorted by score DESC.
+    async fn get_semantic_edges_raw(
+        &self,
+        min_similarity: f32,
+    ) -> StorageResult<Vec<(String, String, f32)>> {
+        // Default: extract from full edges
+        let edges = self.get_semantic_edges(min_similarity).await?;
+        Ok(edges.into_iter()
+            .map(|e| (e.source_atom_id, e.target_atom_id, e.similarity_score))
+            .collect())
+    }
 
     /// Get the local neighborhood graph around an atom.
     async fn get_atom_neighborhood(
@@ -295,6 +384,21 @@ pub trait ChunkStore: Send + Sync {
         max_edges: i32,
     ) -> StorageResult<i32>;
 
+    /// Compute semantic edges for a batch of atoms in a single transaction.
+    async fn compute_semantic_edges_batch(
+        &self,
+        atom_ids: &[String],
+        threshold: f32,
+        max_edges: i32,
+    ) -> StorageResult<i32> {
+        // Default implementation: process one at a time
+        let mut total = 0;
+        for atom_id in atom_ids {
+            total += self.compute_semantic_edges_for_atom(atom_id, threshold, max_edges).await?;
+        }
+        Ok(total)
+    }
+
     /// Rebuild the full-text search index (SQLite: FTS5 rebuild, Postgres: no-op since tsvector is auto-maintained).
     async fn rebuild_fts_index(&self) -> StorageResult<()>;
 
@@ -311,12 +415,26 @@ pub trait ChunkStore: Send + Sync {
     async fn recreate_vector_index(&self, dimension: usize) -> StorageResult<()>;
 
     /// Claim pending/processing atoms for re-embedding after dimension change.
-    /// Sets status to 'processing' and returns (atom_id, content) pairs.
-    async fn claim_pending_reembedding(&self) -> StorageResult<Vec<(String, String)>>;
+    /// Sets status to 'processing' and returns atom IDs.
+    async fn claim_pending_reembedding(&self) -> StorageResult<Vec<String>>;
 
     /// Claim ALL atoms for re-embedding regardless of current status.
-    /// Sets status to 'processing' and returns (atom_id, content) pairs.
-    async fn claim_all_for_reembedding(&self) -> StorageResult<Vec<(String, String)>>;
+    /// Sets status to 'processing' and returns atom IDs.
+    async fn claim_all_for_reembedding(&self) -> StorageResult<Vec<String>>;
+
+    /// Atomically claim atoms that need edge computation: sets edges_status to 'processing'
+    /// and returns their IDs.
+    async fn claim_pending_edges(&self, limit: i32) -> StorageResult<Vec<String>>;
+
+    /// Mark edges_status for a batch of atoms.
+    async fn set_edges_status_batch(
+        &self,
+        atom_ids: &[String],
+        status: &str,
+    ) -> StorageResult<()>;
+
+    /// Count atoms with pending edge computation.
+    async fn count_pending_edges(&self) -> StorageResult<i32>;
 }
 
 // ==================== Search Storage ====================
@@ -547,6 +665,59 @@ pub trait WikiStore: Send + Sync {
         last_update: &str,
         max_source_tokens: usize,
     ) -> StorageResult<Option<(Vec<ChunkWithContext>, i32)>>;
+
+    /// Save a wiki proposal (upsert — supersedes any existing proposal for the tag).
+    async fn save_wiki_proposal(&self, proposal: &WikiProposal) -> StorageResult<()>;
+
+    /// Get the pending wiki proposal for a tag, if any.
+    async fn get_wiki_proposal(&self, tag_id: &str) -> StorageResult<Option<WikiProposal>>;
+
+    /// Delete the pending wiki proposal for a tag (idempotent).
+    async fn delete_wiki_proposal(&self, tag_id: &str) -> StorageResult<()>;
+}
+
+// ==================== Briefing Storage ====================
+
+/// Storage operations for daily briefings (the scheduled-task briefing feature).
+#[async_trait]
+pub trait BriefingStore: Send + Sync {
+    /// Fetch up to `limit` atoms with `created_at > since`, newest first.
+    async fn list_new_atoms_since(
+        &self,
+        since: &str,
+        limit: i32,
+    ) -> StorageResult<Vec<AtomWithTags>>;
+
+    /// Count atoms with `created_at > since`.
+    async fn count_new_atoms_since(&self, since: &str) -> StorageResult<i32>;
+
+    /// Insert a new briefing plus its citations. Returns the briefing joined
+    /// with citations (citations have `source_url` populated via JOIN).
+    async fn insert_briefing(
+        &self,
+        briefing: &crate::briefing::Briefing,
+        citations: &[crate::briefing::BriefingCitation],
+    ) -> StorageResult<crate::briefing::BriefingWithCitations>;
+
+    /// Fetch the most recent briefing (joined with citations).
+    async fn get_latest_briefing(
+        &self,
+    ) -> StorageResult<Option<crate::briefing::BriefingWithCitations>>;
+
+    /// Fetch a specific briefing by id (joined with citations).
+    async fn get_briefing(
+        &self,
+        id: &str,
+    ) -> StorageResult<Option<crate::briefing::BriefingWithCitations>>;
+
+    /// List recent briefings (without citations) for a lightweight history view.
+    async fn list_briefings(
+        &self,
+        limit: i32,
+    ) -> StorageResult<Vec<crate::briefing::Briefing>>;
+
+    /// Delete a briefing by id. Briefing citations cascade.
+    async fn delete_briefing(&self, id: &str) -> StorageResult<()>;
 }
 
 // ==================== Feed Storage ====================
@@ -649,6 +820,14 @@ pub trait ClusterStore: Send + Sync {
         parent_id: Option<&str>,
         children_hint: Option<Vec<String>>,
     ) -> StorageResult<CanvasLevel>;
+
+    /// Enrich clusters (computed without DB) with dominant tag names.
+    async fn enrich_clusters_with_tags(
+        &self,
+        clusters: Vec<AtomCluster>,
+    ) -> StorageResult<Vec<AtomCluster>> {
+        Ok(clusters)
+    }
 }
 
 // ==================== Settings Storage ====================
@@ -740,6 +919,7 @@ pub trait Storage:
     + SearchStore
     + ChatStore
     + WikiStore
+    + BriefingStore
     + FeedStore
     + ClusterStore
     + SettingsStore

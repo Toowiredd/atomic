@@ -2,17 +2,32 @@
 //!
 //! This module handles automatic tag extraction from atom content.
 
-use crate::providers::traits::LlmConfig;
-use crate::providers::types::{GenerationParams, Message, StructuredOutputSchema};
-use crate::providers::{get_llm_provider, ProviderConfig};
+use crate::providers::structured::{call_structured, StructuredCall};
+use crate::providers::types::{GenerationParams, Message};
+use crate::providers::ProviderConfig;
 use rusqlite::Connection;
 use serde::Deserialize;
 use std::sync::{LazyLock, Mutex};
 
-// Extraction result types
+/// Tag extraction response shape. Accepts both the schema-enforced wrapped
+/// form `{"tags": [...]}` and a bare array `[...]` — some local/OSS providers
+/// routed via OpenRouter (or Ollama directly) return the bare form even when
+/// given an object schema. Serde's `untagged` attribute tries each variant
+/// in order so either shape deserializes into the same value.
 #[derive(Debug, Clone, Deserialize)]
-pub struct ExtractionResult {
-    pub tags: Vec<TagApplication>,
+#[serde(untagged)]
+enum ExtractionResult {
+    Wrapped { tags: Vec<TagApplication> },
+    Bare(Vec<TagApplication>),
+}
+
+impl ExtractionResult {
+    fn into_tags(self) -> Vec<TagApplication> {
+        match self {
+            ExtractionResult::Wrapped { tags } => tags,
+            ExtractionResult::Bare(tags) => tags,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -108,25 +123,107 @@ Tags help users navigate and filter their content. Users can browse by tag and g
 
 IMPORTANT:
 - Each tag MUST have a parent_name set to one of the existing top-level categories shown below
-- DO NOT create new top-level categories - only use the ones provided
+- DO NOT create new top-level categories - only use the ones the user has provided below
 - Tag names are case-insensitive and globally unique
 
-The tags listed below are a sample of commonly-used tags included as a point of reference for the kinds of tags in this system.
+The user has chosen which top-level categories the auto-tagger may extend. They are listed below along with a sample of existing sub-tags under each, as a point of reference for the kinds of tags in this system.
 
 HIERARCHY STRUCTURE:
 - Level 1: Categories (shown below) - use ONLY these existing categories as parent_name
-- Level 2: Specific tags (e.g., "AI", "John Smith", "San Francisco")
+- Level 2: Specific tags you create under those categories
 - Maximum 2 levels - no deeper nesting
 
-EXAMPLES:
-- {"name": "AI", "parent_name": "Topics"}
-- {"name": "Machine Learning", "parent_name": "Topics"}
-- {"name": "San Francisco", "parent_name": "Locations"}
+RESPONSE FORMAT:
+Return a JSON object with a "tags" array. Each tag is an object with "name" and "parent_name", where parent_name is one of the categories shown below:
+{"tags": [{"name": "<specific tag>", "parent_name": "<category from the list below>"}]}
 
 Guidelines:
-- Create new Level 2 tags under existing categories when needed
-- Prefer broad tags like "John Smith" rather than overly specific tags such as "Early Life of John Smith"
-- Every tag must have a valid parent_name from the top-level categories"#;
+- Create new Level 2 tags under the user's existing categories when needed
+- Prefer broad tags rather than overly specific ones (e.g., "John Smith" instead of "Early Life of John Smith")
+- Every tag must have a valid parent_name from the top-level categories listed below
+- If none of the categories below feel like a natural fit for the content, return an empty tag list rather than forcing a poor match"#;
+
+/// JSON schema for tag extraction calls. Shared by `extract_tags_from_content`
+/// and `extract_tags_from_chunk`. Kept portable: all properties required,
+/// `additionalProperties: false`, no unions. See `providers::structured::lint_schema`
+/// for the full portability rule set.
+pub(crate) fn extraction_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "tags": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Name of the tag to apply"
+                        },
+                        "parent_name": {
+                            "type": "string",
+                            "description": "Name of parent tag, or empty string for top-level categories"
+                        }
+                    },
+                    "required": ["name", "parent_name"],
+                    "additionalProperties": false
+                },
+                "description": "Tags to apply to this text"
+            }
+        },
+        "required": ["tags"],
+        "additionalProperties": false
+    })
+}
+
+/// JSON schema for tag consolidation calls.
+pub(crate) fn consolidation_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "tags_to_remove": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Names of tags to remove"
+            },
+            "tags_to_add": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Name of the tag to add"
+                        },
+                        "parent_name": {
+                            "type": "string",
+                            "description": "Name of parent tag, or empty string for top-level categories"
+                        }
+                    },
+                    "required": ["name", "parent_name"],
+                    "additionalProperties": false
+                },
+                "description": "New broader tags to create and add"
+            }
+        },
+        "required": ["tags_to_remove", "tags_to_add"],
+        "additionalProperties": false
+    })
+}
+
+/// Build the shared generation params for extraction calls. Temperature 0.1
+/// (tag-picking is nearly deterministic), reasoning minimized, optional
+/// `supported_params` threaded through so we don't send fields the router's
+/// downstream provider doesn't accept.
+fn extraction_params(supported_params: Option<Vec<String>>) -> GenerationParams {
+    let mut params = GenerationParams::new()
+        .with_temperature(0.1)
+        .with_minimize_reasoning(true);
+    if let Some(supported) = supported_params {
+        params = params.with_supported_parameters(supported);
+    }
+    params
+}
 
 /// Default maximum characters to send for tagging (~30K tokens ≈ 120K chars)
 const DEFAULT_MAX_TAGGING_CHARS: usize = 120_000;
@@ -162,7 +259,7 @@ pub async fn extract_tags_from_content(
     tag_tree_json: &str,
     model: &str,
     supported_params: Option<Vec<String>>,
-) -> Result<ExtractionResult, String> {
+) -> Result<Vec<TagApplication>, String> {
     // Truncate based on provider's context length
     let max_chars = max_tagging_chars(provider_config, tag_tree_json, model);
     let text = if content.len() > max_chars {
@@ -181,87 +278,25 @@ pub async fn extract_tags_from_content(
         tag_tree_json, text
     );
 
-    let schema = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "tags": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {
-                            "type": "string",
-                            "description": "Name of the tag to apply"
-                        },
-                        "parent_name": {
-                            "type": "string",
-                            "description": "Name of parent tag, or empty string for top-level categories"
-                        }
-                    },
-                    "required": ["name", "parent_name"],
-                    "additionalProperties": false
-                },
-                "description": "Tags to apply to this text"
-            }
-        },
-        "required": ["tags"],
-        "additionalProperties": false
-    });
-
     let messages = vec![Message::system(SYSTEM_PROMPT), Message::user(user_content)];
 
-    let mut params = GenerationParams::new()
-        .with_temperature(0.1)
-        .with_structured_output(StructuredOutputSchema::new("extraction_result", schema))
-        .with_minimize_reasoning(true);
+    let call = StructuredCall::<ExtractionResult>::new(
+        provider_config,
+        model,
+        &messages,
+        "extraction_result",
+        extraction_schema(),
+    )
+    .with_params(extraction_params(supported_params))
+    .with_max_retries(3);
 
-    if let Some(supported) = supported_params {
-        params = params.with_supported_parameters(supported);
-    }
-
-    let llm_config = LlmConfig::new(model).with_params(params);
-
-    let provider = get_llm_provider(provider_config).map_err(|e| e.to_string())?;
-
-    // Retry logic with exponential backoff
-    let mut last_error = String::new();
-    for attempt in 0..3 {
-        if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
-        }
-
-        match provider.complete(&messages, &llm_config).await {
-            Ok(response) => {
-                let response_content = &response.content;
-                if !response_content.is_empty() {
-                    tracing::debug!(output = %response_content, "TAG EXTRACTION LLM OUTPUT");
-
-                    let result: ExtractionResult = serde_json::from_str(response_content).map_err(|e| {
-                        format!(
-                            "Failed to parse extraction result: {} - Content: {}",
-                            e, response_content
-                        )
-                    })?;
-                    return Ok(result);
-                }
-                return Err("No content in response".to_string());
-            }
-            Err(e) => {
-                let err_str = e.to_string();
-                if e.is_retryable() {
-                    tracing::warn!(attempt = attempt + 1, max_attempts = 3, model = %model, error = %err_str, "Tag extraction LLM call failed (retryable)");
-                    last_error = err_str;
-                    continue;
-                } else {
-                    tracing::error!(model = %model, error = %err_str, "Tag extraction LLM call failed (non-retryable)");
-                    last_error = err_str;
-                    break;
-                }
-            }
+    match call_structured::<ExtractionResult>(call).await {
+        Ok(result) => Ok(result.into_tags()),
+        Err(e) => {
+            tracing::error!(model = %model, error = %e, "Tag extraction failed");
+            Err(e.to_compact_string())
         }
     }
-
-    Err(last_error)
 }
 
 /// Extract tags from a single chunk using LLM provider
@@ -271,96 +306,31 @@ pub async fn extract_tags_from_chunk(
     tag_tree_json: &str,
     model: &str,
     supported_params: Option<Vec<String>>,
-) -> Result<ExtractionResult, String> {
+) -> Result<Vec<TagApplication>, String> {
     let user_content = format!(
         "EXISTING TAG HIERARCHY:\n{}\n\nTEXT TO ANALYZE:\n{}",
         tag_tree_json, chunk_content
     );
 
-    let schema = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "tags": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {
-                            "type": "string",
-                            "description": "Name of the tag to apply"
-                        },
-                        "parent_name": {
-                            "type": "string",
-                            "description": "Name of parent tag, or empty string for top-level categories"
-                        }
-                    },
-                    "required": ["name", "parent_name"],
-                    "additionalProperties": false
-                },
-                "description": "Tags to apply to this text"
-            }
-        },
-        "required": ["tags"],
-        "additionalProperties": false
-    });
-
     let messages = vec![Message::system(SYSTEM_PROMPT), Message::user(user_content)];
 
-    let mut params = GenerationParams::new()
-        .with_temperature(0.1)
-        .with_structured_output(StructuredOutputSchema::new("extraction_result", schema))
-        .with_minimize_reasoning(true); // Speed up reasoning models for simple tag extraction
+    let call = StructuredCall::<ExtractionResult>::new(
+        provider_config,
+        model,
+        &messages,
+        "extraction_result",
+        extraction_schema(),
+    )
+    .with_params(extraction_params(supported_params))
+    .with_max_retries(3);
 
-    if let Some(supported) = supported_params {
-        params = params.with_supported_parameters(supported);
-    }
-
-    let llm_config = LlmConfig::new(model).with_params(params);
-
-    let provider = get_llm_provider(provider_config).map_err(|e| e.to_string())?;
-
-    // Retry logic with exponential backoff
-    let mut last_error = String::new();
-    for attempt in 0..3 {
-        if attempt > 0 {
-            // Exponential backoff: 1s, 2s, 4s
-            tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
-        }
-
-        match provider.complete(&messages, &llm_config).await {
-            Ok(response) => {
-                let content = &response.content;
-                if !content.is_empty() {
-                    tracing::debug!(output = %content, "TAG EXTRACTION LLM OUTPUT");
-
-                    // Parse the extraction result from the content
-                    let result: ExtractionResult = serde_json::from_str(content).map_err(|e| {
-                        format!(
-                            "Failed to parse extraction result: {} - Content: {}",
-                            e, content
-                        )
-                    })?;
-                    return Ok(result);
-                }
-                return Err("No content in response".to_string());
-            }
-            Err(e) => {
-                let err_str = e.to_string();
-                if e.is_retryable() {
-                    tracing::warn!(attempt = attempt + 1, max_attempts = 3, model = %model, error = %err_str, "Tag extraction (chunk) LLM call failed (retryable)");
-                    last_error = err_str;
-                    continue;
-                } else {
-                    tracing::error!(model = %model, error = %err_str, "Tag extraction (chunk) LLM call failed (non-retryable)");
-                    // Don't retry on non-retryable errors
-                    last_error = err_str;
-                    break;
-                }
-            }
+    match call_structured::<ExtractionResult>(call).await {
+        Ok(result) => Ok(result.into_tags()),
+        Err(e) => {
+            tracing::error!(model = %model, error = %e, "Tag extraction (chunk) failed");
+            Err(e.to_compact_string())
         }
     }
-
-    Err(last_error)
 }
 
 /// Get simplified tag tree for LLM (tree format like `tree` CLI)
@@ -371,9 +341,11 @@ pub async fn extract_tags_from_chunk(
 /// 2. For each category, shows only the top 10 most-used child tags (by atom count)
 /// 3. Excludes any tags at Level 3 or deeper
 pub fn get_tag_tree_for_llm(conn: &Connection) -> Result<String, String> {
-    // Step 1: Get top-level category tags
+    // Step 1: Get top-level category tags flagged as auto-tag targets.
+    // Tags without is_autotag_target = 1 are intentionally excluded so the
+    // auto-tagger only extends categories the user has opted into.
     let mut top_level_stmt = conn
-        .prepare("SELECT id, name FROM tags WHERE parent_id IS NULL ORDER BY name")
+        .prepare("SELECT id, name FROM tags WHERE parent_id IS NULL AND is_autotag_target = 1 ORDER BY name")
         .map_err(|e| format!("Failed to prepare top-level tag query: {}", e))?;
 
     let top_level_tags: Vec<(String, String)> = top_level_stmt
@@ -637,111 +609,95 @@ pub async fn consolidate_atom_tags(
         tag_info
     );
 
-    let schema = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "tags_to_remove": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Names of tags to remove"
-            },
-            "tags_to_add": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {
-                            "type": "string",
-                            "description": "Name of the tag to add"
-                        },
-                        "parent_name": {
-                            "type": "string",
-                            "description": "Name of parent tag, or empty string for top-level categories"
-                        }
-                    },
-                    "required": ["name", "parent_name"],
-                    "additionalProperties": false
-                },
-                "description": "New broader tags to create and add"
-            }
-        },
-        "required": ["tags_to_remove", "tags_to_add"],
-        "additionalProperties": false
-    });
-
     let messages = vec![
         Message::system(TAG_CONSOLIDATION_PROMPT),
         Message::user(user_content),
     ];
 
-    let mut params = GenerationParams::new()
-        .with_temperature(0.1)
-        .with_structured_output(StructuredOutputSchema::new("consolidation_result", schema))
-        .with_minimize_reasoning(true); // Speed up reasoning models for simple consolidation
+    let call = StructuredCall::<TagConsolidationResult>::new(
+        provider_config,
+        model,
+        &messages,
+        "consolidation_result",
+        consolidation_schema(),
+    )
+    .with_params(extraction_params(supported_params))
+    .with_max_retries(3);
 
-    if let Some(supported) = supported_params {
-        params = params.with_supported_parameters(supported);
-    }
-
-    let llm_config = LlmConfig::new(model).with_params(params);
-
-    let provider = get_llm_provider(provider_config).map_err(|e| e.to_string())?;
-
-    // Retry logic with exponential backoff
-    let mut last_error = String::new();
-    for attempt in 0..3 {
-        if attempt > 0 {
-            // Exponential backoff: 1s, 2s, 4s
-            tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
-        }
-
-        match provider.complete(&messages, &llm_config).await {
-            Ok(response) => {
-                let content = &response.content;
-                if !content.is_empty() {
-                    tracing::debug!(output = %content, "TAG CONSOLIDATION LLM OUTPUT");
-
-                    // Parse the consolidation result from the content
-                    let result: TagConsolidationResult =
-                        serde_json::from_str(content).map_err(|e| {
-                            format!(
-                                "Failed to parse consolidation result: {} - Content: {}",
-                                e, content
-                            )
-                        })?;
-                    return Ok(result);
-                }
-                return Err("No content in response".to_string());
-            }
-            Err(e) => {
-                let err_str = e.to_string();
-                if e.is_retryable() {
-                    tracing::warn!(attempt = attempt + 1, max_attempts = 3, model = %model, error = %err_str, "Tag consolidation LLM call failed (retryable)");
-                    last_error = err_str;
-                    continue;
-                } else {
-                    tracing::error!(model = %model, error = %err_str, "Tag consolidation LLM call failed (non-retryable)");
-                    // Don't retry on non-retryable errors
-                    last_error = err_str;
-                    break;
-                }
-            }
+    match call_structured::<TagConsolidationResult>(call).await {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            tracing::error!(model = %model, error = %e, "Tag consolidation failed");
+            Err(e.to_compact_string())
         }
     }
-
-    Err(last_error)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::Database;
+    use crate::providers::structured::lint_schema;
     use tempfile::NamedTempFile;
 
     fn create_test_db() -> (Database, NamedTempFile) {
         let temp_file = NamedTempFile::new().unwrap();
         let db = Database::open_or_create(temp_file.path()).unwrap();
         (db, temp_file)
+    }
+
+    // ==================== Schema lint regression tests ====================
+
+    #[test]
+    fn lint_extraction_schema_is_portable() {
+        lint_schema(&extraction_schema())
+            .expect("extraction_schema must be portable across providers");
+    }
+
+    #[test]
+    fn lint_consolidation_schema_is_portable() {
+        lint_schema(&consolidation_schema())
+            .expect("consolidation_schema must be portable across providers");
+    }
+
+    // ==================== ExtractionResult shape tolerance ====================
+    //
+    // Some providers return the schema-enforced wrapped form `{"tags": [...]}`
+    // while others (notably Ollama-hosted and some OpenRouter-routed OSS
+    // models) return a bare array `[...]`. The untagged serde enum should
+    // accept both, and `into_tags()` should flatten either into the same
+    // `Vec<TagApplication>`.
+
+    #[test]
+    fn extraction_result_accepts_wrapped_form() {
+        let json = r#"{"tags":[{"name":"AI","parent_name":"Topics"}]}"#;
+        let result: ExtractionResult = serde_json::from_str(json).unwrap();
+        let tags = result.into_tags();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].name, "AI");
+    }
+
+    #[test]
+    fn extraction_result_accepts_bare_array_form() {
+        let json = r#"[{"name":"AI","parent_name":"Topics"}]"#;
+        let result: ExtractionResult = serde_json::from_str(json).unwrap();
+        let tags = result.into_tags();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].name, "AI");
+    }
+
+    #[test]
+    fn extraction_result_accepts_empty_wrapped() {
+        let json = r#"{"tags":[]}"#;
+        let result: ExtractionResult = serde_json::from_str(json).unwrap();
+        assert!(result.into_tags().is_empty());
+    }
+
+    #[test]
+    fn extraction_result_accepts_empty_bare() {
+        let json = "[]";
+        let result: ExtractionResult = serde_json::from_str(json).unwrap();
+        assert!(result.into_tags().is_empty());
     }
 
     // ==================== Tag Tree Generation Tests ====================
@@ -760,16 +716,16 @@ mod tests {
         let (db, _temp) = create_test_db();
         let conn = db.conn.lock().unwrap();
 
-        // Create a top-level tag
+        // Create a top-level tag flagged as an auto-tag target
         let tag_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO tags (id, name, parent_id, created_at) VALUES (?1, ?2, NULL, ?3)",
+            "INSERT INTO tags (id, name, parent_id, created_at, is_autotag_target) VALUES (?1, ?2, NULL, ?3, 1)",
             rusqlite::params![&tag_id, "Topics", &now],
         )
         .unwrap();
 
-        // Create a child tag
+        // Create a child tag (children inherit visibility via the parent filter)
         let child_id = uuid::Uuid::new_v4().to_string();
         conn.execute(
             "INSERT INTO tags (id, name, parent_id, created_at) VALUES (?1, ?2, ?3, ?4)",
@@ -782,6 +738,26 @@ mod tests {
         // Should have tree format
         assert!(result.contains("Topics"), "Should contain parent tag");
         assert!(result.contains("AI"), "Should contain child tag");
+    }
+
+    #[test]
+    fn test_get_tag_tree_for_llm_excludes_unflagged_top_level() {
+        let (db, _temp) = create_test_db();
+        let conn = db.conn.lock().unwrap();
+
+        // Create a top-level tag NOT flagged as an auto-tag target
+        let tag_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO tags (id, name, parent_id, created_at, is_autotag_target) VALUES (?1, ?2, NULL, ?3, 0)",
+            rusqlite::params![&tag_id, "Imported Folder", &now],
+        )
+        .unwrap();
+
+        let result = get_tag_tree_for_llm(&conn).unwrap();
+
+        // Unflagged tags must not appear; with no flagged tags the sentinel is returned
+        assert_eq!(result, "(no existing tags)");
     }
 
     // ==================== Tag Name Lookup Tests ====================

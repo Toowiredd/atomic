@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { Filter, X, ArrowDownUp } from 'lucide-react';
 import { useAtomsStore, SourceFilterType, SortField, SortOrder } from '../../stores/atoms';
 
 const SORT_OPTIONS: { field: SortField; order: SortOrder; label: string }[] = [
@@ -77,9 +78,7 @@ export function FilterBar() {
             onClick={() => { setShowSourceDropdown(!showSourceDropdown); setShowSortDropdown(false); }}
             className="flex items-center gap-1 text-xs px-2 py-1 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
           >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
-            </svg>
+            <Filter className="w-3.5 h-3.5" strokeWidth={2} />
             Filter
           </button>
 
@@ -139,9 +138,7 @@ export function FilterBar() {
             className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-[var(--color-accent)]/15 text-[var(--color-accent-light)] hover:bg-[var(--color-accent)]/25 transition-colors"
           >
             {sourceFilter === 'manual' ? 'Manual' : 'External'}
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <X className="w-3 h-3" strokeWidth={2} />
           </button>
         )}
 
@@ -151,9 +148,7 @@ export function FilterBar() {
             className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-[var(--color-accent)]/15 text-[var(--color-accent-light)] hover:bg-[var(--color-accent)]/25 transition-colors truncate max-w-[200px]"
           >
             {sourceValue}
-            <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <X className="w-3 h-3 shrink-0" strokeWidth={2} />
           </button>
         )}
 
@@ -174,9 +169,7 @@ export function FilterBar() {
           onClick={() => { setShowSortDropdown(!showSortDropdown); setShowSourceDropdown(false); }}
           className="flex items-center gap-1 text-xs px-2 py-1 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
         >
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12" />
-          </svg>
+          <ArrowDownUp className="w-3.5 h-3.5" strokeWidth={2} />
           {currentSort.label}
         </button>
 

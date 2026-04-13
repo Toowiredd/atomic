@@ -20,6 +20,8 @@ pub struct Atom {
     pub updated_at: String,
     pub embedding_status: String, // 'pending', 'processing', 'complete', 'failed'
     pub tagging_status: String,   // 'pending', 'processing', 'complete', 'failed', 'skipped'
+    pub embedding_error: Option<String>,
+    pub tagging_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +31,7 @@ pub struct Tag {
     pub name: String,
     pub parent_id: Option<String>,
     pub created_at: String,
+    pub is_autotag_target: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +75,8 @@ pub struct AtomSummary {
     pub updated_at: String,
     pub embedding_status: String,
     pub tagging_status: String,
+    pub embedding_error: Option<String>,
+    pub tagging_error: Option<String>,
     pub tags: Vec<Tag>,
 }
 
@@ -171,6 +176,12 @@ pub struct WikiCitation {
     pub atom_id: String,
     pub chunk_index: Option<i32>,
     pub excerpt: String,
+    /// The cited atom's source URL (e.g. `obsidian://VaultName/path.md`,
+    /// `https://...`, or null for atoms without a source). Joined from `atoms` at read time;
+    /// not stored on the `wiki_citations` row. `#[serde(default)]` keeps backward compatibility
+    /// with proposals serialized before this field existed.
+    #[serde(default)]
+    pub source_url: Option<String>,
 }
 
 /// Wiki article with all its citations
@@ -179,6 +190,34 @@ pub struct WikiCitation {
 pub struct WikiArticleWithCitations {
     pub article: WikiArticle,
     pub citations: Vec<WikiCitation>,
+}
+
+/// A pending proposal to update a wiki article.
+///
+/// Proposals are transient: at most one exists per `tag_id` at a time.
+/// Supersede = INSERT OR REPLACE. Accept promotes to `wiki_articles` (via the
+/// normal save path, which archives the prior version into
+/// `wiki_article_versions`) and deletes the proposal row. Dismiss just deletes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct WikiProposal {
+    pub id: String,
+    pub tag_id: String,
+    /// `wiki_articles.id` this was computed from — used to detect staleness on accept.
+    pub base_article_id: String,
+    /// `wiki_articles.updated_at` at propose time. If the live article's
+    /// `updated_at` has moved past this value by the time the user accepts,
+    /// the proposal is stale and the accept is rejected.
+    pub base_updated_at: String,
+    /// The merged article content (applier output).
+    pub content: String,
+    /// Citations extracted from `content`.
+    pub citations: Vec<WikiCitation>,
+    /// The section operations the LLM emitted, stored for debuggability.
+    pub ops: Vec<crate::wiki::WikiSectionOp>,
+    /// Number of new atoms incorporated into the proposal.
+    pub new_atom_count: i32,
+    pub created_at: String,
 }
 
 /// Status of a wiki article for quick checks
@@ -629,99 +668,36 @@ pub struct SourceInfo {
     pub atom_count: i32,
 }
 
-// ==================== Insights / Discovery Types ====================
+// ==================== Pipeline Status ====================
 
-/// An atom that has no or very few semantic connections in the knowledge graph,
-/// suggesting an unexplored area of knowledge.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct IsolatedAtom {
+/// Result of changing a provider-related setting
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingChangeResult {
+    pub dimension_changed: bool,
+    pub old_dim: usize,
+    pub new_dim: usize,
+    pub total_atom_count: i32,
+    pub retried_failed_count: i32,
+}
+
+/// Embedding/tagging pipeline status summary
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineStatus {
+    pub pending: i32,
+    pub processing: i32,
+    pub complete: i32,
+    pub failed_count: i32,
+    pub failed: Vec<FailedAtom>,
+    pub tagging_failed_count: i32,
+    pub tagging_failed: Vec<FailedAtom>,
+}
+
+/// An atom that failed embedding or tagging
+#[derive(Debug, Clone, Serialize)]
+pub struct FailedAtom {
     pub atom_id: String,
     pub title: String,
     pub snippet: String,
-    pub connection_count: i32,
-    pub created_at: String,
-}
-
-/// A tag with very few atoms, suggesting an underexplored topic area.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct SparseTag {
-    pub tag_id: String,
-    pub tag_name: String,
-    pub atom_count: i32,
-    pub parent_name: Option<String>,
-}
-
-/// An atom that acts as a bridge between otherwise disconnected parts of the
-/// knowledge graph — high-value integrative knowledge.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct BridgeAtom {
-    pub atom_id: String,
-    pub title: String,
-    pub snippet: String,
-    /// Number of distinct clusters this atom connects.
-    pub cluster_span: i32,
-    /// IDs of the clusters this atom bridges.
-    pub bridged_cluster_ids: Vec<i32>,
-}
-
-/// Results from a knowledge-gap analysis of the semantic graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct KnowledgeGapsResult {
-    /// Atoms with no or very few semantic connections (unexplored islands).
-    pub isolated_atoms: Vec<IsolatedAtom>,
-    /// Tags with very few atoms (areas needing more depth).
-    pub sparse_tags: Vec<SparseTag>,
-    /// Atoms that bridge otherwise disconnected clusters (integrative hubs).
-    pub bridge_atoms: Vec<BridgeAtom>,
-}
-
-/// A single step in a serendipity walk through the knowledge graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct SerendipityStep {
-    pub atom_id: String,
-    pub title: String,
-    pub snippet: String,
-    /// How this atom connects to the previous step.
-    pub connection_reason: String,
-    /// Similarity score to the previous atom (0.0–1.0), None for the start atom.
-    pub similarity_to_prev: Option<f32>,
-    pub depth: i32,
-}
-
-/// Results from a serendipity walk — a path of unexpected-but-related atoms.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct SerendipityWalkResult {
-    pub start_atom_id: String,
-    pub steps: Vec<SerendipityStep>,
-}
-
-/// A pair of atoms surfaced by the time-capsule feature: an old atom that is
-/// semantically relevant to a recently added atom.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct TimeCapsulePair {
-    pub old_atom_id: String,
-    pub old_atom_title: String,
-    pub old_atom_snippet: String,
-    pub old_atom_created_at: String,
-    pub new_atom_id: String,
-    pub new_atom_title: String,
-    pub new_atom_snippet: String,
-    pub new_atom_created_at: String,
-    pub similarity_score: f32,
-}
-
-/// Results from the time-capsule feature.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct TimeCapsuleResult {
-    pub pairs: Vec<TimeCapsulePair>,
-    /// How many days back "old" atoms were drawn from.
-    pub lookback_days: i32,
+    pub error: Option<String>,
+    pub updated_at: String,
 }

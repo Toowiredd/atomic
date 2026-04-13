@@ -12,7 +12,7 @@ use crate::providers::{create_streaming_llm_provider, ProviderConfig, ProviderTy
 use crate::search::{SearchMode, SearchOptions};
 use crate::storage::StorageBackend;
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -46,6 +46,12 @@ pub enum ChatEvent {
     Complete {
         conversation_id: String,
         message: ChatMessageWithContext,
+    },
+    /// Canvas action requested by the agent (executed on frontend)
+    CanvasAction {
+        conversation_id: String,
+        action: String,
+        params: serde_json::Value,
     },
     /// Error during chat
     Error {
@@ -92,6 +98,83 @@ fn get_tools() -> Vec<ToolDefinition> {
             }),
         ),
     ]
+}
+
+// ==================== Canvas Context ====================
+
+/// Context about the canvas state, passed from the frontend when chatting from the canvas.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CanvasContext {
+    pub clusters: Vec<CanvasClusterSummary>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CanvasClusterSummary {
+    pub label: String,
+    pub atom_count: i32,
+}
+
+fn get_canvas_tools() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition::new(
+            "zoom_to_cluster",
+            "Zoom the canvas camera to center on a single cluster of related atoms. The canvas can only show one view at a time — each call replaces the previous view. Use this when the user asks about a topic area visible on their knowledge graph.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "cluster_label": {
+                        "type": "string",
+                        "description": "The label of the cluster to zoom to"
+                    }
+                },
+                "required": ["cluster_label"]
+            }),
+        ),
+        ToolDefinition::new(
+            "focus_atom",
+            "Zoom to a specific atom on the canvas and show its preview. The canvas can only focus on one atom at a time. Use this after searching to highlight a specific result on the graph.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "atom_id": {
+                        "type": "string",
+                        "description": "The ID of the atom to focus on"
+                    }
+                },
+                "required": ["atom_id"]
+            }),
+        ),
+    ]
+}
+
+const MAX_CANVAS_CLUSTERS: usize = 30;
+
+fn get_canvas_system_prompt(ctx: &CanvasContext) -> String {
+    // Take the largest clusters by atom count
+    let mut sorted: Vec<&CanvasClusterSummary> = ctx.clusters.iter().collect();
+    sorted.sort_by(|a, b| b.atom_count.cmp(&a.atom_count));
+    let cluster_list: Vec<String> = sorted
+        .iter()
+        .take(MAX_CANVAS_CLUSTERS)
+        .map(|c| format!("- \"{}\" ({} atoms)", c.label, c.atom_count))
+        .collect();
+    format!(
+        r#"
+
+You are also viewing the user's knowledge graph canvas. The following topic clusters are visible:
+{}
+
+You have canvas interaction tools available:
+- zoom_to_cluster: Animate the camera to center on a cluster. Use when discussing a topic area.
+- focus_atom: Zoom to a specific atom and show its preview. Use after searching to highlight results on the canvas.
+
+The canvas shows a single view at a time — each navigation call replaces the previous one. If the user asks about multiple clusters or atoms, pick the most relevant one or navigate sequentially, not simultaneously.
+
+Use these tools proactively when they would help the user navigate their knowledge visually."#,
+        cluster_list.join("\n")
+    )
 }
 
 // ==================== Tool Execution ====================
@@ -318,13 +401,17 @@ async fn run_agent_loop<F>(
     model: String,
     mut ctx: AgentContext,
     external_settings: Option<std::collections::HashMap<String, String>>,
+    canvas_context: Option<&CanvasContext>,
 ) -> Result<ChatMessageWithContext, String>
 where
     F: Fn(ChatEvent) + Send + Sync,
 {
     let provider = create_streaming_llm_provider(&provider_config)
         .map_err(|e| format!("Failed to create streaming provider: {}", e))?;
-    let tools = get_tools();
+    let mut tools = get_tools();
+    if canvas_context.is_some() {
+        tools.extend(get_canvas_tools());
+    }
     let max_iterations = 10;
 
     for _iteration in 0..max_iterations {
@@ -436,6 +523,24 @@ where
                             Ok(None) => ("Atom not found".to_string(), 0),
                             Err(e) => (format!("Error: {}", e), 0),
                         }
+                    }
+                    "zoom_to_cluster" => {
+                        let cluster_label = tool_args["cluster_label"].as_str().unwrap_or("");
+                        on_event(ChatEvent::CanvasAction {
+                            conversation_id: ctx.conversation_id.clone(),
+                            action: "zoom_to_cluster".to_string(),
+                            params: json!({ "cluster_label": cluster_label }),
+                        });
+                        (format!("Zoomed canvas to cluster '{}'", cluster_label), 1)
+                    }
+                    "focus_atom" => {
+                        let atom_id = tool_args["atom_id"].as_str().unwrap_or("");
+                        on_event(ChatEvent::CanvasAction {
+                            conversation_id: ctx.conversation_id.clone(),
+                            action: "focus_atom".to_string(),
+                            params: json!({ "atom_id": atom_id }),
+                        });
+                        (format!("Focused canvas on atom '{}'", atom_id), 1)
                     }
                     _ => (format!("Unknown tool: {}", tool_name), 0),
                 };
@@ -559,7 +664,7 @@ where
             ProviderType::OpenRouter => settings_map
                 .get("chat_model")
                 .cloned()
-                .unwrap_or_else(|| "anthropic/claude-sonnet-4".to_string()),
+                .unwrap_or_else(|| "anthropic/claude-sonnet-4.6".to_string()),
         };
 
         (provider_config, model)
@@ -601,7 +706,124 @@ where
 
     // Run agent loop (storage is Clone, so no separate connection needed)
     let mut result =
-        run_agent_loop(&on_event, storage.clone(), provider_config, model, ctx, Some(settings_map)).await?;
+        run_agent_loop(&on_event, storage.clone(), provider_config, model, ctx, Some(settings_map), None).await?;
+
+    // Save assistant message
+    {
+        let saved_msg = storage.save_message_sync(conversation_id, "assistant", &result.message.content)
+            .map_err(|e| e.to_string())?;
+
+        result.message.id = saved_msg.id.clone();
+        result.message.message_index = saved_msg.message_index;
+
+        for tool_call in &mut result.tool_calls {
+            tool_call.message_id = saved_msg.id.clone();
+        }
+        storage.save_tool_calls_sync(&saved_msg.id, &result.tool_calls)
+            .map_err(|e| e.to_string())?;
+
+        for citation in &mut result.citations {
+            citation.message_id = saved_msg.id.clone();
+        }
+        storage.save_citations_sync(&saved_msg.id, &result.citations)
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Emit completion event
+    on_event(ChatEvent::Complete {
+        conversation_id: conversation_id.to_string(),
+        message: result.clone(),
+    });
+
+    Ok(result)
+}
+
+/// Like `send_chat_message_with_settings` but with canvas context for canvas-aware tools.
+pub async fn send_chat_message_with_canvas<F>(
+    storage: StorageBackend,
+    conversation_id: &str,
+    content: &str,
+    on_event: F,
+    external_settings: Option<std::collections::HashMap<String, String>>,
+    canvas_context: Option<CanvasContext>,
+) -> Result<ChatMessageWithContext, String>
+where
+    F: Fn(ChatEvent) + Send + Sync,
+{
+    // Resolve settings (from registry if provided, otherwise from storage)
+    let settings_map = match external_settings {
+        Some(s) => s,
+        None => {
+            storage.get_all_settings_sync()
+                .map_err(|e| e.to_string())?
+        }
+    };
+
+    // Get provider config and model from settings
+    let (provider_config, model) = {
+        let provider_config = ProviderConfig::from_settings(&settings_map);
+
+        if provider_config.provider_type == ProviderType::OpenRouter
+            && provider_config.openrouter_api_key.is_none()
+        {
+            return Err(
+                "OpenRouter API key not configured. Please set it in Settings.".to_string(),
+            );
+        }
+
+        let model = match provider_config.provider_type {
+            ProviderType::Ollama => provider_config.llm_model().to_string(),
+            ProviderType::OpenAICompat => provider_config.llm_model().to_string(),
+            ProviderType::OpenRouter => settings_map
+                .get("chat_model")
+                .cloned()
+                .unwrap_or_else(|| "anthropic/claude-sonnet-4.6".to_string()),
+        };
+
+        (provider_config, model)
+    };
+
+    // Save user message
+    storage.save_message_sync(conversation_id, "user", content)
+        .map_err(|e| e.to_string())?;
+
+    // Get conversation context
+    let scope_tag_ids = storage.get_scope_tag_ids_sync(conversation_id)
+        .map_err(|e| e.to_string())?;
+    let scope_description = storage.get_scope_description_sync(&scope_tag_ids)
+        .map_err(|e| e.to_string())?;
+
+    // Get conversation messages via get_conversation_sync and convert to provider format
+    let conversation = storage.get_conversation_sync(conversation_id)
+        .map_err(|e| e.to_string())?;
+    let messages = match conversation {
+        Some(conv) => chat_messages_to_provider_messages(conv.messages),
+        None => Vec::new(),
+    };
+
+    // Build message history for API, with canvas context appended to system prompt
+    let mut system_prompt = get_system_prompt(&scope_description);
+    if let Some(ref ctx) = canvas_context {
+        system_prompt.push_str(&get_canvas_system_prompt(ctx));
+    }
+    let mut api_messages = vec![Message::system(system_prompt)];
+    api_messages.extend(messages);
+
+    // Truncate to fit context window for providers with limited context
+    let api_messages = truncate_messages_to_context(api_messages, provider_config.context_length_for_model(&model));
+
+    // Create agent context
+    let ctx = AgentContext {
+        conversation_id: conversation_id.to_string(),
+        scope_tag_ids,
+        messages: api_messages,
+        citations: Vec::new(),
+        tool_calls_record: Vec::new(),
+    };
+
+    // Run agent loop with canvas context
+    let mut result =
+        run_agent_loop(&on_event, storage.clone(), provider_config, model, ctx, Some(settings_map), canvas_context.as_ref()).await?;
 
     // Save assistant message
     {

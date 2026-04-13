@@ -6,6 +6,7 @@ pub mod models;
 pub mod ollama;
 pub mod openai_compat;
 pub mod openrouter;
+pub mod structured;
 pub mod traits;
 pub mod types;
 
@@ -17,6 +18,7 @@ pub use models::{fetch_and_return_capabilities, get_cached_capabilities_sync, sa
 pub use ollama::OllamaProvider;
 pub use openai_compat::OpenAICompatProvider;
 pub use openrouter::OpenRouterProvider;
+pub use structured::{call_structured, lint_schema, parse_tolerant, StructuredCall, StructuredCallError};
 pub use traits::{EmbeddingConfig, EmbeddingProvider, LlmConfig, LlmProvider, StreamingLlmProvider};
 
 /// Provider type enum
@@ -141,11 +143,8 @@ impl ProviderConfig {
     pub fn embedding_dimension(&self) -> usize {
         match self.provider_type {
             ProviderType::OpenRouter => {
-                match self.openrouter_embedding_model.as_str() {
-                    "openai/text-embedding-3-small" => 1536,
-                    "openai/text-embedding-3-large" => 3072,
-                    _ => 1536, // Default
-                }
+                openrouter::models::get_embedding_dimension(&self.openrouter_embedding_model)
+                    .unwrap_or(1536) // Fall back to 1536 for unknown models
             }
             ProviderType::Ollama => {
                 ollama::get_embedding_dimension(&self.ollama_embedding_model)

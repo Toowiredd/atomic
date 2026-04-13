@@ -2,9 +2,9 @@
 //!
 //! This module handles LLM-assisted tag merging and categorization.
 
-use crate::providers::traits::LlmConfig;
-use crate::providers::types::{GenerationParams, Message, StructuredOutputSchema};
-use crate::providers::{get_llm_provider, ProviderConfig};
+use crate::providers::structured::{call_structured, StructuredCall};
+use crate::providers::types::{GenerationParams, Message};
+use crate::providers::ProviderConfig;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -53,7 +53,7 @@ EXAMPLES of BAD merges (don't do these):
 
 Return an empty merges array if no clear merges are warranted."#;
 
-fn merge_schema() -> serde_json::Value {
+pub(crate) fn merge_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -189,51 +189,28 @@ async fn get_merge_suggestions(
 
     let mut params = GenerationParams::new()
         .with_temperature(0.1)
-        .with_structured_output(StructuredOutputSchema::new("merge_result", merge_schema()))
         .with_minimize_reasoning(true);
-
     if let Some(supported) = supported_params {
         params = params.with_supported_parameters(supported);
     }
 
-    let llm_config = LlmConfig::new(model).with_params(params);
-    let provider = get_llm_provider(provider_config).map_err(|e| e.to_string())?;
+    let call = StructuredCall::<MergeResult>::new(
+        provider_config,
+        model,
+        &messages,
+        "merge_result",
+        merge_schema(),
+    )
+    .with_params(params)
+    .with_max_retries(3);
 
-    let mut last_error = String::new();
-    for attempt in 0..3 {
-        if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
-        }
-
-        match provider.complete(&messages, &llm_config).await {
-            Ok(response) => {
-                let content = &response.content;
-                if !content.is_empty() {
-                    tracing::debug!(output = %content, "MERGE LLM OUTPUT");
-
-                    let result: MergeResult = serde_json::from_str(content).map_err(|e| {
-                        format!("Failed to parse merge result: {} - Content: {}", e, content)
-                    })?;
-                    return Ok(result);
-                }
-                return Err("No content in response".to_string());
-            }
-            Err(e) => {
-                let err_str = e.to_string();
-                if e.is_retryable() {
-                    tracing::warn!(attempt = attempt + 1, max_attempts = 3, model = %model, error = %err_str, "Tag merge LLM call failed (retryable)");
-                    last_error = err_str;
-                    continue;
-                } else {
-                    tracing::error!(model = %model, error = %err_str, "Tag merge LLM call failed (non-retryable)");
-                    last_error = err_str;
-                    break;
-                }
-            }
+    match call_structured::<MergeResult>(call).await {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            tracing::error!(model = %model, error = %e, "Tag merge call failed");
+            Err(e.to_compact_string())
         }
     }
-
-    Err(last_error)
 }
 
 fn execute_tag_merge(conn: &Connection, merge: &TagMerge) -> Result<(bool, i32), String> {
@@ -378,12 +355,21 @@ pub async fn fetch_merge_suggestions(
 mod tests {
     use super::*;
     use crate::db::Database;
+    use crate::providers::structured::lint_schema;
     use tempfile::NamedTempFile;
 
     fn create_test_db() -> (Database, NamedTempFile) {
         let temp_file = NamedTempFile::new().unwrap();
         let db = Database::open_or_create(temp_file.path()).unwrap();
         (db, temp_file)
+    }
+
+    // ==================== Schema lint regression test ====================
+
+    #[test]
+    fn lint_merge_schema_is_portable() {
+        lint_schema(&merge_schema())
+            .expect("merge_schema must be portable across providers");
     }
 
     fn insert_tag(conn: &Connection, id: &str, name: &str, parent_id: Option<&str>) {

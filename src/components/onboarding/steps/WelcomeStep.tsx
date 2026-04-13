@@ -1,17 +1,20 @@
 import { useState, useEffect } from 'react';
+import { BookOpen, Check, Copy } from 'lucide-react';
 import { Button } from '../../ui/Button';
 import { isDesktopApp, getTransport, switchTransport } from '../../../lib/transport';
+import { verifyProviderConfigured } from '../../../lib/api';
 import type { OnboardingState, OnboardingAction } from '../useOnboardingState';
 
 interface WelcomeStepProps {
   state: OnboardingState;
   dispatch: React.Dispatch<OnboardingAction>;
   onNext: () => void;
+  onComplete: () => void;
 }
 
 type SetupMode = 'checking' | 'claim' | 'manual';
 
-export function WelcomeStep({ state, dispatch, onNext }: WelcomeStepProps) {
+export function WelcomeStep({ state, dispatch, onNext, onComplete }: WelcomeStepProps) {
   const isDesktop = isDesktopApp();
   const [setupMode, setSetupMode] = useState<SetupMode>('checking');
   const [isClaiming, setIsClaiming] = useState(false);
@@ -92,6 +95,22 @@ export function WelcomeStep({ state, dispatch, onNext }: WelcomeStepProps) {
         baseUrl: state.serverUrl.trim().replace(/\/$/, ''),
         authToken: state.serverToken.trim(),
       });
+      // If the server is already fully set up, skip the rest of the
+      // onboarding wizard and drop the user straight into the app.
+      try {
+        const configured = await verifyProviderConfigured();
+        if (configured) {
+          onComplete();
+          return;
+        }
+      } catch (e) {
+        dispatch({
+          type: 'SET_SERVER_TEST',
+          result: 'error',
+          error: String(e instanceof Error ? e.message : e),
+        });
+        return;
+      }
       onNext();
     } catch (e) {
       dispatch({ type: 'SET_SERVER_TEST', result: 'error', error: String(e) });
@@ -102,9 +121,7 @@ export function WelcomeStep({ state, dispatch, onNext }: WelcomeStepProps) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-center space-y-6 px-8">
         <div className="w-16 h-16 rounded-2xl bg-[var(--color-accent)]/10 flex items-center justify-center">
-          <svg className="w-8 h-8 text-[var(--color-accent)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" />
-          </svg>
+          <BookOpen className="w-8 h-8 text-[var(--color-accent)]" strokeWidth={2} />
         </div>
 
         <div>
@@ -142,7 +159,19 @@ export function WelcomeStep({ state, dispatch, onNext }: WelcomeStepProps) {
   // since claiming connects the transport)
   if (claimedToken) {
     const handleCopyToken = async () => {
-      await navigator.clipboard.writeText(claimedToken);
+      try {
+        await navigator.clipboard.writeText(claimedToken);
+      } catch {
+        // Fallback for non-secure contexts / Tauri webview
+        const textarea = document.createElement('textarea');
+        textarea.value = claimedToken;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
       setTokenCopied(true);
       setTimeout(() => setTokenCopied(false), 2000);
     };
@@ -150,9 +179,7 @@ export function WelcomeStep({ state, dispatch, onNext }: WelcomeStepProps) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-center space-y-6 px-8">
         <div className="w-16 h-16 rounded-2xl bg-green-500/10 flex items-center justify-center">
-          <svg className="w-8 h-8 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-          </svg>
+          <Check className="w-8 h-8 text-green-500" strokeWidth={2} />
         </div>
 
         <div>
@@ -175,13 +202,9 @@ export function WelcomeStep({ state, dispatch, onNext }: WelcomeStepProps) {
               title="Copy to clipboard"
             >
               {tokenCopied ? (
-                <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                </svg>
+                <Check className="w-4 h-4 text-green-500" strokeWidth={2} />
               ) : (
-                <svg className="w-4 h-4 text-[var(--color-text-secondary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                </svg>
+                <Copy className="w-4 h-4 text-[var(--color-text-secondary)]" strokeWidth={2} />
               )}
             </button>
           </div>
@@ -204,9 +227,7 @@ export function WelcomeStep({ state, dispatch, onNext }: WelcomeStepProps) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-center space-y-6 px-8">
         <div className="w-16 h-16 rounded-2xl bg-green-500/10 flex items-center justify-center">
-          <svg className="w-8 h-8 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-          </svg>
+          <Check className="w-8 h-8 text-green-500" strokeWidth={2} />
         </div>
         <div>
           <h2 className="text-2xl font-bold text-[var(--color-text-primary)] mb-2">Connected</h2>
@@ -231,9 +252,7 @@ export function WelcomeStep({ state, dispatch, onNext }: WelcomeStepProps) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-center space-y-6 px-8">
         <div className="w-16 h-16 rounded-2xl bg-[var(--color-accent)]/10 flex items-center justify-center">
-          <svg className="w-8 h-8 text-[var(--color-accent)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" />
-          </svg>
+          <BookOpen className="w-8 h-8 text-[var(--color-accent)]" strokeWidth={2} />
         </div>
 
         <div>

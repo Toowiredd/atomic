@@ -10,6 +10,7 @@ mod chunks;
 mod search;
 mod chat;
 mod wiki;
+mod briefings;
 mod feeds;
 mod clusters;
 mod settings;

@@ -16,11 +16,42 @@ pub fn compute_2d_projection(embeddings: &[(String, Vec<f32>)]) -> Vec<(String, 
         return vec![(embeddings[0].0.clone(), 0.0, 0.0)];
     }
 
-    let n = embeddings.len();
-    let d = embeddings[0].1.len();
+    // Pick the most common embedding dimension. Mixed dimensions can occur when
+    // the user switches embedding models — we project only the majority set and
+    // place the rest at the origin so they still appear on the canvas.
+    let mut dim_counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for (_, emb) in embeddings {
+        *dim_counts.entry(emb.len()).or_insert(0) += 1;
+    }
+    let d = dim_counts
+        .iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(dim, _)| *dim)
+        .unwrap_or(0);
     if d == 0 {
         return embeddings.iter().map(|(id, _)| (id.clone(), 0.0, 0.0)).collect();
     }
+
+    // Partition into matching and mismatched embeddings.
+    let (matching, mismatched): (Vec<_>, Vec<_>) = embeddings
+        .iter()
+        .cloned()
+        .partition(|(_, emb)| emb.len() == d);
+
+    if mismatched.len() > 0 {
+        tracing::warn!(
+            expected_dim = d,
+            mismatched = mismatched.len(),
+            "projection: skipping embeddings with non-majority dimension"
+        );
+    }
+
+    if matching.len() < 2 {
+        return embeddings.iter().map(|(id, _)| (id.clone(), 0.0, 0.0)).collect();
+    }
+
+    let embeddings: &[(String, Vec<f32>)] = &matching;
+    let n = embeddings.len();
 
     // Step 1: Compute mean vector
     let mut mean = vec![0.0f64; d];
@@ -56,6 +87,11 @@ pub fn compute_2d_projection(embeddings: &[(String, Vec<f32>)]) -> Vec<(String, 
 
     // Step 5: Normalize to [-1, 1] range
     normalize_positions(&mut results);
+
+    // Append mismatched-dimension atoms at the origin so they remain visible.
+    for (id, _) in &mismatched {
+        results.push((id.clone(), 0.0, 0.0));
+    }
 
     results
 }

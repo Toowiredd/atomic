@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod atoms;
+pub mod briefings;
 pub mod canvas;
 pub mod chat;
 pub mod clustering;
@@ -10,7 +11,6 @@ pub mod embedding;
 pub mod feeds;
 pub mod graph;
 pub mod import;
-pub mod insights;
 pub mod logs;
 pub mod ingest;
 pub mod oauth;
@@ -18,7 +18,6 @@ pub mod ollama;
 pub mod search;
 pub mod setup;
 pub mod settings;
-pub mod sync;
 pub mod utils;
 pub mod wiki;
 
@@ -30,8 +29,10 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.route("/atoms", web::post().to(atoms::create_atom));
     cfg.route("/atoms/bulk", web::post().to(atoms::bulk_create_atoms));
     cfg.route("/atoms/sources", web::get().to(atoms::get_source_list));
+    cfg.route("/atoms/by-source-url", web::get().to(atoms::get_atom_by_source_url));
     cfg.route("/atoms/{id}", web::get().to(atoms::get_atom));
     cfg.route("/atoms/{id}", web::put().to(atoms::update_atom));
+    cfg.route("/atoms/{id}/content", web::put().to(atoms::update_atom_content_only));
     cfg.route("/atoms/{id}", web::delete().to(atoms::delete_atom));
     cfg.route("/atoms/{id}/similar", web::get().to(search::find_similar));
     cfg.route(
@@ -42,7 +43,9 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     // Tags
     cfg.route("/tags", web::get().to(atoms::get_tags));
     cfg.route("/tags", web::post().to(atoms::create_tag));
+    cfg.route("/tags/configure-autotag-targets", web::post().to(atoms::configure_autotag_targets));
     cfg.route("/tags/{id}/children", web::get().to(atoms::get_tag_children));
+    cfg.route("/tags/{id}/autotag-target", web::put().to(atoms::set_tag_autotag_target));
     cfg.route("/tags/{id}", web::put().to(atoms::update_tag));
     cfg.route("/tags/{id}", web::delete().to(atoms::delete_tag));
 
@@ -63,6 +66,19 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         web::post().to(wiki::generate_wiki),
     );
     cfg.route("/wiki/{tag_id}/update", web::post().to(wiki::update_wiki));
+    cfg.route("/wiki/{tag_id}/propose", web::post().to(wiki::propose_wiki));
+    cfg.route(
+        "/wiki/{tag_id}/proposal",
+        web::get().to(wiki::get_wiki_proposal),
+    );
+    cfg.route(
+        "/wiki/{tag_id}/proposal/accept",
+        web::post().to(wiki::accept_wiki_proposal),
+    );
+    cfg.route(
+        "/wiki/{tag_id}/proposal/dismiss",
+        web::post().to(wiki::dismiss_wiki_proposal),
+    );
     cfg.route("/wiki/{tag_id}", web::delete().to(wiki::delete_wiki));
     cfg.route(
         "/wiki/{tag_id}/related",
@@ -81,6 +97,12 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         web::post().to(wiki::recompute_all_tag_embeddings),
     );
 
+    // Briefings
+    cfg.route("/briefings/latest", web::get().to(briefings::get_latest_briefing));
+    cfg.route("/briefings", web::get().to(briefings::list_briefings));
+    cfg.route("/briefings/run", web::post().to(briefings::run_briefing_now));
+    cfg.route("/briefings/{id}", web::get().to(briefings::get_briefing));
+
     // Settings
     cfg.route("/settings", web::get().to(settings::get_settings));
     cfg.route("/settings/{key}", web::put().to(settings::set_setting));
@@ -89,6 +111,10 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         web::post().to(settings::test_openrouter_connection),
     );
     cfg.route("/settings/models", web::get().to(settings::get_available_llm_models));
+    cfg.route(
+        "/settings/embedding-models",
+        web::get().to(settings::get_openrouter_embedding_models),
+    );
     cfg.route(
         "/settings/test-openai-compat",
         web::post().to(settings::test_openai_compat_connection),
@@ -118,6 +144,10 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.route(
         "/embeddings/reset-stuck",
         web::post().to(embedding::reset_stuck_processing),
+    );
+    cfg.route(
+        "/embeddings/status",
+        web::get().to(embedding::get_pipeline_status),
     );
 
     // Canvas
@@ -226,31 +256,6 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         "/import/obsidian",
         web::post().to(import::import_obsidian_vault),
     );
-    cfg.route(
-        "/import/conversations",
-        web::post().to(import::import_conversations),
-    );
-    cfg.route(
-        "/import/logs",
-        web::post().to(import::import_logs),
-    );
-    cfg.route(
-        "/import/remote",
-        web::post().to(import::import_remote),
-    );
-    cfg.route(
-        "/import/persist-logs",
-        web::post().to(import::persist_logs),
-    );
-
-    // Sync sources
-    cfg.route("/sync/sources", web::get().to(sync::list_sync_sources));
-    cfg.route("/sync/sources", web::post().to(sync::create_sync_source));
-    cfg.route("/sync/sources/{id}", web::put().to(sync::update_sync_source));
-    cfg.route("/sync/sources/{id}", web::delete().to(sync::delete_sync_source));
-    cfg.route("/sync/sources/{id}/run", web::post().to(sync::run_sync_source));
-    cfg.route("/sync/sources/{id}/test-connection", web::post().to(sync::test_sync_connection));
-    cfg.route("/sync/status", web::get().to(sync::sync_status));
 
     // Ingestion
     cfg.route("/ingest/url", web::post().to(ingest::ingest_url));
@@ -266,15 +271,4 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
 
     // Logs
     cfg.route("/logs", web::get().to(logs::get_logs));
-
-    // Insights — novel discovery features
-    cfg.route("/insights/gaps", web::get().to(insights::knowledge_gaps));
-    cfg.route(
-        "/insights/serendipity",
-        web::get().to(insights::serendipity_walk),
-    );
-    cfg.route(
-        "/insights/time-capsule",
-        web::get().to(insights::time_capsule),
-    );
 }

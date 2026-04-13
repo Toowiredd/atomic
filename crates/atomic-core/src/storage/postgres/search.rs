@@ -439,11 +439,14 @@ async fn pg_batch_fetch_atoms(
         String,
         String,
         String,
+        Option<String>,
+        Option<String>,
     )> = sqlx::query_as(
         "SELECT id, content, title, snippet, source_url, source, published_at,
                 created_at, updated_at,
                 COALESCE(embedding_status, 'pending'),
-                COALESCE(tagging_status, 'pending')
+                COALESCE(tagging_status, 'pending'),
+                embedding_error, tagging_error
          FROM atoms WHERE id = ANY($1) AND db_id = $2",
     )
     .bind(atom_ids)
@@ -467,6 +470,8 @@ async fn pg_batch_fetch_atoms(
                 updated_at: r.8,
                 embedding_status: r.9,
                 tagging_status: r.10,
+                embedding_error: r.11,
+                tagging_error: r.12,
             };
             (r.0, atom)
         })
@@ -483,8 +488,8 @@ async fn pg_batch_fetch_tags(
         return Ok(HashMap::new());
     }
 
-    let rows: Vec<(String, String, String, Option<String>, String)> = sqlx::query_as(
-        "SELECT at.atom_id, t.id, t.name, t.parent_id, t.created_at
+    let rows: Vec<(String, String, String, Option<String>, String, bool)> = sqlx::query_as(
+        "SELECT at.atom_id, t.id, t.name, t.parent_id, t.created_at, t.is_autotag_target
          FROM atom_tags at
          INNER JOIN tags t ON at.tag_id = t.id
          WHERE at.atom_id = ANY($1) AND at.db_id = $2",
@@ -496,12 +501,13 @@ async fn pg_batch_fetch_tags(
     .map_err(|e| AtomicCoreError::Search(format!("Failed to batch fetch tags: {}", e)))?;
 
     let mut map: HashMap<String, Vec<Tag>> = HashMap::new();
-    for (atom_id, tag_id, name, parent_id, created_at) in rows {
+    for (atom_id, tag_id, name, parent_id, created_at, is_autotag_target) in rows {
         map.entry(atom_id).or_default().push(Tag {
             id: tag_id,
             name,
             parent_id,
             created_at,
+            is_autotag_target,
         });
     }
     Ok(map)

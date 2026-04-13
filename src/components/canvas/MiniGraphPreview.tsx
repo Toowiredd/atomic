@@ -52,13 +52,13 @@ export function MiniGraphPreview({ atomId, onExpand }: MiniGraphPreviewProps) {
     if (!graph || graph.atoms.length <= 1) return;
 
     const centerX = 100;
-    const centerY = 75;
+    const centerY = 100;
 
     // Initialize nodes (limit to 7 for mini preview)
     const limitedAtoms = graph.atoms.slice(0, 7);
     const initialNodes: SimulationNode[] = limitedAtoms.map((atom) => {
-      const content = atom.content.split('\n')[0];
-      const label = content.length > 15 ? content.substring(0, 12) + '...' : content;
+      const firstLine = atom.content.split('\n')[0].trim().replace(/^#+\s*/, '');
+      const label = firstLine.length > 15 ? firstLine.substring(0, 12) + '...' : firstLine || 'Untitled';
 
       return {
         id: atom.id,
@@ -83,14 +83,14 @@ export function MiniGraphPreview({ atomId, onExpand }: MiniGraphPreviewProps) {
 
     // Create simulation
     const simulation = d3.forceSimulation(initialNodes)
-      .force('charge', d3.forceManyBody().strength(-50))
-      .force('collide', d3.forceCollide().radius(25))
+      .force('charge', d3.forceManyBody().strength(-120))
+      .force('collide', d3.forceCollide().radius(35))
       .force('link', d3.forceLink(links)
         .id((d: any) => d.id)
-        .distance(50)
+        .distance(70)
         .strength((link: any) => link.strength * 0.3))
       .force('radial', d3.forceRadial(
-        (d: SimulationNode) => d.depth === 0 ? 0 : 50,
+        (d: SimulationNode) => d.depth === 0 ? 0 : 70,
         centerX,
         centerY
       ).strength(0.5))
@@ -148,11 +148,10 @@ export function MiniGraphPreview({ atomId, onExpand }: MiniGraphPreviewProps) {
   return (
     <div>
       <div
-        className="relative bg-[var(--color-bg-panel)] rounded-md overflow-hidden cursor-pointer hover:bg-[var(--color-bg-hover)] transition-colors"
-        style={{ height: '150px' }}
+        className="relative bg-[var(--color-bg-main)] rounded-md overflow-hidden cursor-pointer hover:bg-[var(--color-bg-hover)] transition-colors aspect-square w-3/4 mx-auto"
         onClick={handleExpand}
       >
-        <svg width="100%" height="100%" className="overflow-visible">
+        <svg width="100%" height="100%" viewBox="0 0 200 200" preserveAspectRatio="xMidYMid meet">
           {/* Edges */}
           {edges.map((edge) => (
             <line

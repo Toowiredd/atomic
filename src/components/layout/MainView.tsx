@@ -1,12 +1,48 @@
-import { useMemo, useCallback, useEffect, useRef } from 'react';
+import { useMemo, useCallback, useEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
+import {
+  PanelLeft,
+  X,
+  Undo2,
+  Redo2,
+  ChevronLeft,
+  ChevronRight,
+  Sun,
+  Moon,
+  Check,
+  Pencil,
+  Trash2,
+  MoreHorizontal,
+  MessageCircle,
+  LayoutDashboard,
+  LayoutGrid,
+  List as ListIcon,
+  Library,
+  Network,
+  BookOpen,
+  Search,
+  Filter,
+} from 'lucide-react';
 import { AtomGrid } from '../atoms/AtomGrid';
 import { AtomList } from '../atoms/AtomList';
+import { AtomReader } from '../atoms/AtomReader';
 import { FilterBar } from '../atoms/FilterBar';
+import { FilterSheet } from '../atoms/FilterSheet';
 import { SigmaCanvas } from '../canvas/SigmaCanvas';
+import { LocalGraphView } from '../canvas/LocalGraphView';
+import { DashboardView } from '../dashboard/DashboardView';
 import { FAB } from '../ui/FAB';
+import { Modal } from '../ui/Modal';
+import { EmbeddingProgressBanner } from '../ui/EmbeddingProgressBanner';
+import { WikiFullView } from '../wiki/WikiFullView';
+import { WikiReader } from '../wiki/WikiReader';
+import { ChatViewer } from '../chat/ChatViewer';
 import { useAtomsStore } from '../../stores/atoms';
+import { useTagsStore } from '../../stores/tags';
 import { useUIStore } from '../../stores/ui';
+import { isTauri } from '../../lib/platform';
+import { useIsMobile } from '../../hooks';
+import { readerEditorActions } from '../../lib/reader-editor-bridge';
 
 export function MainView() {
   const atoms = useAtomsStore(s => s.atoms);
@@ -19,22 +55,76 @@ export function MainView() {
   const semanticSearchQuery = useAtomsStore(s => s.semanticSearchQuery);
   const retryEmbedding = useAtomsStore(s => s.retryEmbedding);
   const retryTagging = useAtomsStore(s => s.retryTagging);
+  const sourceFilter = useAtomsStore(s => s.sourceFilter);
+  const sourceValue = useAtomsStore(s => s.sourceValue);
+  const sortBy = useAtomsStore(s => s.sortBy);
+  const sortOrder = useAtomsStore(s => s.sortOrder);
   const search = useAtomsStore(s => s.search);
   const clearSemanticSearch = useAtomsStore(s => s.clearSemanticSearch);
 
-  const { viewMode, searchQuery } = useUIStore(
+  const { viewMode, atomsLayout, searchQuery } = useUIStore(
     useShallow(s => ({
       viewMode: s.viewMode,
+      atomsLayout: s.atomsLayout,
       searchQuery: s.searchQuery,
     }))
   );
   const leftPanelOpen = useUIStore(s => s.leftPanelOpen);
   const toggleLeftPanel = useUIStore(s => s.toggleLeftPanel);
   const setViewMode = useUIStore(s => s.setViewMode);
-  const openDrawer = useUIStore(s => s.openDrawer);
-  const openChatDrawer = useUIStore(s => s.openChatDrawer);
-  const openWikiListDrawer = useUIStore(s => s.openWikiListDrawer);
+  const setAtomsLayout = useUIStore(s => s.setAtomsLayout);
+  const openReader = useUIStore(s => s.openReader);
+  const readerState = useUIStore(s => s.readerState);
+  const wikiReaderState = useUIStore(s => s.wikiReaderState);
+  const localGraph = useUIStore(s => s.localGraph);
+  const overlayNav = useUIStore(s => s.overlayNav);
+  const overlayBack = useUIStore(s => s.overlayBack);
+  const overlayForward = useUIStore(s => s.overlayForward);
+  const overlayDismiss = useUIStore(s => s.overlayDismiss);
+  const readerTheme = useUIStore(s => s.readerTheme);
+  const toggleReaderTheme = useUIStore(s => s.toggleReaderTheme);
+  const deleteAtom = useAtomsStore(s => s.deleteAtom);
+  const fetchTags = useTagsStore(s => s.fetchTags);
+
   const openCommandPalette = useUIStore(s => s.openCommandPalette);
+
+  const chatSidebarOpen = useUIStore(s => s.chatSidebarOpen);
+  const chatSidebarWidth = useUIStore(s => s.chatSidebarWidth);
+  const setChatSidebarWidth = useUIStore(s => s.setChatSidebarWidth);
+  const toggleChatSidebar = useUIStore(s => s.toggleChatSidebar);
+  const [isResizingChat, setIsResizingChat] = useState(false);
+
+  const [filterBarOpen, setFilterBarOpen] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [readerMenuOpen, setReaderMenuOpen] = useState(false);
+  const readerMenuRef = useRef<HTMLDivElement>(null);
+  const isMobile = useIsMobile();
+  const hasActiveFilter = sourceFilter !== 'all' || !!sourceValue || sortBy !== 'updated' || sortOrder !== 'desc';
+
+  // Close reader overflow menu on outside click / escape
+  useEffect(() => {
+    if (!readerMenuOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (readerMenuRef.current && !readerMenuRef.current.contains(e.target as Node)) {
+        setReaderMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setReaderMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [readerMenuOpen]);
+
+  // Auto-close the menu when the reader closes
+  useEffect(() => {
+    if (!readerState.atomId) setReaderMenuOpen(false);
+  }, [readerState.atomId]);
 
   // Debounced server-side search when searchQuery changes
   const searchTimerRef = useRef<ReturnType<typeof setTimeout>>();
@@ -95,7 +185,7 @@ export function MainView() {
     // - Hybrid: highlight the search query (prioritize keywords over chunk)
     const isSearch = useAtomsStore.getState().semanticSearchResults !== null;
     if (!isSearch) {
-      openDrawer('viewer', atomId);
+      openReader(atomId);
       return;
     }
     const mode = useAtomsStore.getState().searchMode;
@@ -106,12 +196,20 @@ export function MainView() {
     } else {
       highlightText = matchingChunkMap?.get(atomId);
     }
-    openDrawer('viewer', atomId, highlightText);
-  }, [openDrawer, matchingChunkMap]);
+    openReader(atomId, highlightText);
+  }, [openReader, matchingChunkMap]);
 
-  const handleNewAtom = useCallback(() => {
-    openDrawer('editor');
-  }, [openDrawer]);
+  const createAtom = useAtomsStore(s => s.createAtom);
+  const openReaderEditing = useUIStore(s => s.openReaderEditing);
+
+  const handleNewAtom = useCallback(async () => {
+    try {
+      const newAtom = await createAtom('');
+      openReaderEditing(newAtom.id);
+    } catch (error) {
+      console.error('Failed to create atom:', error);
+    }
+  }, [createAtom, openReaderEditing]);
 
   const handleRetryEmbedding = useCallback(async (atomId: string) => {
     try {
@@ -130,12 +228,33 @@ export function MainView() {
   }, [retryTagging]);
 
   const handleOpenChat = useCallback(() => {
-    openChatDrawer();
-  }, [openChatDrawer]);
+    toggleChatSidebar();
+  }, [toggleChatSidebar]);
 
-  const handleOpenWiki = useCallback(() => {
-    openWikiListDrawer();
-  }, [openWikiListDrawer]);
+  const handleChatResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = useUIStore.getState().chatSidebarWidth;
+    setIsResizingChat(true);
+
+    const onMouseMove = (e: MouseEvent) => {
+      const delta = startX - e.clientX;
+      setChatSidebarWidth(startWidth + delta);
+    };
+
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      setIsResizingChat(false);
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, [setChatSidebarWidth]);
 
   const handleOpenSearch = useCallback(() => {
     openCommandPalette('/');
@@ -151,127 +270,349 @@ export function MainView() {
   const displayCount = isSemanticSearch ? displayAtoms.length : totalCount;
 
   return (
-    <main className="flex-1 flex flex-col h-full bg-[var(--color-bg-main)] overflow-hidden">
-      {/* Titlebar row - aligned with traffic lights */}
-      <div className="h-[52px] flex items-center gap-3 px-4 flex-shrink-0">
-        {/* Sidebar toggle — visible on small screens when panel is collapsed */}
-        {!leftPanelOpen && (
-          <button
-            onClick={toggleLeftPanel}
-            className="md:hidden p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
-            title="Show sidebar"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="3" y="3" width="18" height="18" rx="2" />
-              <line x1="9" y1="3" x2="9" y2="21" />
-            </svg>
-          </button>
-        )}
-
-        {/* View Mode Toggle */}
-        <div className="flex items-center bg-[var(--color-bg-card)] rounded-md border border-[var(--color-border)] shrink-0">
-          <button
-            onClick={() => setViewMode('grid')}
-            className={`p-1.5 rounded-l-md transition-colors ${
-              viewMode === 'grid'
-                ? 'bg-[var(--color-accent)] text-white'
-                : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
-            }`}
-            title="Grid view"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"
-              />
-            </svg>
-          </button>
-          <button
-            onClick={() => setViewMode('list')}
-            className={`p-1.5 transition-colors ${
-              viewMode === 'list'
-                ? 'bg-[var(--color-accent)] text-white'
-                : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
-            }`}
-            title="List view"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M4 6h16M4 12h16M4 18h16"
-              />
-            </svg>
-          </button>
-          <button
-            onClick={() => setViewMode('canvas')}
-            className={`p-1.5 rounded-r-md transition-colors ${
-              viewMode === 'canvas'
-                ? 'bg-[var(--color-accent)] text-white'
-                : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
-            }`}
-            title="Canvas view"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-              <circle cx="6" cy="6" r="2" />
-              <circle cx="18" cy="6" r="2" />
-              <circle cx="6" cy="18" r="2" />
-              <circle cx="18" cy="18" r="2" />
-              <circle cx="12" cy="12" r="2" />
-              <path strokeLinecap="round" d="M8 7l2.5 3.5M16 7l-2.5 3.5M8 17l2.5-3.5M16 17l-2.5-3.5" />
-            </svg>
-          </button>
-        </div>
-
-        {/* Search button */}
+    <>
+    <main className="relative flex-1 flex flex-col h-full bg-[var(--color-bg-main)] overflow-hidden">
+      {/* Titlebar row */}
+      <div className={`h-[52px] flex items-center gap-3 px-4 flex-shrink-0 ${!leftPanelOpen && isTauri() ? 'pl-[78px]' : ''}`}>
+        {/* Left sidebar toggle — always visible */}
         <button
-          onClick={handleOpenSearch}
-          className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
-          title="Search atoms"
+          onClick={toggleLeftPanel}
+          className={`p-1.5 rounded-md transition-colors ${
+            leftPanelOpen
+              ? 'text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
+              : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
+          }`}
+          title={leftPanelOpen ? "Hide sidebar" : "Show sidebar"}
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
+          <PanelLeft className="w-4 h-4" strokeWidth={2} />
         </button>
 
-        {/* Wiki button */}
-        <button
-          onClick={handleOpenWiki}
-          className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
-          title="Open wiki articles"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-          </svg>
-        </button>
+        {readerState.atomId || wikiReaderState.tagId || (localGraph.isOpen && localGraph.centerAtomId) ? (
+          /* Reader/Graph/Wiki titlebar */
+          <>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={overlayDismiss}
+                className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+                title="Close"
+              >
+                <X className="w-4 h-4" strokeWidth={2} />
+              </button>
+              {/* In edit mode: undo/redo. In view mode: back/forward */}
+              {readerState.atomId && readerState.editing ? (
+                <>
+                  <button
+                    onClick={() => readerEditorActions.current?.undo()}
+                    className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+                    title="Undo (Cmd+Z)"
+                  >
+                    <Undo2 className="w-4 h-4" strokeWidth={2} />
+                  </button>
+                  <button
+                    onClick={() => readerEditorActions.current?.redo()}
+                    className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+                    title="Redo (Cmd+Shift+Z)"
+                  >
+                    <Redo2 className="w-4 h-4" strokeWidth={2} />
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={overlayBack}
+                    disabled={overlayNav.index <= 0}
+                    className={`p-1.5 rounded-md transition-colors ${overlayNav.index > 0 ? 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]' : 'text-[var(--color-text-tertiary)] cursor-default'}`}
+                    title="Back"
+                  >
+                    <ChevronLeft className="w-4 h-4" strokeWidth={2} />
+                  </button>
+                  <button
+                    onClick={overlayForward}
+                    disabled={overlayNav.index >= overlayNav.stack.length - 1}
+                    className={`p-1.5 rounded-md transition-colors ${overlayNav.index < overlayNav.stack.length - 1 ? 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]' : 'text-[var(--color-text-tertiary)] cursor-default'}`}
+                    title="Forward"
+                  >
+                    <ChevronRight className="w-4 h-4" strokeWidth={2} />
+                  </button>
+                </>
+              )}
+              {/* Save status indicator */}
+              {readerState.editing && readerState.saveStatus !== 'idle' && (
+                <span className={`text-xs ml-1 ${
+                  readerState.saveStatus === 'saving' ? 'text-[var(--color-text-tertiary)]' :
+                  readerState.saveStatus === 'saved' ? 'text-green-500' :
+                  'text-red-500'
+                }`}>
+                  {readerState.saveStatus === 'saving' ? 'Saving...' :
+                   readerState.saveStatus === 'saved' ? 'Saved' : 'Save failed'}
+                </span>
+              )}
+            </div>
 
-        {/* Chat button */}
-        <button
-          onClick={handleOpenChat}
-          className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
-          title="Open conversations"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-          </svg>
-        </button>
+            <div data-tauri-drag-region className="flex-1 h-full drag-region" />
 
-        {/* Drag region - fills available space */}
-        <div data-tauri-drag-region className="flex-1 h-full drag-region" />
+            {/* Action buttons for atom reader — inline on desktop, overflow menu on mobile */}
+            {readerState.atomId && !isMobile && (
+              <div className="flex items-center gap-1">
+                {/* Theme toggle */}
+                <button
+                  onClick={toggleReaderTheme}
+                  className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+                  title={readerTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                >
+                  {readerTheme === 'dark' ? (
+                    <Sun className="w-4 h-4" strokeWidth={2} />
+                  ) : (
+                    <Moon className="w-4 h-4" strokeWidth={2} />
+                  )}
+                </button>
+                {/* Edit / Done toggle */}
+                <button
+                  onClick={() => readerState.editing
+                    ? readerEditorActions.current?.stopEditing()
+                    : readerEditorActions.current?.startEditing(0)
+                  }
+                  className={`p-1.5 rounded-md transition-colors ${
+                    readerState.editing
+                      ? 'text-[var(--color-accent)] hover:bg-[var(--color-accent)]/20'
+                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
+                  }`}
+                  title={readerState.editing ? 'Done (Esc)' : 'Edit'}
+                >
+                  {readerState.editing ? (
+                    <Check className="w-4 h-4" strokeWidth={2} />
+                  ) : (
+                    <Pencil className="w-4 h-4" strokeWidth={2} />
+                  )}
+                </button>
+                {/* Delete */}
+                <button
+                  onClick={() => setShowDeleteModal(true)}
+                  className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-red-400 hover:bg-[var(--color-bg-hover)] transition-colors"
+                  title="Delete"
+                >
+                  <Trash2 className="w-4 h-4" strokeWidth={2} />
+                </button>
+              </div>
+            )}
 
-        {/* Atom count — hide for canvas mode */}
-        {viewMode !== 'canvas' && (
-          <span className="text-sm text-[var(--color-text-secondary)] shrink-0">
-            {displayCount} atom{displayCount !== 1 ? 's' : ''}
-          </span>
+            {/* Mobile reader overflow menu: edit is the primary inline action,
+                theme + delete hide behind a ⋯ button. */}
+            {readerState.atomId && isMobile && (
+              <div className="flex items-center gap-1">
+                {/* Edit / Done toggle (kept inline — primary action) */}
+                <button
+                  onClick={() => readerState.editing
+                    ? readerEditorActions.current?.stopEditing()
+                    : readerEditorActions.current?.startEditing(0)
+                  }
+                  className={`p-1.5 rounded-md transition-colors ${
+                    readerState.editing
+                      ? 'text-[var(--color-accent)] hover:bg-[var(--color-accent)]/20'
+                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
+                  }`}
+                  title={readerState.editing ? 'Done (Esc)' : 'Edit'}
+                >
+                  {readerState.editing ? (
+                    <Check className="w-4 h-4" strokeWidth={2} />
+                  ) : (
+                    <Pencil className="w-4 h-4" strokeWidth={2} />
+                  )}
+                </button>
+
+                {/* Overflow menu */}
+                <div className="relative" ref={readerMenuRef}>
+                  <button
+                    onClick={() => setReaderMenuOpen(v => !v)}
+                    className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+                    title="More actions"
+                    aria-haspopup="menu"
+                    aria-expanded={readerMenuOpen}
+                  >
+                    <MoreHorizontal className="w-4 h-4" strokeWidth={2} />
+                  </button>
+                  {readerMenuOpen && (
+                    <div
+                      role="menu"
+                      className="absolute top-full right-0 mt-1 w-48 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-md shadow-lg z-50 overflow-hidden"
+                    >
+                      <button
+                        role="menuitem"
+                        onClick={() => { toggleReaderTheme(); setReaderMenuOpen(false); }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+                      >
+                        {readerTheme === 'dark' ? (
+                          <Sun className="w-4 h-4" strokeWidth={2} />
+                        ) : (
+                          <Moon className="w-4 h-4" strokeWidth={2} />
+                        )}
+                        {readerTheme === 'dark' ? 'Light mode' : 'Dark mode'}
+                      </button>
+                      <button
+                        role="menuitem"
+                        onClick={() => { setShowDeleteModal(true); setReaderMenuOpen(false); }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left text-red-400 hover:bg-[var(--color-bg-hover)] transition-colors"
+                      >
+                        <Trash2 className="w-4 h-4" strokeWidth={2} />
+                        Delete
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Chat sidebar toggle */}
+            <button
+              onClick={handleOpenChat}
+              className={`p-1.5 rounded-md transition-colors ${
+                chatSidebarOpen
+                  ? 'text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
+                  : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
+              }`}
+              title={chatSidebarOpen ? "Hide chat" : "Show chat"}
+            >
+              <MessageCircle className="w-4 h-4" strokeWidth={2} />
+            </button>
+          </>
+        ) : (
+          /* Normal browsing titlebar */
+          <>
+            {/* View Mode Toggle — desktop only; mobile accesses view mode via the filter sheet */}
+            {!isMobile && (
+              <>
+                <div className="flex items-center bg-[var(--color-bg-card)] rounded-md border border-[var(--color-border)] shrink-0">
+                  <button
+                    onClick={() => setViewMode('dashboard')}
+                    className={`p-1.5 rounded-l-md transition-colors ${
+                      viewMode === 'dashboard'
+                        ? 'bg-[var(--color-accent)] text-white'
+                        : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                    }`}
+                    title="Dashboard"
+                  >
+                    <LayoutDashboard className="w-4 h-4" strokeWidth={2} />
+                  </button>
+                  <button
+                    onClick={() => setViewMode('atoms')}
+                    className={`p-1.5 transition-colors ${
+                      viewMode === 'atoms'
+                        ? 'bg-[var(--color-accent)] text-white'
+                        : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                    }`}
+                    title="Atoms"
+                  >
+                    <Library className="w-4 h-4" strokeWidth={2} />
+                  </button>
+                  <button
+                    onClick={() => setViewMode('canvas')}
+                    className={`p-1.5 transition-colors ${
+                      viewMode === 'canvas'
+                        ? 'bg-[var(--color-accent)] text-white'
+                        : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                    }`}
+                    title="Canvas view"
+                  >
+                    <Network className="w-4 h-4" strokeWidth={2} />
+                  </button>
+                  <button
+                    onClick={() => setViewMode('wiki')}
+                    className={`p-1.5 rounded-r-md transition-colors ${
+                      viewMode === 'wiki'
+                        ? 'bg-[var(--color-accent)] text-white'
+                        : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                    }`}
+                    title="Wiki view"
+                  >
+                    <BookOpen className="w-4 h-4" strokeWidth={2} />
+                  </button>
+                </div>
+
+                {/* Atoms layout sub-toggle — only visible when on the atoms view */}
+                {viewMode === 'atoms' && (
+                  <div className="flex items-center bg-[var(--color-bg-card)] rounded-md border border-[var(--color-border)] shrink-0">
+                    <button
+                      onClick={() => setAtomsLayout('grid')}
+                      className={`p-1.5 rounded-l-md transition-colors ${
+                        atomsLayout === 'grid'
+                          ? 'text-[var(--color-text-primary)] bg-[var(--color-bg-hover)]'
+                          : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                      }`}
+                      title="Grid layout"
+                    >
+                      <LayoutGrid className="w-4 h-4" strokeWidth={2} />
+                    </button>
+                    <button
+                      onClick={() => setAtomsLayout('list')}
+                      className={`p-1.5 rounded-r-md transition-colors ${
+                        atomsLayout === 'list'
+                          ? 'text-[var(--color-text-primary)] bg-[var(--color-bg-hover)]'
+                          : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                      }`}
+                      title="List layout"
+                    >
+                      <ListIcon className="w-4 h-4" strokeWidth={2} />
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* Search button */}
+            <button
+              onClick={handleOpenSearch}
+              className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+              title="Search atoms"
+            >
+              <Search className="w-4 h-4" strokeWidth={2} />
+            </button>
+
+            <div data-tauri-drag-region className="flex-1 h-full drag-region" />
+
+            {/* Filter toggle + atom count — right-aligned. On mobile, always show the
+                filter button (it opens the filter sheet which hosts view mode too). */}
+            {(isMobile || viewMode === 'atoms') && (
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => setFilterBarOpen(!filterBarOpen)}
+                  className={`relative p-1.5 rounded-md transition-colors ${
+                    filterBarOpen || hasActiveFilter
+                      ? 'text-[var(--color-accent-light)] hover:text-[var(--color-accent)]'
+                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
+                  }`}
+                  title="Filter & sort"
+                >
+                  <Filter className="w-4 h-4" strokeWidth={2} />
+                  {hasActiveFilter && !filterBarOpen && (
+                    <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 bg-[var(--color-accent)] rounded-full" />
+                  )}
+                </button>
+                {!isMobile && (
+                  <span className="text-sm text-[var(--color-text-secondary)]">
+                    {displayCount} atom{displayCount !== 1 ? 's' : ''}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* Chat sidebar toggle — right-aligned */}
+            <button
+              onClick={handleOpenChat}
+              className={`p-1.5 rounded-md transition-colors ${
+                chatSidebarOpen
+                  ? 'text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
+                  : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
+              }`}
+              title={chatSidebarOpen ? "Hide chat" : "Show chat"}
+            >
+              <MessageCircle className="w-4 h-4" strokeWidth={2} />
+            </button>
+          </>
         )}
       </div>
 
-      {/* Search results header - only show for grid/list views */}
-      {isSemanticSearch && viewMode !== 'canvas' && (
+      {/* Search results header - only show in atoms view */}
+      {isSemanticSearch && viewMode === 'atoms' && (
         <div className="px-4 py-2 text-sm text-[var(--color-text-secondary)] border-b border-[var(--color-border)]">
           {semanticSearchResults.length > 0 ? (
             <span>
@@ -283,14 +624,33 @@ export function MainView() {
         </div>
       )}
 
-      {/* Filter bar - visible for grid/list views when not searching */}
-      {!isSemanticSearch && viewMode !== 'canvas' && <FilterBar />}
+      {/* Filter bar — desktop inline strip, atoms view only */}
+      {!isMobile && !isSemanticSearch && viewMode === 'atoms' && filterBarOpen && <FilterBar />}
+
+      {/* Filter sheet — mobile bottom sheet hosts view mode + filter + sort */}
+      {isMobile && (
+        <FilterSheet
+          isOpen={filterBarOpen}
+          onClose={() => setFilterBarOpen(false)}
+          displayCount={displayCount}
+        />
+      )}
 
       {/* Content */}
-      <div className="flex-1 overflow-hidden">
-        {viewMode === 'canvas' ? (
+      <div className="flex-1 overflow-hidden relative">
+        {localGraph.isOpen && localGraph.centerAtomId ? (
+          <LocalGraphView />
+        ) : readerState.atomId ? (
+          <AtomReader atomId={readerState.atomId} highlightText={readerState.highlightText} initialEditing={readerState.editing} />
+        ) : wikiReaderState.tagId && wikiReaderState.tagName ? (
+          <WikiReader tagId={wikiReaderState.tagId} tagName={wikiReaderState.tagName} />
+        ) : viewMode === 'dashboard' ? (
+          <DashboardView />
+        ) : viewMode === 'wiki' ? (
+          <WikiFullView />
+        ) : viewMode === 'canvas' ? (
           <SigmaCanvas />
-        ) : viewMode === 'grid' ? (
+        ) : atomsLayout === 'grid' ? (
           <AtomGrid
             atoms={displayAtoms}
             onAtomClick={handleAtomClick}
@@ -315,8 +675,69 @@ export function MainView() {
         )}
       </div>
 
-      {/* FAB */}
-      <FAB onClick={handleNewAtom} title="Create new atom" />
+      {/* FAB — on atoms + dashboard views, and only when no overlay is open */}
+      {(viewMode === 'atoms' || viewMode === 'dashboard') && !readerState.atomId && !wikiReaderState.tagId && !localGraph.isOpen && <FAB onClick={handleNewAtom} title="Create new atom" />}
+
+      {/* Embedding progress overlay */}
+      <EmbeddingProgressBanner />
+
+      {/* Delete confirmation modal for reader */}
+      <Modal
+        isOpen={showDeleteModal}
+        onClose={() => setShowDeleteModal(false)}
+        title="Delete Atom"
+        confirmLabel={isDeleting ? 'Deleting...' : 'Delete'}
+        confirmVariant="danger"
+        onConfirm={async () => {
+          if (!readerState.atomId) return;
+          setIsDeleting(true);
+          try {
+            await deleteAtom(readerState.atomId);
+            await fetchTags();
+            overlayDismiss();
+          } catch (error) {
+            console.error('Failed to delete atom:', error);
+          } finally {
+            setIsDeleting(false);
+            setShowDeleteModal(false);
+          }
+        }}
+      >
+        <p>Are you sure you want to delete this atom? This action cannot be undone.</p>
+      </Modal>
     </main>
+
+    {/* Chat sidebar backdrop — mobile only */}
+    <div
+      className={`fixed inset-0 bg-black/40 z-30 md:hidden transition-opacity duration-200 ${
+        chatSidebarOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'
+      }`}
+      onClick={() => chatSidebarOpen && toggleChatSidebar()}
+    />
+
+    {/* Chat sidebar — available in all views.
+        Desktop: flex sibling that animates width.
+        Mobile: fixed overlay that slides in from the right. */}
+    <div
+      className={`
+        relative flex-shrink-0 border-l border-[var(--color-border)] bg-[var(--color-bg-panel)] overflow-hidden
+        max-md:fixed max-md:top-0 max-md:right-0 max-md:h-full max-md:w-full max-md:z-40 max-md:shadow-2xl
+        md:w-[var(--chat-w)]
+        ${isResizingChat ? '' : 'transition-[width,transform] duration-300 ease-in-out'}
+        ${chatSidebarOpen ? 'max-md:translate-x-0' : 'max-md:translate-x-full'}
+        ${chatSidebarOpen ? '' : 'md:!w-0 md:border-l-0'}
+      `}
+      style={{ '--chat-w': `${chatSidebarWidth}px` } as React.CSSProperties}
+    >
+      {/* Resize handle — desktop only */}
+      <div
+        className="hidden md:block absolute left-0 top-0 h-full w-1.5 cursor-col-resize z-10 hover:bg-[var(--color-accent)]/20 active:bg-[var(--color-accent)]/30"
+        onMouseDown={handleChatResizeStart}
+      />
+      <div className="w-full md:min-w-[var(--chat-w)] h-full">
+        <ChatViewer />
+      </div>
+    </div>
+    </>
   );
 }

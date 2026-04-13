@@ -1,10 +1,12 @@
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 import { toast } from 'sonner';
 import { getTransport } from '../lib/transport';
 import { useAtomsStore } from './atoms';
 import { useTagsStore } from './tags';
 import { useWikiStore } from './wiki';
 import { useChatStore } from './chat';
+import { useBriefingStore } from './briefing';
 
 export interface DatabaseInfo {
   id: string;
@@ -33,7 +35,9 @@ interface DatabasesStore {
   getDatabaseStats: (id: string) => Promise<DatabaseStats>;
 }
 
-export const useDatabasesStore = create<DatabasesStore>((set, get) => ({
+export const useDatabasesStore = create<DatabasesStore>()(
+  persist(
+    (set, get) => ({
   databases: [],
   activeId: null,
   isLoading: false,
@@ -94,8 +98,10 @@ export const useDatabasesStore = create<DatabasesStore>((set, get) => ({
         useTagsStore.getState().reset();
         useWikiStore.getState().reset();
         useChatStore.getState().reset();
+        useBriefingStore.getState().reset();
         useTagsStore.getState().fetchTags();
         useAtomsStore.getState().fetchAtoms();
+        useBriefingStore.getState().fetchLatest();
       }
     } catch (e) {
       toast.error('Failed to delete database', { description: String(e) });
@@ -135,13 +141,33 @@ export const useDatabasesStore = create<DatabasesStore>((set, get) => ({
       useTagsStore.getState().reset();
       useWikiStore.getState().reset();
       useChatStore.getState().reset();
+      useBriefingStore.getState().reset();
+
+      // Hydrate the new DB's cached data before firing fetches — user sees
+      // the sidebar/list for the new DB instantly instead of an empty flash.
+      await Promise.all([
+        useTagsStore.getState().hydrateFromCache(id),
+        useAtomsStore.getState().hydrateFromCache(id),
+      ]);
 
       // Refetch data for the new database
       useTagsStore.getState().fetchTags();
       useAtomsStore.getState().fetchAtoms();
+      useBriefingStore.getState().fetchLatest();
     } catch (e) {
       toast.error('Failed to switch database', { description: String(e) });
       throw e;
     }
   },
-}));
+    }),
+    {
+      name: 'atomic-databases-storage',
+      version: 1,
+      // Only persist the activeId — the `databases` list, loading state, and
+      // errors should come from the server fresh. activeId is what we need
+      // *before* the network responds so cold-start can hydrate the right
+      // DB's cache.
+      partialize: (state) => ({ activeId: state.activeId }),
+    },
+  ),
+);

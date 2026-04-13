@@ -132,3 +132,87 @@ pub async fn recompute_all_tag_embeddings(db: Db) -> HttpResponse {
         Err(e) => crate::error::error_response(e),
     }
 }
+
+// ==================== Wiki Proposals (human-in-the-loop update review) ====================
+
+#[utoipa::path(
+    post,
+    path = "/api/wiki/{tag_id}/propose",
+    params(("tag_id" = String, Path, description = "Tag ID")),
+    request_body = GenerateWikiBody,
+    responses(
+        (status = 200, description = "Proposal created or no update needed", body = atomic_core::WikiProposal),
+        (status = 400, description = "Error", body = ApiErrorResponse)
+    ),
+    tag = "wiki"
+)]
+pub async fn propose_wiki(
+    db: Db,
+    path: web::Path<String>,
+    body: web::Json<GenerateWikiBody>,
+) -> HttpResponse {
+    let tag_id = path.into_inner();
+    match db.0.propose_wiki_update(&tag_id, &body.tag_name).await {
+        Ok(Some(proposal)) => HttpResponse::Ok().json(proposal),
+        Ok(None) => HttpResponse::Ok().json(serde_json::json!({
+            "status": "no_update_needed"
+        })),
+        Err(e) => crate::error::error_response(e),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/wiki/{tag_id}/proposal",
+    params(("tag_id" = String, Path, description = "Tag ID")),
+    responses(
+        (status = 200, description = "Pending wiki proposal", body = atomic_core::WikiProposal),
+        (status = 404, description = "No pending proposal", body = ApiErrorResponse)
+    ),
+    tag = "wiki"
+)]
+pub async fn get_wiki_proposal(db: Db, path: web::Path<String>) -> HttpResponse {
+    let tag_id = path.into_inner();
+    match db.0.get_wiki_proposal(&tag_id) {
+        Ok(Some(proposal)) => HttpResponse::Ok().json(proposal),
+        Ok(None) => HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "No pending proposal for this tag"})),
+        Err(e) => crate::error::error_response(e),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/wiki/{tag_id}/proposal/accept",
+    params(("tag_id" = String, Path, description = "Tag ID")),
+    responses(
+        (status = 200, description = "Proposal accepted and promoted to live article", body = atomic_core::WikiArticleWithCitations),
+        (status = 400, description = "Error", body = ApiErrorResponse)
+    ),
+    tag = "wiki"
+)]
+pub async fn accept_wiki_proposal(db: Db, path: web::Path<String>) -> HttpResponse {
+    let tag_id = path.into_inner();
+    match db.0.accept_wiki_proposal(&tag_id).await {
+        Ok(article) => HttpResponse::Ok().json(article),
+        Err(e) => crate::error::error_response(e),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/wiki/{tag_id}/proposal/dismiss",
+    params(("tag_id" = String, Path, description = "Tag ID")),
+    responses(
+        (status = 204, description = "Proposal dismissed"),
+        (status = 400, description = "Error", body = ApiErrorResponse)
+    ),
+    tag = "wiki"
+)]
+pub async fn dismiss_wiki_proposal(db: Db, path: web::Path<String>) -> HttpResponse {
+    let tag_id = path.into_inner();
+    match db.0.dismiss_wiki_proposal(&tag_id).await {
+        Ok(()) => HttpResponse::NoContent().finish(),
+        Err(e) => crate::error::error_response(e),
+    }
+}

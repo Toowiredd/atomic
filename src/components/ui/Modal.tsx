@@ -1,5 +1,6 @@
 import { ReactNode, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { X } from 'lucide-react';
 import { Button } from './Button';
 
 interface ModalProps {
@@ -67,9 +68,7 @@ export function Modal({
             onClick={onClose}
             className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <X className="w-5 h-5" strokeWidth={2} />
           </button>
         </div>
         <div className="px-6 py-4 text-[var(--color-text-primary)]">

@@ -126,6 +126,8 @@ impl SqliteStorage {
             updated_at: created_at.to_string(),
             embedding_status: embedding_status.to_string(),
             tagging_status: "pending".to_string(),
+            embedding_error: None,
+            tagging_error: None,
         };
 
         let tags = {
@@ -201,6 +203,8 @@ impl SqliteStorage {
                     updated_at: created_at.clone(),
                     embedding_status: "pending".to_string(),
                     tagging_status: "pending".to_string(),
+                    embedding_error: None,
+                    tagging_error: None,
                 };
 
                 atoms_with_tags.push(AtomWithTags {
@@ -228,7 +232,27 @@ impl SqliteStorage {
         request: &UpdateAtomRequest,
         updated_at: &str,
     ) -> StorageResult<AtomWithTags> {
-        let embedding_status = "pending";
+        self.update_atom_inner(id, request, updated_at, true)
+    }
+
+    /// Content-only update: saves content/metadata but does NOT reset embedding_status.
+    /// Used by auto-save during inline editing.
+    pub(crate) fn update_atom_content_only_impl(
+        &self,
+        id: &str,
+        request: &UpdateAtomRequest,
+        updated_at: &str,
+    ) -> StorageResult<AtomWithTags> {
+        self.update_atom_inner(id, request, updated_at, false)
+    }
+
+    fn update_atom_inner(
+        &self,
+        id: &str,
+        request: &UpdateAtomRequest,
+        updated_at: &str,
+        reset_embedding_status: bool,
+    ) -> StorageResult<AtomWithTags> {
         let (title, snippet) = extract_title_and_snippet(&request.content, 300);
         let source = request.source_url.as_deref().map(parse_source);
 
@@ -242,22 +266,40 @@ impl SqliteStorage {
             conn.execute_batch("BEGIN")?;
 
             if let Err(e) = (|| -> Result<(), AtomicCoreError> {
-                conn.execute(
-                    "UPDATE atoms SET content = ?1, source_url = ?2, source = ?3, published_at = ?4, updated_at = ?5, embedding_status = ?6,
-                     title = ?7, snippet = ?8
-                     WHERE id = ?9",
-                    (
-                        &request.content,
-                        &request.source_url,
-                        &source,
-                        &request.published_at,
-                        updated_at,
-                        &embedding_status,
-                        &title,
-                        &snippet,
-                        id,
-                    ),
-                )?;
+                if reset_embedding_status {
+                    conn.execute(
+                        "UPDATE atoms SET content = ?1, source_url = ?2, source = ?3, published_at = ?4, updated_at = ?5, embedding_status = ?6,
+                         title = ?7, snippet = ?8
+                         WHERE id = ?9",
+                        (
+                            &request.content,
+                            &request.source_url,
+                            &source,
+                            &request.published_at,
+                            updated_at,
+                            "pending",
+                            &title,
+                            &snippet,
+                            id,
+                        ),
+                    )?;
+                } else {
+                    conn.execute(
+                        "UPDATE atoms SET content = ?1, source_url = ?2, source = ?3, published_at = ?4, updated_at = ?5,
+                         title = ?6, snippet = ?7
+                         WHERE id = ?8",
+                        (
+                            &request.content,
+                            &request.source_url,
+                            &source,
+                            &request.published_at,
+                            updated_at,
+                            &title,
+                            &snippet,
+                            id,
+                        ),
+                    )?;
+                }
 
                 if let Some(ref tag_ids) = request.tag_ids {
                     conn.execute("DELETE FROM atom_tags WHERE atom_id = ?1", [id])?;
@@ -525,7 +567,8 @@ impl SqliteStorage {
             format!(
                 "SELECT a.id, a.title, a.snippet, a.source_url, a.source, a.published_at,
                         a.created_at, a.updated_at,
-                        COALESCE(a.embedding_status, 'pending'), COALESCE(a.tagging_status, 'pending')
+                        COALESCE(a.embedding_status, 'pending'), COALESCE(a.tagging_status, 'pending'),
+                        a.embedding_error, a.tagging_error
                  FROM atoms a
                  {where_sql}
                  ORDER BY {sort_col} {sort_dir}, a.id {sort_dir}
@@ -538,7 +581,8 @@ impl SqliteStorage {
             format!(
                 "SELECT a.id, a.title, a.snippet, a.source_url, a.source, a.published_at,
                         a.created_at, a.updated_at,
-                        COALESCE(a.embedding_status, 'pending'), COALESCE(a.tagging_status, 'pending')
+                        COALESCE(a.embedding_status, 'pending'), COALESCE(a.tagging_status, 'pending'),
+                        a.embedding_error, a.tagging_error
                  FROM atoms a
                  {where_sql}
                  ORDER BY {sort_col} {sort_dir}, a.id {sort_dir}
@@ -560,6 +604,8 @@ impl SqliteStorage {
             String,
             String,
             String,
+            Option<String>,
+            Option<String>,
         );
         let atoms: Vec<AtomRow> = stmt
             .query_map(bind_refs.as_slice(), |row| {
@@ -574,6 +620,8 @@ impl SqliteStorage {
                     row.get(7)?,
                     row.get(8)?,
                     row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -611,6 +659,8 @@ impl SqliteStorage {
                     updated_at,
                     embedding_status,
                     tagging_status,
+                    embedding_error,
+                    tagging_error,
                 )| {
                     let tags = tag_map.get(&id).cloned().unwrap_or_default();
                     AtomSummary {
@@ -624,6 +674,8 @@ impl SqliteStorage {
                         updated_at,
                         embedding_status,
                         tagging_status,
+                        embedding_error,
+                        tagging_error,
                         tags,
                     }
                 },
@@ -661,6 +713,18 @@ impl SqliteStorage {
 
         let status: String = conn.query_row(
             "SELECT COALESCE(embedding_status, 'pending') FROM atoms WHERE id = ?1",
+            [atom_id],
+            |row| row.get(0),
+        )?;
+
+        Ok(status)
+    }
+
+    pub(crate) fn get_tagging_status_impl(&self, atom_id: &str) -> StorageResult<String> {
+        let conn = self.db.read_conn()?;
+
+        let status: String = conn.query_row(
+            "SELECT COALESCE(tagging_status, 'pending') FROM atoms WHERE id = ?1",
             [atom_id],
             |row| row.get(0),
         )?;
@@ -718,6 +782,24 @@ impl SqliteStorage {
         Ok(ids)
     }
 
+    /// Get distinct tag IDs for a batch of atoms in a single query.
+    pub(crate) fn get_tag_ids_for_atoms_batch_impl(&self, atom_ids: &[String]) -> StorageResult<Vec<String>> {
+        if atom_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.db.read_conn()?;
+        let placeholders = atom_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT DISTINCT tag_id FROM atom_tags WHERE atom_id IN ({})",
+            placeholders
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let ids = stmt
+            .query_map(rusqlite::params_from_iter(atom_ids.iter()), |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(ids)
+    }
+
     pub(crate) fn get_atom_content_impl(&self, atom_id: &str) -> StorageResult<Option<String>> {
         let conn = self.db.read_conn()?;
         match conn.query_row(
@@ -729,6 +811,25 @@ impl SqliteStorage {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(AtomicCoreError::Database(e)),
         }
+    }
+
+    pub(crate) fn get_atom_contents_batch_impl(&self, atom_ids: &[String]) -> StorageResult<Vec<(String, String)>> {
+        if atom_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let conn = self.db.read_conn()?;
+        let placeholders: String = atom_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query = format!("SELECT id, content FROM atoms WHERE id IN ({})", placeholders);
+        let mut stmt = conn.prepare(&query)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(atom_ids.iter()),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let mut results = Vec::with_capacity(atom_ids.len());
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
     }
 
     pub(crate) fn get_atoms_with_embeddings_impl(
@@ -800,6 +901,25 @@ impl SqliteStorage {
             )
             .unwrap_or(false);
         Ok(exists)
+    }
+
+    pub(crate) fn get_atom_by_source_url_sync(&self, url: &str) -> StorageResult<Option<AtomWithTags>> {
+        let conn = self.db.read_conn()?;
+
+        let atom_result = conn.query_row(
+            &format!("SELECT {} FROM atoms WHERE source_url = ?1", ATOM_COLUMNS),
+            [url],
+            atom_from_row,
+        );
+
+        match atom_result {
+            Ok(atom) => {
+                let tags = get_tags_for_atom(&conn, &atom.id)?;
+                Ok(Some(AtomWithTags { atom, tags }))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(AtomicCoreError::Database(e)),
+        }
     }
 
     pub(crate) fn count_pending_embeddings_sync(&self) -> StorageResult<i32> {
@@ -874,6 +994,39 @@ impl SqliteStorage {
         Ok(map)
     }
 
+    /// Lightweight canvas metadata: (atom_id, title, primary_tag_name, tag_count).
+    /// No full content, no embedding blobs — just what the canvas needs.
+    ///
+    /// Uses a single LEFT JOIN + GROUP BY instead of correlated subqueries so
+    /// the query is O(atoms + tag_links) rather than O(atoms × 2) index lookups.
+    /// `primary_tag` is MIN(name) — alphabetically stable, unlike the previous
+    /// LIMIT-1 nondeterministic pick.
+    pub(crate) fn get_canvas_atom_metadata_light_sync(
+        &self,
+    ) -> StorageResult<Vec<(String, String, Option<String>, i32)>> {
+        let conn = self.db.read_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT a.id, a.title, MIN(t.name) AS primary_tag, COUNT(at.tag_id) AS tag_count
+             FROM atoms a
+             LEFT JOIN atom_tags at ON at.atom_id = a.id
+             LEFT JOIN tags t ON t.id = at.tag_id
+             WHERE a.embedding_status = 'complete'
+             GROUP BY a.id, a.title"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i32>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows)
+    }
+
     pub(crate) fn get_canvas_atom_metadata_sync(&self) -> StorageResult<Vec<CanvasAtomPosition>> {
         let conn = self.db.read_conn()?;
         let mut stmt = conn.prepare(
@@ -943,6 +1096,15 @@ impl AtomStore for SqliteStorage {
         self.update_atom_impl(id, request, updated_at)
     }
 
+    async fn update_atom_content_only(
+        &self,
+        id: &str,
+        request: &UpdateAtomRequest,
+        updated_at: &str,
+    ) -> StorageResult<AtomWithTags> {
+        self.update_atom_content_only_impl(id, request, updated_at)
+    }
+
     async fn delete_atom(&self, id: &str) -> StorageResult<()> {
         self.delete_atom_impl(id)
     }
@@ -961,6 +1123,10 @@ impl AtomStore for SqliteStorage {
 
     async fn get_embedding_status(&self, atom_id: &str) -> StorageResult<String> {
         self.get_embedding_status_impl(atom_id)
+    }
+
+    async fn get_tagging_status(&self, atom_id: &str) -> StorageResult<String> {
+        self.get_tagging_status_impl(atom_id)
     }
 
     async fn get_atom_positions(&self) -> StorageResult<Vec<AtomPosition>> {
@@ -983,12 +1149,20 @@ impl AtomStore for SqliteStorage {
         self.get_atom_content_impl(atom_id)
     }
 
+    async fn get_atom_contents_batch(&self, atom_ids: &[String]) -> StorageResult<Vec<(String, String)>> {
+        self.get_atom_contents_batch_impl(atom_ids)
+    }
+
     async fn check_existing_source_urls(&self, urls: &[String]) -> StorageResult<HashSet<String>> {
         self.check_existing_source_urls_sync(urls)
     }
 
     async fn source_url_exists(&self, url: &str) -> StorageResult<bool> {
         self.source_url_exists_sync(url)
+    }
+
+    async fn get_atom_by_source_url(&self, url: &str) -> StorageResult<Option<AtomWithTags>> {
+        self.get_atom_by_source_url_sync(url)
     }
 
     async fn count_pending_embeddings(&self) -> StorageResult<i32> {
@@ -1009,5 +1183,9 @@ impl AtomStore for SqliteStorage {
 
     async fn get_canvas_atom_metadata(&self) -> StorageResult<Vec<CanvasAtomPosition>> {
         self.get_canvas_atom_metadata_sync()
+    }
+
+    async fn get_canvas_atom_metadata_light(&self) -> StorageResult<Vec<(String, String, Option<String>, i32)>> {
+        self.get_canvas_atom_metadata_light_sync()
     }
 }

@@ -1,27 +1,32 @@
 import { useState, useEffect, useCallback, Fragment, ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { WikiArticle, WikiCitation, WikiLink, RelatedTag, useWikiStore } from '../../stores/wiki';
+import { Plus } from 'lucide-react';
+import { WikiArticle, WikiCitation, WikiLink, RelatedTag } from '../../stores/wiki';
 import { CitationLink } from './CitationLink';
 import { CitationPopover } from './CitationPopover';
 import { WikiLinkInline } from './WikiLinkInline';
 import { SearchBar } from '../ui/SearchBar';
 import { MarkdownImage } from '../ui/MarkdownImage';
 import { useContentSearch } from '../../hooks';
+import { formatRelativeTime } from '../../lib/date';
 
 interface WikiArticleContentProps {
   article: WikiArticle;
   citations: WikiCitation[];
   wikiLinks: WikiLink[];
   relatedTags: RelatedTag[];
+  tagName: string;
+  updatedAt: string;
+  sourceCount: number;
+  titleActions?: ReactNode;
   onViewAtom: (atomId: string) => void;
   onNavigateToArticle: (tagId: string, tagName: string) => void;
 }
 
-export function WikiArticleContent({ article, citations, wikiLinks, relatedTags, onViewAtom, onNavigateToArticle }: WikiArticleContentProps) {
+export function WikiArticleContent({ article, citations, wikiLinks, relatedTags, tagName, updatedAt, sourceCount, titleActions, onViewAtom, onNavigateToArticle }: WikiArticleContentProps) {
   const [activeCitation, setActiveCitation] = useState<WikiCitation | null>(null);
   const [anchorRect, setAnchorRect] = useState<{ top: number; left: number; bottom: number; width: number } | null>(null);
-  const openAndGenerate = useWikiStore(s => s.openAndGenerate);
 
   // Content search
   const {
@@ -68,10 +73,8 @@ export function WikiArticleContent({ article, citations, wikiLinks, relatedTags,
   };
 
   const handleWikiLinkClick = (link: WikiLink) => {
-    if (link.has_article && link.target_tag_id) {
+    if (link.target_tag_id) {
       onNavigateToArticle(link.target_tag_id, link.target_tag_name);
-    } else if (link.target_tag_id) {
-      openAndGenerate(link.target_tag_id, link.target_tag_name);
     }
   };
 
@@ -229,15 +232,33 @@ export function WikiArticleContent({ article, citations, wikiLinks, relatedTags,
           />
         )}
 
-        <div className="prose prose-invert prose-sm max-w-none px-6 py-4 prose-headings:text-[var(--color-text-primary)] prose-p:text-[var(--color-text-primary)] prose-a:text-[var(--color-accent)] prose-strong:text-[var(--color-text-primary)] prose-code:text-[var(--color-accent-light)] prose-code:bg-[var(--color-bg-card)] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[var(--color-bg-card)] prose-pre:border prose-pre:border-[var(--color-border)] prose-blockquote:border-l-[var(--color-accent)] prose-blockquote:text-[var(--color-text-secondary)] prose-li:text-[var(--color-text-primary)] prose-hr:border-[var(--color-border)]">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-            {article.content}
-          </ReactMarkdown>
+        <div className="max-w-3xl mx-auto px-8 py-6">
+          {/* Article title */}
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <h1 className="text-2xl font-bold text-[var(--color-text-primary)] mb-1">{tagName}</h1>
+              <p className="text-xs text-[var(--color-text-secondary)]">
+                Updated {formatRelativeTime(updatedAt)} • {sourceCount} source{sourceCount !== 1 ? 's' : ''}
+              </p>
+            </div>
+            {titleActions && (
+              <div className="flex items-center gap-1 flex-shrink-0">
+                {titleActions}
+              </div>
+            )}
+          </div>
+          <div className="border-b border-[var(--color-border)] mb-5 mt-4" />
+
+          <div className="prose prose-invert prose-headings:text-[var(--color-text-primary)] prose-h2:border-b prose-h2:border-[var(--color-border)] prose-h2:pb-1.5 prose-h2:mb-3 prose-p:text-[var(--color-text-primary)] prose-p:leading-relaxed prose-a:text-[var(--color-text-primary)] prose-a:underline prose-a:decoration-[var(--color-border-hover)] hover:prose-a:decoration-current prose-strong:text-[var(--color-text-primary)] prose-code:text-[var(--color-accent-light)] prose-code:bg-[var(--color-bg-card)] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[var(--color-bg-card)] prose-pre:border prose-pre:border-[var(--color-border)] prose-blockquote:border-l-[var(--color-accent)] prose-blockquote:text-[var(--color-text-secondary)] prose-li:text-[var(--color-text-primary)] prose-hr:border-[var(--color-border)]">
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+              {article.content.replace(/^#\s+[^\n]+\n+/, '')}
+            </ReactMarkdown>
+          </div>
         </div>
 
         {/* Related Articles section (tags with existing articles) */}
         {relatedTags.some(t => t.has_article) && (
-          <div className="border-t border-[var(--color-border)] mt-2 pt-4 px-6 pb-4">
+          <div className="max-w-3xl mx-auto border-t border-[var(--color-border)] mt-2 pt-4 px-8 pb-4">
             <h3 className="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-3">
               Related Articles
             </h3>
@@ -258,7 +279,7 @@ export function WikiArticleContent({ article, citations, wikiLinks, relatedTags,
 
         {/* Recommended articles to generate (related tags without articles) */}
         {relatedTags.some(t => !t.has_article) && (
-          <div className="border-t border-[var(--color-border)] pt-4 px-6 pb-6">
+          <div className="max-w-3xl mx-auto border-t border-[var(--color-border)] pt-4 px-8 pb-6">
             <h3 className="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-2">
               Recommended
             </h3>
@@ -266,7 +287,7 @@ export function WikiArticleContent({ article, citations, wikiLinks, relatedTags,
               {relatedTags.filter(t => !t.has_article).map(tag => (
                 <button
                   key={tag.tag_id}
-                  onClick={() => openAndGenerate(tag.tag_id, tag.tag_name)}
+                  onClick={() => onNavigateToArticle(tag.tag_id, tag.tag_name)}
                   className="w-full group flex items-center justify-between px-3 py-2 hover:bg-[var(--color-bg-elevated)] transition-colors text-left"
                 >
                   <div className="min-w-0 flex-1">
@@ -285,9 +306,7 @@ export function WikiArticleContent({ article, citations, wikiLinks, relatedTags,
                     </div>
                   </div>
                   <div className="flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity ml-2">
-                    <svg className="w-4 h-4 text-[var(--color-accent)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                    </svg>
+                    <Plus className="w-4 h-4 text-[var(--color-accent)]" strokeWidth={2} />
                   </div>
                 </button>
               ))}

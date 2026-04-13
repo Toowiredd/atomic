@@ -10,12 +10,8 @@ pub mod event_bridge;
 pub mod log_buffer;
 pub mod mcp;
 pub mod mcp_auth;
-pub mod rate_limiter;
-pub mod request_logger;
 pub mod routes;
-pub mod security_headers;
 pub mod state;
-pub mod sync;
 pub mod ws;
 
 use actix_web::{HttpResponse, Responder};
@@ -35,6 +31,7 @@ pub use utoipa_scalar::{Scalar, Servable};
         routes::atoms::get_atom,
         routes::atoms::create_atom,
         routes::atoms::update_atom,
+        routes::atoms::update_atom_content_only,
         routes::atoms::delete_atom,
         routes::atoms::bulk_create_atoms,
         routes::atoms::get_source_list,
@@ -44,6 +41,8 @@ pub use utoipa_scalar::{Scalar, Servable};
         routes::atoms::create_tag,
         routes::atoms::update_tag,
         routes::atoms::delete_tag,
+        routes::atoms::set_tag_autotag_target,
+        routes::atoms::configure_autotag_targets,
         // Search
         routes::search::search,
         routes::search::find_similar,
@@ -66,6 +65,7 @@ pub use utoipa_scalar::{Scalar, Servable};
         routes::settings::test_openrouter_connection,
         routes::settings::test_openai_compat_connection,
         routes::settings::get_available_llm_models,
+        routes::settings::get_openrouter_embedding_models,
         // Embeddings
         routes::embedding::process_pending_embeddings,
         routes::embedding::process_pending_tagging,
@@ -186,6 +186,8 @@ pub use utoipa_scalar::{Scalar, Servable};
         routes::atoms::UpdateAtomRequest,
         routes::atoms::CreateTagRequest,
         routes::atoms::UpdateTagRequest,
+        routes::atoms::SetAutotagTargetRequest,
+        routes::atoms::ConfigureAutotagTargetsRequest,
         routes::search::SearchRequest,
         routes::wiki::GenerateWikiBody,
         routes::settings::SetSettingBody,

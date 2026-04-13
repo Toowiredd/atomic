@@ -1,21 +1,39 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { toast } from 'sonner';
+import {
+  X,
+  Check,
+  Copy,
+  Eye,
+  EyeOff,
+  Loader2,
+  Pause,
+  Play,
+  Pencil,
+  RefreshCw,
+  Trash2,
+  Upload,
+  ChevronRight,
+  AlertCircle,
+} from 'lucide-react';
 import { Button } from '../ui/Button';
 import { CustomSelect } from '../ui/CustomSelect';
 import { SearchableSelect } from '../ui/SearchableSelect';
 import { ConnectionStatus } from '../ui/ConnectionStatus';
 import { useSettingsStore } from '../../stores/settings';
 import { useAtomsStore } from '../../stores/atoms';
-import { useTagsStore } from '../../stores/tags';
+import { useTagsStore, type TagWithCount } from '../../stores/tags';
 import { THEMES, Theme } from '../../hooks/useTheme';
+import { FONTS, Font } from '../../hooks/useFont';
 import {
   getAvailableLlmModels,
+  getOpenRouterEmbeddingModels,
   testOllamaConnection,
   testOpenAICompatConnection,
   getOllamaModels,
-  importObsidianVault,
-  getMcpConfig,
+  getMcpStdioConfig,
+  getMcpHttpConfig,
   listApiTokens,
   createApiToken,
   revokeApiToken,
@@ -26,6 +44,7 @@ import {
   deleteFeed,
   pollFeed,
   type AvailableModel,
+  type OpenRouterEmbeddingModel,
   type OllamaModel,
   type ImportResult,
   type McpConfig,
@@ -34,629 +53,173 @@ import {
   type Feed,
   reembedAllAtoms,
   exportLogs,
-  persistLogs,
-  importConversations,
-  importRemote,
-  listSyncSources,
-  createSyncSource,
-  updateSyncSource,
-  deleteSyncSource,
-  runSyncSource,
-  testSyncConnection,
-  type SyncSource,
   type IngestionResult,
   type FeedPollResult,
 } from '../../lib/api';
-import { getTransport, switchTransport, switchToLocal, isDesktopApp, isLocalServer, type HttpTransportConfig } from '../../lib/transport';
+import { getTransport, switchTransport, switchToLocal, isDesktopApp, isLocalServer, getMcpBridgePath, type HttpTransportConfig } from '../../lib/transport';
 import { pickDirectory } from '../../lib/platform';
+import { importMarkdownFolder, type ImportProgress } from '../../lib/import';
 import { formatRelativeDate } from '../../lib/date';
 import { useDatabasesStore, type DatabaseInfo, type DatabaseStats } from '../../stores/databases';
 
-type SettingsTab = 'general' | 'ai' | 'connection' | 'feeds' | 'integrations' | 'sync' | 'databases';
+export type SettingsTab = 'general' | 'ai' | 'tag-categories' | 'connection' | 'feeds' | 'integrations' | 'databases';
 
 const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: 'General' },
   { id: 'ai', label: 'AI Models' },
+  { id: 'tag-categories', label: 'Tags' },
   { id: 'connection', label: 'Connection' },
   { id: 'feeds', label: 'Feeds' },
   { id: 'integrations', label: 'Integrations' },
-  { id: 'sync', label: 'Sync' },
   { id: 'databases', label: 'Databases' },
 ];
 
-// ==================== Sync Tab ====================
-
-const SYNC_TYPES = [
-  { value: 'chatgpt', label: 'ChatGPT Export (conversations.json)' },
-  { value: 'claude', label: 'Claude Export (JSON)' },
-  { value: 'markdown_dir', label: 'Markdown Directory' },
-  { value: 'remote_atomic', label: 'Remote Atomic Server' },
-  { value: 'log_file', label: 'Log File' },
-];
-
-const INTERVAL_OPTIONS = [
-  { value: 0, label: 'Manual only' },
-  { value: 300, label: 'Every 5 minutes' },
-  { value: 900, label: 'Every 15 minutes' },
-  { value: 1800, label: 'Every 30 minutes' },
-  { value: 3600, label: 'Every hour' },
-  { value: 21600, label: 'Every 6 hours' },
-  { value: 86400, label: 'Daily' },
-];
-
-function SyncTab() {
-  const [sources, setSources] = useState<SyncSource[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [showAddForm, setShowAddForm] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  // Live sync progress state keyed by source_id
-  const [syncActivity, setSyncActivity] = useState<Record<string, {
-    status: 'running' | 'done' | 'failed';
-    message?: string;
-    current?: number;
-    total?: number;
-    elapsed_ms?: number;
-    result?: { conversations_imported: number; messages_imported: number; atoms_imported: number };
-    error?: string;
-  }>>({});
-
-  // One-off conversation import state
-  const [convImportPath, setConvImportPath] = useState('');
-  const [convImportType, setConvImportType] = useState<'chatgpt' | 'claude' | 'markdown'>('chatgpt');
-  const [convImporting, setConvImporting] = useState(false);
-  const [convImportResult, setConvImportResult] = useState<{ conversations_imported: number; messages_imported: number } | null>(null);
-
-  // Remote pull state
-  const [remoteUrl, setRemoteUrl] = useState('');
-  const [remoteToken, setRemoteToken] = useState('');
-  const [remotePulling, setRemotePulling] = useState(false);
-  const [remotePullResult, setRemotePullResult] = useState<{ conversations_imported: number; messages_imported: number } | null>(null);
-
-  // Persist logs state
-  const [persistingLogs, setPersistingLogs] = useState(false);
-
-  // New source form
+function TagCategoriesTab() {
+  const tags = useTagsStore(s => s.tags);
+  const fetchTags = useTagsStore(s => s.fetchTags);
+  const setTagAutotagTarget = useTagsStore(s => s.setTagAutotagTarget);
+  const createTag = useTagsStore(s => s.createTag);
   const [newName, setNewName] = useState('');
-  const [newType, setNewType] = useState('chatgpt');
-  const [newUrl, setNewUrl] = useState('');
-  const [newPath, setNewPath] = useState('');
-  const [newToken, setNewToken] = useState('');
-  const [newInterval, setNewInterval] = useState(0);
-  const [isCreating, setIsCreating] = useState(false);
-
-  const fetchSources = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      const data = await listSyncSources();
-      setSources(data);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
+  const [creating, setCreating] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchSources();
-  }, [fetchSources]);
+    fetchTags();
+  }, [fetchTags]);
 
-  // Subscribe to sync WebSocket events for live progress
-  useEffect(() => {
-    const transport = getTransport();
+  // Top-level tags only — flag is currently constrained to root tags.
+  const topLevel = tags.filter(t => !t.parent_id);
+  const targets = topLevel.filter(t => t.is_autotag_target);
+  const available = topLevel.filter(t => !t.is_autotag_target);
 
-    const unsubStarted = transport.subscribe<{ source_id: string; source_name: string }>(
-      'sync-started',
-      ({ source_id }) => {
-        setSyncActivity((prev) => ({
-          ...prev,
-          [source_id]: { status: 'running', message: 'Starting…' },
-        }));
-      }
-    );
-
-    const unsubProgress = transport.subscribe<{ source_id: string; current: number; total: number; message: string; elapsed_ms?: number }>(
-      'sync-progress',
-      ({ source_id, current, total, message, elapsed_ms }) => {
-        setSyncActivity((prev) => ({
-          ...prev,
-          [source_id]: { status: 'running', message, current, total, elapsed_ms },
-        }));
-      }
-    );
-
-    const unsubComplete = transport.subscribe<{ source_id: string; conversations_imported: number; messages_imported: number; atoms_imported: number }>(
-      'sync-complete',
-      ({ source_id, conversations_imported, messages_imported, atoms_imported }) => {
-        setSyncActivity((prev) => ({
-          ...prev,
-          [source_id]: {
-            status: 'done',
-            result: { conversations_imported, messages_imported, atoms_imported },
-          },
-        }));
-        // Refresh the source list to show updated last_synced_at
-        fetchSources();
-      }
-    );
-
-    const unsubFailed = transport.subscribe<{ source_id: string; error: string }>(
-      'sync-failed',
-      ({ source_id, error }) => {
-        setSyncActivity((prev) => ({
-          ...prev,
-          [source_id]: { status: 'failed', error },
-        }));
-        fetchSources();
-      }
-    );
-
-    return () => {
-      unsubStarted();
-      unsubProgress();
-      unsubComplete();
-      unsubFailed();
-    };
-  }, [fetchSources]);
-
-  const [testingConnectionId, setTestingConnectionId] = useState<string | null>(null);
-
-  const handleRunNow = async (id: string) => {
-    setError(null);
-    // Optimistically mark as running (server will confirm via WS)
-    setSyncActivity((prev) => ({ ...prev, [id]: { status: 'running', message: 'Starting…' } }));
+  const handleToggle = async (id: string, value: boolean) => {
+    setErrorMsg(null);
     try {
-      await runSyncSource(id);
+      await setTagAutotagTarget(id, value);
     } catch (e) {
-      // 409 = already running, 429 = cooldown; clear our optimistic state
-      setSyncActivity((prev) => {
-        const next = { ...prev };
-        delete next[id];
-        return next;
-      });
-      setError(String(e));
-    }
-  };
-
-  const handleTestConnection = async (id: string) => {
-    setTestingConnectionId(id);
-    try {
-      const result = await testSyncConnection(id);
-      if (result.ok) {
-        toast.success(result.message);
-      } else {
-        toast.error(result.message);
-      }
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setTestingConnectionId(null);
-    }
-  };
-
-  const handleToggleEnabled = async (source: SyncSource) => {
-    try {
-      await updateSyncSource(source.id, { enabled: !source.enabled });
-      fetchSources();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  const handleDelete = async (id: string) => {
-    setDeletingId(id);
-    try {
-      await deleteSyncSource(id);
-      setSources((prev) => prev.filter((s) => s.id !== id));
-      setSyncActivity((prev) => {
-        const next = { ...prev };
-        delete next[id];
-        return next;
-      });
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setDeletingId(null);
+      setErrorMsg(String(e));
     }
   };
 
   const handleCreate = async () => {
-    if (!newName.trim()) return;
-    setIsCreating(true);
+    const trimmed = newName.trim();
+    if (!trimmed) return;
+    if (trimmed.includes('/')) {
+      setErrorMsg('Category names cannot contain "/".');
+      return;
+    }
+    if (topLevel.some(t => t.name.toLowerCase() === trimmed.toLowerCase())) {
+      setErrorMsg(`A top-level tag named "${trimmed}" already exists.`);
+      return;
+    }
+    setCreating(true);
+    setErrorMsg(null);
     try {
-      await createSyncSource({
-        name: newName.trim(),
-        sourceType: newType,
-        sourceUrl: newUrl || undefined,
-        sourcePath: newPath || undefined,
-        sourceToken: newToken || undefined,
-        intervalSecs: newInterval,
-      });
+      const created = await createTag(trimmed);
+      await setTagAutotagTarget(created.id, true);
       setNewName('');
-      setNewType('chatgpt');
-      setNewUrl('');
-      setNewPath('');
-      setNewToken('');
-      setNewInterval(0);
-      setShowAddForm(false);
-      await fetchSources();
-      toast.success('Sync source created');
     } catch (e) {
-      setError(String(e));
+      setErrorMsg(String(e));
     } finally {
-      setIsCreating(false);
+      setCreating(false);
     }
   };
-
-  const handleOneOffImport = async () => {
-    if (!convImportPath.trim()) return;
-    setConvImporting(true);
-    setConvImportResult(null);
-    try {
-      const result = await importConversations(convImportType, convImportPath.trim());
-      setConvImportResult(result);
-      toast.success(`Imported ${result.conversations_imported} conversations`);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setConvImporting(false);
-    }
-  };
-
-  const handleRemotePull = async () => {
-    if (!remoteUrl.trim()) return;
-    setRemotePulling(true);
-    setRemotePullResult(null);
-    try {
-      const result = await importRemote(remoteUrl.trim(), remoteToken || undefined);
-      setRemotePullResult(result);
-      toast.success(`Pulled ${result.conversations_imported} conversations`);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setRemotePulling(false);
-    }
-  };
-
-  const handlePersistLogs = async () => {
-    setPersistingLogs(true);
-    try {
-      const result = await persistLogs();
-      if (result.atom_id) {
-        toast.success('Logs saved as atom');
-      } else {
-        toast.info(result.message ?? 'Nothing to persist');
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setPersistingLogs(false);
-    }
-  };
-
-  const intervalLabel = (secs: number) =>
-    INTERVAL_OPTIONS.find((o) => o.value === secs)?.label ?? `${secs}s`;
-
-  const typeLabel = (t: string) =>
-    SYNC_TYPES.find((s) => s.value === t)?.label ?? t;
 
   return (
-    <div className="space-y-6">
-      {error && (
-        <div className="text-sm text-red-400 bg-red-950/30 border border-red-800 rounded px-3 py-2">
-          {error}
-          <button className="ml-2 underline" onClick={() => setError(null)}>dismiss</button>
+    <>
+      <div className="space-y-1">
+        <h3 className="text-sm font-medium text-[var(--color-text-primary)]">Auto-Tag Categories</h3>
+        <p className="text-xs text-[var(--color-text-secondary)]">
+          The AI auto-tagger only creates new sub-tags under categories you mark as targets.
+        </p>
+      </div>
+
+      {targets.length === 0 && (
+        <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-200">
+          No auto-tag targets configured. Auto-tagging will be skipped for new atoms until you mark at least one category.
         </div>
       )}
 
-      {/* ── Scheduled sync sources ── */}
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <div>
-            <label className="block text-sm font-medium text-[var(--color-text-primary)]">Sync Sources</label>
-            <p className="text-xs text-[var(--color-text-secondary)]">
-              Automatically pull conversations and logs on a schedule.
-            </p>
-          </div>
-          <Button variant="secondary" onClick={() => setShowAddForm((v) => !v)}>
-            {showAddForm ? 'Cancel' : '+ Add Source'}
-          </Button>
-        </div>
-
-        {showAddForm && (
-          <div className="border border-[var(--color-border)] rounded-lg p-4 space-y-3 mb-4 bg-[var(--color-bg-main)]">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Name</label>
-                <input
-                  type="text"
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                  placeholder="My ChatGPT export"
-                  className="w-full text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Type</label>
-                <select
-                  value={newType}
-                  onChange={(e) => setNewType(e.target.value)}
-                  className="w-full text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none"
-                >
-                  {SYNC_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                </select>
-              </div>
-            </div>
-
-            {(newType === 'chatgpt' || newType === 'claude' || newType === 'markdown_dir' || newType === 'log_file') && (
-              <div>
-                <label className="block text-xs text-[var(--color-text-secondary)] mb-1">File / Directory Path</label>
-                <input
-                  type="text"
-                  value={newPath}
-                  onChange={(e) => setNewPath(e.target.value)}
-                  placeholder="/path/to/conversations.json"
-                  className="w-full text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
-                />
-              </div>
-            )}
-
-            {newType === 'remote_atomic' && (
-              <>
-                <div>
-                  <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Server URL</label>
-                  <input
-                    type="url"
-                    value={newUrl}
-                    onChange={(e) => setNewUrl(e.target.value)}
-                    placeholder="https://my.atomic.server"
-                    className="w-full text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-[var(--color-text-secondary)] mb-1">API Token (write-only)</label>
-                  <input
-                    type="password"
-                    value={newToken}
-                    onChange={(e) => setNewToken(e.target.value)}
-                    placeholder="at_..."
-                    className="w-full text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
-                  />
-                </div>
-              </>
-            )}
-
-            <div>
-              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Schedule</label>
-              <select
-                value={newInterval}
-                onChange={(e) => setNewInterval(Number(e.target.value))}
-                className="w-full text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none"
-              >
-                {INTERVAL_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
-            </div>
-
-            <Button variant="primary" onClick={handleCreate} disabled={isCreating || !newName.trim()}>
-              {isCreating ? 'Creating…' : 'Create Source'}
-            </Button>
-          </div>
-        )}
-
-        {isLoading ? (
-          <p className="text-xs text-[var(--color-text-secondary)]">Loading…</p>
-        ) : sources.length === 0 ? (
-          <p className="text-xs text-[var(--color-text-secondary)] py-4 text-center">
-            No sync sources configured yet.
-          </p>
+      <div className="space-y-2">
+        <div className="text-xs font-medium uppercase tracking-wide text-[var(--color-text-tertiary)]">Active targets</div>
+        {targets.length === 0 ? (
+          <p className="text-xs text-[var(--color-text-secondary)] italic">None yet.</p>
         ) : (
-          <div className="space-y-2">
-            {sources.map((source) => {
-              const activity = syncActivity[source.id];
-              const isRunning = activity?.status === 'running';
-              return (
+          <div className="space-y-1">
+            {targets.map(tag => (
               <div
-                key={source.id}
-                className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-main)]"
+                key={tag.id}
+                className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-main)]"
               >
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-[var(--color-text-primary)] truncate">{source.name}</span>
-                    <span className="text-xs px-1.5 py-0.5 rounded bg-[var(--color-bg-panel)] text-[var(--color-text-secondary)] shrink-0">
-                      {typeLabel(source.source_type)}
-                    </span>
-                    {source.has_token && (
-                      <span className="text-xs text-green-400" title="Token configured">🔑</span>
-                    )}
-                  </div>
-                  <div className="text-xs text-[var(--color-text-secondary)] mt-0.5 space-y-0.5">
-                    {source.source_path && <div className="truncate">Path: {source.source_path}</div>}
-                    {source.source_url && <div className="truncate">URL: {source.source_url}</div>}
-                    <div className="flex items-center gap-3">
-                      <span>Schedule: {intervalLabel(source.interval_secs)}</span>
-                      {source.last_synced_at && (
-                        <span>Last sync: {formatRelativeDate(source.last_synced_at)}</span>
-                      )}
-                      {source.last_sync_status && !activity && (
-                        <span className={source.last_sync_status === 'ok' ? 'text-green-400' : 'text-red-400'}>
-                          {source.last_sync_status}
-                        </span>
-                      )}
-                    </div>
-                    {/* Live sync activity */}
-                    {activity && (
-                      <div className="mt-1">
-                        {activity.status === 'running' && (
-                          <div className="flex items-center gap-2">
-                            <span className="inline-block w-3 h-3 rounded-full bg-yellow-400 animate-pulse shrink-0" />
-                            <span className="text-yellow-400">
-                              {activity.message ?? 'Running…'}
-                              {activity.total ? ` (${activity.current}/${activity.total})` : ''}
-                              {activity.elapsed_ms != null && activity.elapsed_ms > 0
-                                ? ` — ${(activity.elapsed_ms / 1000).toFixed(1)}s`
-                                : ''}
-                            </span>
-                          </div>
-                        )}
-                        {activity.status === 'done' && activity.result && (
-                          <span className="text-green-400">
-                            ✓ {activity.result.conversations_imported} conversations, {activity.result.messages_imported} messages
-                            {activity.result.atoms_imported > 0 ? `, ${activity.result.atoms_imported} atoms` : ''}
-                          </span>
-                        )}
-                        {activity.status === 'failed' && (
-                          <span className="text-red-400">✗ {activity.error}</span>
-                        )}
-                      </div>
-                    )}
-                  </div>
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-sm text-[var(--color-text-primary)] truncate">{tag.name}</span>
+                  <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                    {(tag as TagWithCount).atom_count} atoms
+                  </span>
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  {/* Enable/disable toggle */}
-                  <button
-                    onClick={() => handleToggleEnabled(source)}
-                    className={`text-xs px-2 py-1 rounded transition-colors ${
-                      source.enabled
-                        ? 'bg-green-900/40 text-green-400 hover:bg-green-900/60'
-                        : 'bg-[var(--color-bg-panel)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
-                    }`}
-                    title={source.enabled ? 'Disable' : 'Enable'}
-                  >
-                    {source.enabled ? 'On' : 'Off'}
-                  </button>
-                  {/* Test connection */}
-                  <button
-                    onClick={() => handleTestConnection(source.id)}
-                    disabled={testingConnectionId === source.id}
-                    className="text-xs px-2 py-1 rounded bg-[var(--color-bg-panel)] text-[var(--color-text-secondary)] hover:bg-blue-900/40 hover:text-blue-400 transition-colors disabled:opacity-50"
-                    title="Test connection"
-                  >
-                    {testingConnectionId === source.id ? '…' : '🔌'}
-                  </button>
-                  {/* Run now */}
-                  <button
-                    onClick={() => handleRunNow(source.id)}
-                    disabled={isRunning}
-                    className="text-xs px-2 py-1 rounded bg-[var(--color-bg-panel)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent)] hover:text-white transition-colors disabled:opacity-50"
-                    title="Run now"
-                  >
-                    {isRunning ? '…' : '▶'}
-                  </button>
-                  {/* Delete */}
-                  <button
-                    onClick={() => handleDelete(source.id)}
-                    disabled={deletingId === source.id}
-                    className="text-xs px-2 py-1 rounded bg-[var(--color-bg-panel)] text-[var(--color-text-secondary)] hover:bg-red-900/40 hover:text-red-400 transition-colors disabled:opacity-50"
-                    title="Delete"
-                  >
-                    {deletingId === source.id ? '…' : '✕'}
-                  </button>
-                </div>
+                <button
+                  onClick={() => handleToggle(tag.id, false)}
+                  className="px-2 py-1 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] rounded transition-colors"
+                >
+                  Unflag
+                </button>
               </div>
-            );
-            })}
+            ))}
           </div>
         )}
       </div>
 
-      <hr className="border-[var(--color-border)]" />
-
-      {/* ── One-off conversation import ── */}
       <div className="space-y-2">
-        <label className="block text-sm font-medium text-[var(--color-text-primary)]">
-          Import Conversations (one-off)
-        </label>
-        <p className="text-xs text-[var(--color-text-secondary)]">
-          Import a ChatGPT or Claude export file, or a directory of markdown conversation files.
-        </p>
+        <div className="text-xs font-medium uppercase tracking-wide text-[var(--color-text-tertiary)]">Available top-level tags</div>
+        {available.length === 0 ? (
+          <p className="text-xs text-[var(--color-text-secondary)] italic">All your top-level tags are already targets.</p>
+        ) : (
+          <div className="space-y-1">
+            {available.map(tag => (
+              <div
+                key={tag.id}
+                className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-main)]"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-sm text-[var(--color-text-primary)] truncate">{tag.name}</span>
+                  <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                    {(tag as TagWithCount).atom_count} atoms
+                  </span>
+                </div>
+                <button
+                  onClick={() => handleToggle(tag.id, true)}
+                  className="px-2 py-1 text-xs text-[var(--color-accent)] hover:bg-[var(--color-bg-hover)] rounded transition-colors"
+                >
+                  Mark as target
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        <div className="text-xs font-medium uppercase tracking-wide text-[var(--color-text-tertiary)]">Create new target</div>
         <div className="flex gap-2">
-          <select
-            value={convImportType}
-            onChange={(e) => setConvImportType(e.target.value as 'chatgpt' | 'claude' | 'markdown')}
-            className="text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none"
-          >
-            <option value="chatgpt">ChatGPT</option>
-            <option value="claude">Claude</option>
-            <option value="markdown">Markdown dir</option>
-          </select>
           <input
             type="text"
-            value={convImportPath}
-            onChange={(e) => setConvImportPath(e.target.value)}
-            placeholder="Path to file or directory"
-            className="flex-1 text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+            value={newName}
+            onChange={e => setNewName(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') handleCreate(); }}
+            placeholder="e.g., Methodologies"
+            disabled={creating}
+            className="flex-1 bg-[var(--color-bg-main)] border border-[var(--color-border)] rounded px-3 py-1.5 text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
           />
-          <Button
-            variant="secondary"
-            onClick={handleOneOffImport}
-            disabled={convImporting || !convImportPath.trim()}
-          >
-            {convImporting ? 'Importing…' : 'Import'}
+          <Button onClick={handleCreate} disabled={creating || !newName.trim()}>
+            {creating ? 'Adding…' : 'Add'}
           </Button>
         </div>
-        {convImportResult && (
-          <p className="text-xs text-green-400">
-            ✓ {convImportResult.conversations_imported} conversations, {convImportResult.messages_imported} messages imported.
-          </p>
-        )}
       </div>
 
-      <hr className="border-[var(--color-border)]" />
-
-      {/* ── Remote pull ── */}
-      <div className="space-y-2">
-        <label className="block text-sm font-medium text-[var(--color-text-primary)]">
-          Pull from Remote Atomic Server
-        </label>
-        <p className="text-xs text-[var(--color-text-secondary)]">
-          Import all conversations from another Atomic instance.
-        </p>
-        <div className="flex gap-2">
-          <input
-            type="url"
-            value={remoteUrl}
-            onChange={(e) => setRemoteUrl(e.target.value)}
-            placeholder="https://my.atomic.server"
-            className="flex-1 text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
-          />
-          <input
-            type="password"
-            value={remoteToken}
-            onChange={(e) => setRemoteToken(e.target.value)}
-            placeholder="API token (optional)"
-            className="w-40 text-sm bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded px-2 py-1.5 text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
-          />
-          <Button
-            variant="secondary"
-            onClick={handleRemotePull}
-            disabled={remotePulling || !remoteUrl.trim()}
-          >
-            {remotePulling ? 'Pulling…' : 'Pull'}
-          </Button>
-        </div>
-        {remotePullResult && (
-          <p className="text-xs text-green-400">
-            ✓ {remotePullResult.conversations_imported} conversations, {remotePullResult.messages_imported} messages imported.
-          </p>
-        )}
-      </div>
-
-      <hr className="border-[var(--color-border)]" />
-
-      {/* ── Persist logs ── */}
-      <div className="space-y-2">
-        <label className="block text-sm font-medium text-[var(--color-text-primary)]">
-          Persist Server Logs
-        </label>
-        <p className="text-xs text-[var(--color-text-secondary)]">
-          Save the current in-memory log buffer as a searchable atom in your knowledge base.
-        </p>
-        <Button variant="secondary" onClick={handlePersistLogs} disabled={persistingLogs}>
-          {persistingLogs ? 'Saving…' : 'Save Logs as Atom'}
-        </Button>
-      </div>
-    </div>
+      {errorMsg && (
+        <div className="text-xs text-red-400">{errorMsg}</div>
+      )}
+    </>
   );
 }
 
@@ -771,9 +334,7 @@ function DatabasesTab() {
                   className="p-1.5 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] rounded transition-colors"
                   title="Rename"
                 >
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                    <path d="M12.146.854a.5.5 0 0 1 .708 0l2.292 2.292a.5.5 0 0 1 0 .708l-9.5 9.5a.5.5 0 0 1-.168.11l-4 1.5a.5.5 0 0 1-.65-.65l1.5-4a.5.5 0 0 1 .11-.168l9.5-9.5z"/>
-                  </svg>
+                  <Pencil width="14" height="14" strokeWidth={2} />
                 </button>
                 {!db.is_default && (
                   <button
@@ -781,10 +342,7 @@ function DatabasesTab() {
                     className="p-1.5 text-[var(--color-text-tertiary)] hover:text-red-400 hover:bg-[var(--color-bg-hover)] rounded transition-colors"
                     title="Delete database"
                   >
-                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                      <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
-                      <path fillRule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118z"/>
-                    </svg>
+                    <Trash2 width="14" height="14" strokeWidth={2} />
                   </button>
                 )}
               </div>
@@ -841,16 +399,18 @@ function DatabasesTab() {
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
+  initialTab?: SettingsTab;
 }
 
-export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
+export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProps) {
   const settings = useSettingsStore(s => s.settings);
   const fetchSettings = useSettingsStore(s => s.fetchSettings);
   const setSetting = useSettingsStore(s => s.setSetting);
   const testOpenRouterConnection = useSettingsStore(s => s.testOpenRouterConnection);
 
-  // Theme
+  // Theme & Font
   const [theme, setTheme] = useState<Theme>('obsidian');
+  const [font, setFont] = useState<Font>('ibm-plex-sans');
 
   // Provider selection
   const [provider, setProvider] = useState<'openrouter' | 'ollama' | 'openai_compat'>('openrouter');
@@ -891,9 +451,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [autoTaggingEnabled, setAutoTaggingEnabled] = useState(true);
   const [embeddingModel, setEmbeddingModel] = useState('openai/text-embedding-3-small');
   const [taggingModel, setTaggingModel] = useState('openai/gpt-4o-mini');
-  const [wikiModel, setWikiModel] = useState('anthropic/claude-sonnet-4.5');
+  const [wikiModel, setWikiModel] = useState('anthropic/claude-sonnet-4.6');
   const [wikiStrategy, setWikiStrategy] = useState('centroid');
-  const [chatModel, setChatModel] = useState('anthropic/claude-sonnet-4.5');
+  const [wikiGenerationPrompt, setWikiGenerationPrompt] = useState('');
+  const [wikiUpdatePrompt, setWikiUpdatePrompt] = useState('');
+  const [chatModel, setChatModel] = useState('anthropic/claude-sonnet-4.6');
   const [saveError, setSaveError] = useState<string | null>(null);
 
   // Re-embedding confirmation
@@ -901,20 +463,32 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   // OpenRouter model loading
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
+  const [openrouterEmbeddingModels, setOpenrouterEmbeddingModels] = useState<OpenRouterEmbeddingModel[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
 
   // Import state
   const [isImporting, setIsImporting] = useState(false);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [importTags, setImportTags] = useState(false);
+  const [importProgress, setImportProgress] = useState<ImportProgress | null>(null);
 
   // Tab state
-  const [activeTab, setActiveTab] = useState<SettingsTab>('general');
+  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab ?? 'general');
+
+  // When the modal is reopened with a new initialTab, sync the active tab.
+  useEffect(() => {
+    if (isOpen && initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [isOpen, initialTab]);
 
   // MCP setup state
   const [showMcpSetup, setShowMcpSetup] = useState(false);
   const [mcpConfig, setMcpConfig] = useState<McpConfig | null>(null);
   const [mcpConfigCopied, setMcpConfigCopied] = useState(false);
+  const [isCreatingMcpToken, setIsCreatingMcpToken] = useState(false);
+  const [mcpTokenError, setMcpTokenError] = useState<string | null>(null);
 
   // Remote server state
   const [serverUrl, setServerUrl] = useState('');
@@ -1231,6 +805,10 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           .then(models => setAvailableModels(models))
           .catch(err => { console.error('Failed to load models:', err); toast.error('Failed to load models', { description: String(err) }); })
           .finally(() => setIsLoadingModels(false));
+        // Fetch curated OpenRouter embedding model registry
+        getOpenRouterEmbeddingModels()
+          .then(models => setOpenrouterEmbeddingModels(models))
+          .catch(err => { console.error('Failed to load embedding models:', err); });
       }
       // Load API tokens when connected to a non-local server
       if (!isLocalServer() && transport.isConnected()) {
@@ -1260,15 +838,18 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   useEffect(() => {
     const p = settings.provider as 'openrouter' | 'ollama' | 'openai_compat' | undefined;
     setTheme((settings.theme as Theme) || 'obsidian');
+    setFont((settings.font as Font) || 'ibm-plex-sans');
     setProvider(p || 'openrouter');
     setApiKey(settings.openrouter_api_key || '');
     setOpenrouterContextLength(settings.openrouter_context_length || '');
     setAutoTaggingEnabled(settings.auto_tagging_enabled !== 'false');
     setEmbeddingModel(settings.embedding_model || 'openai/text-embedding-3-small');
     setTaggingModel(settings.tagging_model || 'openai/gpt-4o-mini');
-    setWikiModel(settings.wiki_model || 'anthropic/claude-sonnet-4.5');
+    setWikiModel(settings.wiki_model || 'anthropic/claude-sonnet-4.6');
     setWikiStrategy(settings.wiki_strategy || 'centroid');
-    setChatModel(settings.chat_model || 'anthropic/claude-sonnet-4.5');
+    setWikiGenerationPrompt(settings.wiki_generation_prompt || '');
+    setWikiUpdatePrompt(settings.wiki_update_prompt || '');
+    setChatModel(settings.chat_model || 'anthropic/claude-sonnet-4.6');
     setOllamaHost(settings.ollama_host || 'http://127.0.0.1:11434');
     setOllamaEmbeddingModel(settings.ollama_embedding_model || 'nomic-embed-text');
     setOllamaLlmModel(settings.ollama_llm_model || 'llama3.2');
@@ -1283,11 +864,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     setOpenaiCompatTimeoutSecs(settings.openai_compat_timeout_secs || '300');
   }, [settings]);
 
-  // Check Ollama connection when provider is ollama or host changes
+  // Check Ollama connection when provider is ollama or host changes.
+  // Debounced so typing into the host field doesn't fire a request per keystroke.
   useEffect(() => {
-    if (isOpen && provider === 'ollama') {
-      checkOllamaConnection(ollamaHost);
-    }
+    if (!isOpen || provider !== 'ollama') return;
+    const handle = setTimeout(() => checkOllamaConnection(ollamaHost), 400);
+    return () => clearTimeout(handle);
   }, [isOpen, provider, ollamaHost, checkOllamaConnection]);
 
   useEffect(() => {
@@ -1420,13 +1002,41 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   };
 
   // Handle MCP setup expand
-  const handleMcpExpand = () => {
+  const handleMcpExpand = async () => {
     const newState = !showMcpSetup;
     setShowMcpSetup(newState);
-    if (newState && !mcpConfig) {
+    if (!newState) return;
+
+    const nowLocal = isDesktopApp() && isLocalServer();
+    // Invalidate stale config if mode has flipped (e.g. switched servers)
+    const configIsStdio = mcpConfig && 'command' in (mcpConfig as any).mcpServers.atomic;
+    if ((nowLocal && !configIsStdio && mcpConfig) || (!nowLocal && configIsStdio)) {
+      setMcpConfig(null);
+      setMcpTokenError(null);
+    }
+
+    if (nowLocal && !mcpConfig) {
+      const bridgePath = await getMcpBridgePath();
+      if (bridgePath) {
+        setMcpConfig(getMcpStdioConfig(bridgePath));
+      } else {
+        setMcpTokenError('Could not locate atomic-mcp-bridge. Ensure the app bundle is complete.');
+      }
+    }
+  };
+
+  const handleCreateMcpToken = async () => {
+    setIsCreatingMcpToken(true);
+    setMcpTokenError(null);
+    try {
+      const result = await createApiToken('mcp-integration');
       const transport = getTransport() as import('../../lib/transport/http').HttpTransport;
-      const config = getMcpConfig(transport.getConfig().baseUrl);
+      const config = getMcpHttpConfig(transport.getConfig().baseUrl, result.token);
       setMcpConfig(config);
+    } catch (e) {
+      setMcpTokenError(String(e));
+    } finally {
+      setIsCreatingMcpToken(false);
     }
   };
 
@@ -1449,10 +1059,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const handleObsidianImport = async () => {
     setImportResult(null);
     setImportError(null);
+    setImportProgress(null);
 
     try {
       // Open folder picker dialog
-      const selected = await pickDirectory('Select Obsidian Vault');
+      const selected = await pickDirectory('Select Markdown Folder');
 
       if (!selected) {
         return; // User cancelled or not available in web mode
@@ -1460,7 +1071,10 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
       setIsImporting(true);
 
-      const result = await importObsidianVault(selected);
+      const result = await importMarkdownFolder(selected, {
+        importTags,
+        onProgress: setImportProgress,
+      });
       setImportResult(result);
 
       // Refresh atoms and tags to show imported content
@@ -1505,18 +1119,16 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               onClick={onClose}
               className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
+              <X className="w-5 h-5" strokeWidth={2} />
             </button>
           </div>
 
-          <div className="flex gap-1 mt-4 -mb-4 px-0">
+          <div className="flex gap-1 mt-4 -mb-4 px-0 overflow-x-auto">
               {SETTINGS_TABS.map((tab) => (
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`px-3 py-2 text-sm font-medium rounded-t-md transition-colors ${
+                  className={`px-3 py-2 text-sm font-medium rounded-t-md transition-colors whitespace-nowrap flex-shrink-0 ${
                     activeTab === tab.id
                       ? 'bg-[var(--color-bg-main)] text-[var(--color-text-primary)] border border-b-0 border-[var(--color-border)]'
                       : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
@@ -1542,6 +1154,18 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       value={theme}
                       onChange={(v) => { setTheme(v as Theme); autoSave('theme', v); }}
                       options={THEMES}
+                    />
+                  </div>
+
+                  {/* Font Selector */}
+                  <div className="space-y-2">
+                    <label className="block text-sm font-medium text-[var(--color-text-primary)]">
+                      Font
+                    </label>
+                    <CustomSelect
+                      value={font}
+                      onChange={(v) => { setFont(v as Font); autoSave('font', v); }}
+                      options={FONTS}
                     />
                   </div>
 
@@ -1620,18 +1244,15 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       value={provider}
                       onChange={(v) => handleProviderChange(v as 'openrouter' | 'ollama' | 'openai_compat')}
                       options={[
-                        { value: 'openrouter', label: 'OpenRouter (Cloud)' },
-                        { value: 'ollama', label: 'Ollama (Local)' },
+                        { value: 'openrouter', label: 'OpenRouter' },
+                        { value: 'ollama', label: 'Ollama' },
                         { value: 'openai_compat', label: 'OpenAI Compatible' },
                       ]}
                     />
                     {/* Connection status — shown inline after provider */}
                     {provider === 'openrouter' && isTesting && (
                       <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
-                        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                        </svg>
+                        <Loader2 className="w-4 h-4 animate-spin" strokeWidth={2} />
                         Testing connection...
                       </div>
                     )}
@@ -1674,14 +1295,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                             className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
                           >
                             {showApiKey ? (
-                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
-                              </svg>
+                              <EyeOff className="w-5 h-5" strokeWidth={2} />
                             ) : (
-                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                              </svg>
+                              <Eye className="w-5 h-5" strokeWidth={2} />
                             )}
                           </button>
                         </div>
@@ -1702,13 +1318,14 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                           <p className="text-xs text-[var(--color-text-secondary)]">
                             Used for semantic search
                           </p>
-                          <CustomSelect
+                          <SearchableSelect
                             value={embeddingModel}
                             onChange={handleEmbeddingModelChange}
-                            options={[
-                              { value: 'openai/text-embedding-3-small', label: 'text-embedding-3-small (1536 dim)' },
-                              { value: 'openai/text-embedding-3-large', label: 'text-embedding-3-large (3072 dim)' },
-                            ]}
+                            options={openrouterEmbeddingModels.map(m => ({
+                              id: m.id,
+                              name: `${m.name} (${m.dimension})`,
+                            }))}
+                            placeholder="Select embedding model..."
                           />
                         </div>
 
@@ -1762,6 +1379,58 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                               { value: 'agentic', label: 'Agentic — AI agent searches and curates sources' },
                             ]}
                           />
+                        </div>
+
+                        {/* Wiki Generation Prompt */}
+                        <div className="space-y-1">
+                          <label className="block text-sm font-medium text-[var(--color-text-primary)]">
+                            Wiki Generation Prompt
+                          </label>
+                          <p className="text-xs text-[var(--color-text-secondary)]">
+                            System prompt for generating new wiki articles. Leave empty to use the default.
+                          </p>
+                          <textarea
+                            value={wikiGenerationPrompt}
+                            onChange={(e) => setWikiGenerationPrompt(e.target.value)}
+                            onBlur={() => autoSave('wiki_generation_prompt', wikiGenerationPrompt)}
+                            placeholder={"You are synthesizing a wiki article based on the user's personal knowledge base. Write a well-structured, informative article that summarizes what is known about the topic.\n\nGuidelines:\n- Use markdown formatting with ## for main sections and ### for subsections\n- Every factual claim MUST have a citation using [N] notation\n- Place citations immediately after the relevant statement\n- If sources contain contradictions, note them\n- Structure logically: overview first, then thematic sections\n- Keep tone informative and neutral\n- Do not invent information not present in the sources\n- When mentioning topics that have their own articles in the knowledge base, use [[Topic Name]] wiki-link notation to cross-reference them\n- Only use [[wiki links]] for topics listed in the EXISTING WIKI ARTICLES section provided\n- Do not force wiki links where they don't fit naturally"}
+                            rows={8}
+                            className="w-full px-3 py-2 rounded-md bg-[var(--color-bg-main)] border border-[var(--color-border)] text-sm text-[var(--color-text-primary)] font-mono resize-y placeholder:text-[var(--color-text-secondary)]/40"
+                          />
+                          {wikiGenerationPrompt && (
+                            <button
+                              onClick={() => { setWikiGenerationPrompt(''); autoSave('wiki_generation_prompt', ''); }}
+                              className="text-xs text-[var(--color-accent)] hover:underline"
+                            >
+                              Reset to default
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Wiki Update Prompt */}
+                        <div className="space-y-1">
+                          <label className="block text-sm font-medium text-[var(--color-text-primary)]">
+                            Wiki Update Prompt
+                          </label>
+                          <p className="text-xs text-[var(--color-text-secondary)]">
+                            Custom instructions prepended to the update prompt. Use this to control tone, style, or focus. Leave empty to use the default.
+                          </p>
+                          <textarea
+                            value={wikiUpdatePrompt}
+                            onChange={(e) => setWikiUpdatePrompt(e.target.value)}
+                            onBlur={() => autoSave('wiki_update_prompt', wikiUpdatePrompt)}
+                            placeholder={"e.g. Write in a casual, conversational tone. Focus on practical implications rather than theory."}
+                            rows={4}
+                            className="w-full px-3 py-2 rounded-md bg-[var(--color-bg-main)] border border-[var(--color-border)] text-sm text-[var(--color-text-primary)] font-mono resize-y placeholder:text-[var(--color-text-secondary)]/40"
+                          />
+                          {wikiUpdatePrompt && (
+                            <button
+                              onClick={() => { setWikiUpdatePrompt(''); autoSave('wiki_update_prompt', ''); }}
+                              className="text-xs text-[var(--color-accent)] hover:underline"
+                            >
+                              Reset to default
+                            </button>
+                          )}
                         </div>
 
                         {/* Chat Model */}
@@ -1971,10 +1640,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         />
                         {openaiCompatStatus === 'checking' && (
                           <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
-                            <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                            </svg>
+                            <Loader2 className="w-4 h-4 animate-spin" strokeWidth={2} />
                             Testing connection...
                           </div>
                         )}
@@ -2014,14 +1680,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                             className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
                           >
                             {openaiCompatShowApiKey ? (
-                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
-                              </svg>
+                              <EyeOff className="w-5 h-5" strokeWidth={2} />
                             ) : (
-                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                              </svg>
+                              <Eye className="w-5 h-5" strokeWidth={2} />
                             )}
                           </button>
                         </div>
@@ -2185,10 +1846,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                           >
                             {reembedding ? (
                               <>
-                                <svg className="w-4 h-4 animate-spin mr-1" fill="none" viewBox="0 0 24 24">
-                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                                </svg>
+                                <Loader2 className="w-4 h-4 animate-spin mr-1" strokeWidth={2} />
                                 Starting...
                               </>
                             ) : 'Confirm Re-embed'}
@@ -2218,6 +1876,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                     )}
                   </div>
                 </>
+              )}
+
+              {/* ===== TAG CATEGORIES TAB ===== */}
+              {activeTab === 'tag-categories' && (
+                <TagCategoriesTab />
               )}
 
               {/* ===== CONNECTION TAB ===== */}
@@ -2352,14 +2015,10 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         onClick={() => setShowTokenSection(!showTokenSection)}
                         className="flex items-center gap-2 text-sm font-medium text-[var(--color-text-primary)] hover:text-white transition-colors w-full"
                       >
-                        <svg
+                        <ChevronRight
                           className={`w-4 h-4 transition-transform ${showTokenSection ? 'rotate-90' : ''}`}
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                        </svg>
+                          strokeWidth={2}
+                        />
                         API Tokens
                         {apiTokens.filter(t => !t.is_revoked).length > 0 && (
                           <span className="text-xs text-[var(--color-text-secondary)]">
@@ -2377,10 +2036,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                           {/* Token list */}
                           {isLoadingTokens ? (
                             <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
-                              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                              </svg>
+                              <Loader2 className="w-4 h-4 animate-spin" strokeWidth={2} />
                               Loading tokens...
                             </div>
                           ) : apiTokens.length === 0 ? (
@@ -2459,13 +2115,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                                   title="Copy to clipboard"
                                 >
                                   {tokenCopied ? (
-                                    <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                                    </svg>
+                                    <Check className="w-4 h-4 text-green-500" strokeWidth={2} />
                                   ) : (
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                                    </svg>
+                                    <Copy className="w-4 h-4" strokeWidth={2} />
                                   )}
                                 </button>
                               </div>
@@ -2523,10 +2175,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       <Button onClick={handleIngestUrl} disabled={!ingestUrlValue.trim() || ingesting}>
                         {ingesting ? (
                           <>
-                            <svg className="w-4 h-4 animate-spin mr-1" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                            </svg>
+                            <Loader2 className="w-4 h-4 animate-spin mr-1" strokeWidth={2} />
                             Ingesting...
                           </>
                         ) : 'Ingest'}
@@ -2579,10 +2228,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                     {/* Feed list */}
                     {feedsLoading ? (
                       <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)] py-4">
-                        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                        </svg>
+                        <Loader2 className="w-4 h-4 animate-spin" strokeWidth={2} />
                         Loading feeds...
                       </div>
                     ) : feeds.length === 0 ? (
@@ -2634,14 +2280,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                                   title="Poll now"
                                 >
                                   {pollingFeedId === feed.id ? (
-                                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                                    </svg>
+                                    <Loader2 className="w-4 h-4 animate-spin" strokeWidth={2} />
                                   ) : (
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                                    </svg>
+                                    <RefreshCw className="w-4 h-4" strokeWidth={2} />
                                   )}
                                 </button>
                                 <button
@@ -2651,14 +2292,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                                   title={feed.is_paused ? 'Resume' : 'Pause'}
                                 >
                                   {feed.is_paused ? (
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                    </svg>
+                                    <Play className="w-4 h-4" strokeWidth={2} />
                                   ) : (
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                    </svg>
+                                    <Pause className="w-4 h-4" strokeWidth={2} />
                                   )}
                                 </button>
                                 <button
@@ -2668,9 +2304,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                                   className="p-1.5 text-[var(--color-text-secondary)] hover:text-red-400 hover:bg-[var(--color-bg-hover)] rounded transition-colors disabled:opacity-50"
                                   title="Delete feed"
                                 >
-                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                  </svg>
+                                  <Trash2 className="w-4 h-4" strokeWidth={2} />
                                 </button>
                               </div>
                             </div>
@@ -2692,10 +2326,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       <Button variant="secondary" onClick={handleAddFeed} disabled={!newFeedUrl.trim() || addingFeed}>
                         {addingFeed ? (
                           <>
-                            <svg className="w-4 h-4 animate-spin mr-1" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                            </svg>
+                            <Loader2 className="w-4 h-4 animate-spin mr-1" strokeWidth={2} />
                             Adding...
                           </>
                         ) : 'Add Feed'}
@@ -2708,8 +2339,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               {/* ===== INTEGRATIONS TAB ===== */}
               {activeTab === 'integrations' && (
                 <>
-                  {/* Import Section — desktop + local server only (requires filesystem access) */}
-                  {isDesktopApp() && isLocalServer() && (
+                  {/* Import Section — desktop only (reads files locally, creates atoms via API) */}
+                  {isDesktopApp() && (
                     <div className="space-y-3">
                       <div className="space-y-1">
                         <label className="block text-sm font-medium text-[var(--color-text-primary)]">
@@ -2720,6 +2351,17 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         </p>
                       </div>
 
+                      <label className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)] cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={importTags}
+                          onChange={(e) => setImportTags(e.target.checked)}
+                          disabled={isImporting}
+                          className="rounded border-[var(--color-border)]"
+                        />
+                        Import tags from folders and frontmatter
+                      </label>
+
                       <Button
                         variant="secondary"
                         onClick={handleObsidianImport}
@@ -2728,18 +2370,15 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                       >
                         {isImporting ? (
                           <>
-                            <svg className="w-4 h-4 animate-spin mr-2" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                            </svg>
-                            Importing...
+                            <Loader2 className="w-4 h-4 animate-spin mr-2" strokeWidth={2} />
+                            {importProgress
+                              ? `Importing ${importProgress.current}/${importProgress.total}...`
+                              : 'Importing...'}
                           </>
                         ) : (
                           <>
-                            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                            </svg>
-                            Import from Obsidian
+                            <Upload className="w-4 h-4 mr-2" strokeWidth={2} />
+                            Import Markdown Folder
                           </>
                         )}
                       </Button>
@@ -2752,6 +2391,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                             <div>Imported: {importResult.imported} notes</div>
                             {importResult.tags_created > 0 && (
                               <div>Tags created: {importResult.tags_created}</div>
+                            )}
+                            {importResult.errors > 0 && (
+                              <div>Errors: {importResult.errors} (failed to create)</div>
                             )}
                             {importResult.skipped > 0 && (
                               <div>Skipped: {importResult.skipped} (duplicates/empty)</div>
@@ -2778,80 +2420,117 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         onClick={handleMcpExpand}
                         className="flex items-center gap-2 text-sm font-medium text-[var(--color-text-primary)] hover:text-white transition-colors w-full"
                       >
-                        <svg
+                        <ChevronRight
                           className={`w-4 h-4 transition-transform ${showMcpSetup ? 'rotate-90' : ''}`}
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                        </svg>
-                        Claude Desktop Integration
+                          strokeWidth={2}
+                        />
+                        MCP Integration
                       </button>
 
                       {showMcpSetup && (
                         <div className="space-y-4 pl-6 border-l-2 border-[var(--color-border)]">
-                          <p className="text-xs text-[var(--color-text-secondary)]">
-                            Connect Atomic to Claude Desktop as an MCP server. This allows Claude to search and create notes in your knowledge base.
-                          </p>
+                          {isDesktopApp() && isLocalServer() ? (
+                            <>
+                              <p className="text-xs text-[var(--color-text-secondary)]">
+                                The Atomic MCP bridge is bundled with the desktop app. It connects to the local server automatically — no token configuration needed.
+                              </p>
 
-                          <div className="space-y-2">
-                            <div className="text-sm font-medium text-[var(--color-text-primary)]">Setup Instructions</div>
-                            <ol className="text-xs text-[var(--color-text-secondary)] space-y-2 list-decimal list-inside">
-                              <li>
-                                Open Claude Desktop settings
-                                <span className="text-[var(--color-text-tertiary)]"> (Claude → Settings → Developer)</span>
-                              </li>
-                              <li>Click "Edit Config" to open claude_desktop_config.json</li>
-                              <li>Add the following configuration:</li>
-                            </ol>
-                          </div>
+                              <div className="space-y-2">
+                                <div className="text-sm font-medium text-[var(--color-text-primary)]">Setup Instructions</div>
+                                <ol className="text-xs text-[var(--color-text-secondary)] space-y-2 list-decimal list-inside">
+                                  <li>Open your MCP client settings (e.g. Claude Desktop &gt; <span className="text-[var(--color-text-primary)]">Developer &gt; Edit Config</span>)</li>
+                                  <li>Add the following configuration:</li>
+                                </ol>
+                              </div>
 
-                          {/* Config JSON */}
-                          <div className="relative">
-                            <pre className="p-3 bg-[var(--color-bg-main)] border border-[var(--color-border)] rounded-md text-xs text-[var(--color-text-primary)] overflow-x-auto">
-                              {mcpConfig ? JSON.stringify(mcpConfig, null, 2) : 'Loading...'}
-                            </pre>
-                            <button
-                              type="button"
-                              onClick={handleCopyMcpConfig}
-                              disabled={!mcpConfig}
-                              className="absolute top-2 right-2 p-1.5 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors disabled:opacity-50"
-                              title="Copy to clipboard"
-                            >
-                              {mcpConfigCopied ? (
-                                <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                                </svg>
+                              <div className="relative">
+                                <pre className="p-3 bg-[var(--color-bg-main)] border border-[var(--color-border)] rounded-md text-xs text-[var(--color-text-primary)] overflow-x-auto">
+                                  {mcpConfig ? JSON.stringify(mcpConfig, null, 2) : 'Loading...'}
+                                </pre>
+                                <button
+                                  type="button"
+                                  onClick={handleCopyMcpConfig}
+                                  disabled={!mcpConfig}
+                                  className="absolute top-2 right-2 p-1.5 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors disabled:opacity-50"
+                                  title="Copy to clipboard"
+                                >
+                                  {mcpConfigCopied ? (
+                                    <Check className="w-4 h-4 text-green-500" strokeWidth={2} />
+                                  ) : (
+                                    <Copy className="w-4 h-4" strokeWidth={2} />
+                                  )}
+                                </button>
+                              </div>
+
+                              <ol start={3} className="text-xs text-[var(--color-text-secondary)] space-y-2 list-decimal list-inside">
+                                <li>Save the config file and restart your MCP client</li>
+                              </ol>
+
+                              <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-md text-xs text-green-400">
+                                <strong>Note:</strong> The Atomic desktop app must be running for the MCP bridge to connect.
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <p className="text-xs text-[var(--color-text-secondary)]">
+                                Connect your MCP client to this Atomic server's HTTP endpoint. A dedicated API token is required for authentication.
+                              </p>
+
+                              {!mcpConfig ? (
+                                <div className="space-y-2">
+                                  <Button variant="secondary" size="sm" onClick={handleCreateMcpToken} disabled={isCreatingMcpToken}>
+                                    {isCreatingMcpToken ? 'Creating...' : 'Create MCP Token'}
+                                  </Button>
+                                  {mcpTokenError && <p className="text-xs text-red-500">{mcpTokenError}</p>}
+                                </div>
                               ) : (
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                                </svg>
+                                <>
+                                  <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-md text-xs text-amber-400">
+                                    Save this config now — the token won't be shown again.
+                                  </div>
+
+                                  <div className="space-y-2">
+                                    <div className="text-sm font-medium text-[var(--color-text-primary)]">Setup Instructions</div>
+                                    <ol className="text-xs text-[var(--color-text-secondary)] space-y-2 list-decimal list-inside">
+                                      <li>Open your MCP client settings (e.g. Claude Desktop &gt; <span className="text-[var(--color-text-primary)]">Developer &gt; Edit Config</span>)</li>
+                                      <li>Add the following configuration:</li>
+                                    </ol>
+                                  </div>
+
+                                  <div className="relative">
+                                    <pre className="p-3 bg-[var(--color-bg-main)] border border-[var(--color-border)] rounded-md text-xs text-[var(--color-text-primary)] overflow-x-auto">
+                                      {JSON.stringify(mcpConfig, null, 2)}
+                                    </pre>
+                                    <button
+                                      type="button"
+                                      onClick={handleCopyMcpConfig}
+                                      className="absolute top-2 right-2 p-1.5 bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+                                      title="Copy to clipboard"
+                                    >
+                                      {mcpConfigCopied ? (
+                                        <Check className="w-4 h-4 text-green-500" strokeWidth={2} />
+                                      ) : (
+                                        <Copy className="w-4 h-4" strokeWidth={2} />
+                                      )}
+                                    </button>
+                                  </div>
+
+                                  <ol start={3} className="text-xs text-[var(--color-text-secondary)] space-y-2 list-decimal list-inside">
+                                    <li>Save the config file and restart your MCP client</li>
+                                  </ol>
+
+                                  <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-md text-xs text-green-400">
+                                    <strong>Note:</strong> The Atomic server must be running and reachable for MCP clients to connect.
+                                  </div>
+                                </>
                               )}
-                            </button>
-                          </div>
-
-                          <ol start={4} className="text-xs text-[var(--color-text-secondary)] space-y-2 list-decimal list-inside">
-                            <li>Save the config file and restart Claude Desktop</li>
-                            <li>
-                              Verify by checking for "atomic" in Claude's MCP servers
-                              <span className="text-[var(--color-text-tertiary)]"> (hammer icon)</span>
-                            </li>
-                          </ol>
-
-                          <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-md text-xs text-green-400">
-                            <strong>Note:</strong> The MCP server is served over HTTP by the Atomic server. The server must be running for Claude to access your notes.
-                          </div>
+                            </>
+                          )}
                         </div>
                       )}
                     </div>
                   )}
                 </>
-              )}
-
-              {/* ===== SYNC TAB ===== */}
-              {activeTab === 'sync' && (
-                <SyncTab />
               )}
 
               {/* ===== DATABASES TAB ===== */}
@@ -2863,9 +2542,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         {saveError && (
           <div className="px-6 py-3 border-t border-[var(--color-border)]">
             <div className="flex items-start gap-2 text-sm text-red-500">
-              <svg className="w-4 h-4 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
+              <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" strokeWidth={2} />
               <span>{saveError}</span>
             </div>
           </div>

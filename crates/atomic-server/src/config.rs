@@ -3,9 +3,6 @@
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
-/// Default rate limit: 600 requests per minute per IP (10 req/s).
-pub const DEFAULT_RATE_LIMIT: u64 = 600;
-
 /// Standalone HTTP server for the Atomic knowledge base
 #[derive(Parser, Debug)]
 #[command(name = "atomic-server", about = "Atomic knowledge base HTTP server")]
@@ -68,17 +65,6 @@ pub enum Command {
         /// Example: postgres://user:pass@localhost:5432/atomic
         #[arg(long, env = "ATOMIC_DATABASE_URL")]
         database_url: Option<String>,
-
-        /// Comma-separated list of allowed CORS origins.
-        /// Example: "https://myapp.com,https://other.com"
-        /// Defaults to permissive (all origins) when not set.
-        #[arg(long, env = "ATOMIC_ALLOWED_ORIGINS")]
-        allowed_origins: Option<String>,
-
-        /// Maximum number of requests allowed per IP per minute.
-        /// Defaults to 600 (10 per second).
-        #[arg(long, default_value_t = DEFAULT_RATE_LIMIT, env = "ATOMIC_RATE_LIMIT")]
-        rate_limit: u64,
     },
 
     /// Manage API tokens

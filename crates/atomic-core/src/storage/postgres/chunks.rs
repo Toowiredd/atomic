@@ -28,10 +28,12 @@ impl ChunkStore for PostgresStorage {
         &self,
         atom_id: &str,
         status: &str,
+        error: Option<&str>,
     ) -> StorageResult<()> {
-        sqlx::query("UPDATE atoms SET embedding_status = $2 WHERE id = $1 AND db_id = $3")
+        sqlx::query("UPDATE atoms SET embedding_status = $2, embedding_error = $3 WHERE id = $1 AND db_id = $4")
             .bind(atom_id)
             .bind(status)
+            .bind(error)
             .bind(&self.db_id)
             .execute(&self.pool)
             .await
@@ -48,10 +50,12 @@ impl ChunkStore for PostgresStorage {
         &self,
         atom_id: &str,
         status: &str,
+        error: Option<&str>,
     ) -> StorageResult<()> {
-        sqlx::query("UPDATE atoms SET tagging_status = $2 WHERE id = $1 AND db_id = $3")
+        sqlx::query("UPDATE atoms SET tagging_status = $2, tagging_error = $3 WHERE id = $1 AND db_id = $4")
             .bind(atom_id)
             .bind(status)
+            .bind(error)
             .bind(&self.db_id)
             .execute(&self.pool)
             .await
@@ -148,6 +152,49 @@ impl ChunkStore for PostgresStorage {
         .map_err(|e| {
             AtomicCoreError::DatabaseOperation(format!(
                 "Failed to reset stuck tagging status: {}",
+                e
+            ))
+        })?;
+
+        let edges_result = sqlx::query(
+            "UPDATE atoms SET edges_status = 'pending' WHERE edges_status = 'processing' AND db_id = $1",
+        )
+        .bind(&self.db_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            AtomicCoreError::DatabaseOperation(format!(
+                "Failed to reset stuck edges status: {}",
+                e
+            ))
+        })?;
+
+        Ok((embedding_result.rows_affected() + tagging_result.rows_affected() + edges_result.rows_affected()) as i32)
+    }
+
+    async fn reset_failed_embeddings(&self) -> StorageResult<i32> {
+        let embedding_result = sqlx::query(
+            "UPDATE atoms SET embedding_status = 'pending', embedding_error = NULL WHERE embedding_status = 'failed' AND db_id = $1",
+        )
+        .bind(&self.db_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            AtomicCoreError::DatabaseOperation(format!(
+                "Failed to reset failed embeddings: {}",
+                e
+            ))
+        })?;
+
+        let tagging_result = sqlx::query(
+            "UPDATE atoms SET tagging_status = 'pending', tagging_error = NULL WHERE tagging_status = 'failed' AND db_id = $1",
+        )
+        .bind(&self.db_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            AtomicCoreError::DatabaseOperation(format!(
+                "Failed to reset failed tagging: {}",
                 e
             ))
         })?;
@@ -396,11 +443,14 @@ impl ChunkStore for PostgresStorage {
             String,
             String,
             String,
+            Option<String>,
+            Option<String>,
         )> = sqlx::query_as(
             "SELECT id, content, title, snippet, source_url, source, published_at,
                     created_at, updated_at,
                     COALESCE(embedding_status, 'pending'),
-                    COALESCE(tagging_status, 'pending')
+                    COALESCE(tagging_status, 'pending'),
+                    embedding_error, tagging_error
              FROM atoms WHERE id = ANY($1) AND db_id = $2",
         )
         .bind(&atom_ids)
@@ -429,14 +479,16 @@ impl ChunkStore for PostgresStorage {
                     updated_at: r.8,
                     embedding_status: r.9,
                     tagging_status: r.10,
+                    embedding_error: r.11,
+                    tagging_error: r.12,
                 };
                 (r.0, atom)
             })
             .collect();
 
         // Batch fetch tags
-        let tag_rows: Vec<(String, String, String, Option<String>, String)> = sqlx::query_as(
-            "SELECT at.atom_id, t.id, t.name, t.parent_id, t.created_at
+        let tag_rows: Vec<(String, String, String, Option<String>, String, bool)> = sqlx::query_as(
+            "SELECT at.atom_id, t.id, t.name, t.parent_id, t.created_at, t.is_autotag_target
              FROM atom_tags at
              INNER JOIN tags t ON at.tag_id = t.id
              WHERE at.atom_id = ANY($1) AND at.db_id = $2",
@@ -453,12 +505,13 @@ impl ChunkStore for PostgresStorage {
         })?;
 
         let mut tag_map: HashMap<String, Vec<Tag>> = HashMap::new();
-        for (atom_id_val, tag_id, name, parent_id, created_at) in tag_rows {
+        for (atom_id_val, tag_id, name, parent_id, created_at, is_autotag_target) in tag_rows {
             tag_map.entry(atom_id_val).or_default().push(Tag {
                 id: tag_id,
                 name,
                 parent_id,
                 created_at,
+                is_autotag_target,
             });
         }
 
@@ -865,31 +918,74 @@ impl ChunkStore for PostgresStorage {
         Ok(())
     }
 
-    async fn claim_pending_reembedding(&self) -> StorageResult<Vec<(String, String)>> {
-        let rows: Vec<(String, String)> = sqlx::query_as(
+    async fn claim_pending_reembedding(&self) -> StorageResult<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
             "UPDATE atoms SET embedding_status = 'processing'
              WHERE embedding_status IN ('pending', 'processing')
              AND db_id = $1
-             RETURNING id, content",
+             RETURNING id",
         )
         .bind(&self.db_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-        Ok(rows)
+        Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
-    async fn claim_all_for_reembedding(&self) -> StorageResult<Vec<(String, String)>> {
-        let rows: Vec<(String, String)> = sqlx::query_as(
+    async fn claim_all_for_reembedding(&self) -> StorageResult<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
             "UPDATE atoms SET embedding_status = 'processing'
              WHERE db_id = $1
-             RETURNING id, content",
+             RETURNING id",
         )
         .bind(&self.db_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-        Ok(rows)
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
+    async fn claim_pending_edges(&self, limit: i32) -> StorageResult<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "UPDATE atoms SET edges_status = 'processing'
+             WHERE id IN (SELECT id FROM atoms WHERE edges_status = 'pending' AND embedding_status = 'complete' AND db_id = $2 LIMIT $1)
+             AND db_id = $2
+             RETURNING id",
+        )
+        .bind(limit)
+        .bind(&self.db_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
+    async fn set_edges_status_batch(
+        &self,
+        atom_ids: &[String],
+        status: &str,
+    ) -> StorageResult<()> {
+        for atom_id in atom_ids {
+            sqlx::query("UPDATE atoms SET edges_status = $1 WHERE id = $2 AND db_id = $3")
+                .bind(status)
+                .bind(atom_id)
+                .bind(&self.db_id)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    async fn count_pending_edges(&self) -> StorageResult<i32> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM atoms WHERE edges_status = 'pending' AND embedding_status = 'complete' AND db_id = $1",
+        )
+        .bind(&self.db_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        Ok(row.0 as i32)
     }
 }
 

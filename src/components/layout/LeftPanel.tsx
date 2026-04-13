@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { TagTree } from '../tags/TagTree';
-import { SettingsButton, SettingsModal } from '../settings';
+import { SettingsButton, SettingsModal, type SettingsTab } from '../settings';
 import { DatabaseSwitcher } from '../DatabaseSwitcher';
 import { useUIStore } from '../../stores/ui';
 import { isTauri } from '../../lib/platform';
@@ -9,14 +9,19 @@ const COLLAPSE_BREAKPOINT = 768;
 
 export function LeftPanel() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab | undefined>(undefined);
   const leftPanelOpen = useUIStore(s => s.leftPanelOpen);
   const setLeftPanelOpen = useUIStore(s => s.setLeftPanelOpen);
   const panelRef = useRef<HTMLDivElement>(null);
 
-  // Auto-collapse on small screens, auto-expand on large screens
+  // Auto-collapse on small screens, auto-expand on large screens. When an
+  // overlay is active (reader, wiki, graph) we leave the panel alone — the
+  // overlay flow has already decided the panel should be hidden, and we
+  // don't want to clobber that on mount or on a resize event.
   useEffect(() => {
     const mq = window.matchMedia(`(max-width: ${COLLAPSE_BREAKPOINT}px)`);
     const handleChange = (e: MediaQueryListEvent | MediaQueryList) => {
+      if (useUIStore.getState().overlayNav.index !== -1) return;
       setLeftPanelOpen(!e.matches);
     };
     handleChange(mq);
@@ -52,24 +57,35 @@ export function LeftPanel() {
       <aside
         ref={panelRef}
         className={`
-          w-[250px] h-full bg-[var(--color-bg-panel)]/80 border-r border-[var(--color-border)] flex flex-col transition-all duration-200 backdrop-blur-xl z-10
-          max-md:fixed max-md:top-0 max-md:left-0 max-md:z-40 max-md:shadow-2xl
+          h-full bg-[var(--color-bg-panel)]/80 border-r border-[var(--color-border)] flex flex-col transition-all duration-300 ease-in-out backdrop-blur-xl z-10 overflow-hidden flex-shrink-0
+          max-md:fixed max-md:top-0 max-md:left-0 max-md:z-40 max-md:shadow-2xl max-md:w-[250px]
           ${leftPanelOpen ? 'max-md:translate-x-0' : 'max-md:-translate-x-full'}
-          ${leftPanelOpen ? '' : 'hidden md:flex'}
+          ${leftPanelOpen ? 'md:w-[250px] md:border-r' : 'md:w-0 md:border-r-0'}
         `}
       >
-        {/* Titlebar row with settings button */}
-        <div className={`h-[52px] flex items-center px-3 flex-shrink-0 gap-1 ${isTauri() ? 'pl-[78px]' : ''}`} data-tauri-drag-region>
-          <DatabaseSwitcher />
-          <SettingsButton onClick={() => setIsSettingsOpen(true)} />
+        <div className="w-[250px] h-full flex flex-col">
+          {/* Titlebar row with settings button */}
+          <div className={`h-[52px] flex items-center px-3 flex-shrink-0 gap-1 ${isTauri() ? 'pl-[78px]' : ''}`} data-tauri-drag-region>
+            <DatabaseSwitcher />
+            <SettingsButton onClick={() => { setSettingsInitialTab(undefined); setIsSettingsOpen(true); }} />
+          </div>
+
+          {/* Tag Tree with integrated search */}
+          <div className="flex-1 overflow-hidden">
+            <TagTree
+              onOpenTagSettings={() => {
+                setSettingsInitialTab('tag-categories');
+                setIsSettingsOpen(true);
+              }}
+            />
+          </div>
         </div>
 
-        {/* Tag Tree with integrated search */}
-        <div className="flex-1 overflow-hidden">
-          <TagTree />
-        </div>
-
-        <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+        <SettingsModal
+          isOpen={isSettingsOpen}
+          onClose={() => setIsSettingsOpen(false)}
+          initialTab={settingsInitialTab}
+        />
       </aside>
     </>
   );

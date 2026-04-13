@@ -46,7 +46,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: 'npm'
 
       - name: Cache Cargo
@@ -112,6 +112,33 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k "" $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
 
+      - name: Extract release notes from CHANGELOG
+        id: changelog
+        shell: bash
+        run: |
+          if [[ ! -f CHANGELOG.md ]]; then
+            notes='See the assets to download this version and install.'
+          else
+            # Print everything from the first `## ` section up to (but not
+            # including) the second one. This gives us the current release's
+            # entry as authored by scripts/build-release.js.
+            notes=$(awk '
+              /^## / { count++ }
+              count == 2 { exit }
+              count == 1 { print }
+            ' CHANGELOG.md)
+            if [[ -z "$notes" ]]; then
+              notes='See the assets to download this version and install.'
+            else
+              notes="${notes}"$'\n\n---\n\nDownload the assets below to install.'
+            fi
+          fi
+          {
+            echo 'notes<<CHANGELOG_EOF'
+            echo "$notes"
+            echo 'CHANGELOG_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -123,7 +150,35 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Atomic ${{ github.ref_name }}'
-          releaseBody: 'See the assets to download this version and install.'
+          releaseBody: ${{ steps.changelog.outputs.notes }}
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+  notify-discord:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Post changelog to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          notes=$(awk '
+            /^## / { count++ }
+            count == 2 { exit }
+            count == 1 { print }
+          ' CHANGELOG.md)
+          release_url="https://github.com/${REPO}/releases/tag/${TAG}"
+          content=$(printf '**Atomic %s** released — %s\n\n%s' "$TAG" "$release_url" "$notes")
+          # Discord content cap is 2000 chars; leave headroom for the ellipsis.
+          if [ ${#content} -gt 1900 ]; then
+            content="${content:0:1900}…"
+          fi
+          jq -n --arg content "$content" '{content: $content}' \
+            | curl -sS --fail -H "Content-Type: application/json" \
+                -X POST -d @- "$DISCORD_WEBHOOK_URL"

@@ -12,9 +12,11 @@ A personal knowledge base that turns markdown notes into a semantically-connecte
 
 Atomic stores knowledge as **atoms** — markdown notes that are automatically chunked, embedded, tagged, and linked by semantic similarity. Your atoms can be synthesized into wiki articles, explored on a spatial canvas, and queried through an agentic chat interface.
 
-*Spatial canvas — related atoms cluster together*
+https://github.com/user-attachments/assets/e8cd771f-6e23-46cf-86d1-3c70cb8d1954
 
-https://github.com/user-attachments/assets/e466c26a-48f6-4eb5-b276-4145b052b390
+*Daily briefing — AI summary of recent atoms with inline citations that highlight the source on a mini-canvas*
+
+https://github.com/user-attachments/assets/282da0e3-4969-42dd-b591-7da974078e87
 
 *Atoms — markdown notes with tags, sources, and neighborhood graph*
 
@@ -24,9 +26,9 @@ https://github.com/user-attachments/assets/e466c26a-48f6-4eb5-b276-4145b052b390
 
 ![Wiki Synthesis](./docs/images/wiki.png)
 
-*Chat — agentic RAG scoped to your knowledge base*
+*Canvas — view your knowledge on an interactive graph*
 
-![Chat Interface](./docs/images/chat.png)
+![Canvas](./docs/images/canvas.png)
 
 *Semantic search — find by meaning, not keywords*
 
@@ -112,21 +114,47 @@ Captures are queued offline and synced when the server is available.
 
 Atomic exposes an MCP endpoint for Claude and other AI tools to search and create atoms.
 
-The endpoint runs at `/mcp` on your server (e.g., `http://localhost:8080/mcp`).
+### Desktop App (Local Mode)
 
-**Claude Desktop config** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+The desktop app bundles `atomic-mcp-bridge`, a stdio-to-HTTP bridge that reads the local auth token automatically. No token configuration needed — just point your MCP client at the binary:
 
 ```json
 {
   "mcpServers": {
     "atomic": {
-      "url": "http://localhost:44380/mcp"
+      "command": "/Applications/Atomic.app/Contents/MacOS/atomic-mcp-bridge"
     }
   }
 }
 ```
 
-**Available tools:** `semantic_search`, `read_atom`, `create_atom`
+The app's Settings > Integrations page shows the exact path for your system.
+
+### Remote / Self-Hosted
+
+For remote servers or the web app, connect via the HTTP endpoint at `/mcp` with a Bearer token:
+
+```json
+{
+  "mcpServers": {
+    "atomic": {
+      "type": "url",
+      "url": "https://your-server.com/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN"
+      }
+    }
+  }
+}
+```
+
+Create a token from Settings > Connection > API Tokens, or via the CLI:
+
+```bash
+atomic-server token create --name "claude"
+```
+
+**Available tools:** `semantic_search`, `read_atom`, `create_atom`, `update_atom`
 
 ## Architecture
 
@@ -142,17 +170,17 @@ All business logic lives in `atomic-core`, a standalone Rust crate with no frame
                     |  atomic-server   |
                     | (REST + WS + MCP)|
                     +--------+---------+
-              +--------------+--------------+
-              v              v              v
-    +-----------+    +------------+    +----------+
-    | src-tauri |    |  React UI  |    | iOS app  |
-    | (sidecar) |    |  (browser) |    | (SwiftUI)|
-    +-----+-----+    +------------+    +----------+
-          |
-    +-----v-----+
-    |  React UI  |
-    | (desktop)  |
-    +------------+
+              +---------+----+----+---------+
+              v          v        v         v
+    +-----------+  +----------+  +------+  +----------+
+    | src-tauri |  | React UI |  | iOS  |  |mcp-bridge|
+    | (sidecar) |  | (browser)|  | app  |  | (stdio)  |
+    +-----+-----+  +----------+  +------+  +-----+----+
+          |                                       |
+    +-----v-----+                           +-----v-----+
+    |  React UI  |                          | MCP clients|
+    | (desktop)  |                          |(Claude,etc)|
+    +------------+                          +------------+
 ```
 
 ## Project Structure

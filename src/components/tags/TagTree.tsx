@@ -1,10 +1,10 @@
 import { useState, useRef, useMemo, useEffect, MouseEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { Pencil, Plus, Trash2, Inbox, Search } from 'lucide-react';
 import { TagNode } from './TagNode';
 import { ContextMenu } from '../ui/ContextMenu';
 import { Modal } from '../ui/Modal';
 import { Input } from '../ui/Input';
-import { Button } from '../ui/Button';
 import { useTagsStore, TagWithCount } from '../../stores/tags';
 import { useUIStore } from '../../stores/ui';
 import { useAtomsStore } from '../../stores/atoms';
@@ -44,7 +44,12 @@ function flattenVisibleTags(
   return result;
 }
 
-export function TagTree() {
+interface TagTreeProps {
+  /** Called when the user clicks "Configure" in the empty-state notice. */
+  onOpenTagSettings?: () => void;
+}
+
+export function TagTree({ onOpenTagSettings }: TagTreeProps = {}) {
   const tags = useTagsStore(s => s.tags);
   const isLoading = useTagsStore(s => s.isLoading);
   const createTag = useTagsStore(s => s.createTag);
@@ -167,9 +172,7 @@ export function TagTree() {
             });
           },
           icon: (
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-            </svg>
+            <Pencil className="w-4 h-4" strokeWidth={2} />
           ),
         },
         {
@@ -182,9 +185,7 @@ export function TagTree() {
             });
           },
           icon: (
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
+            <Plus className="w-4 h-4" strokeWidth={2} />
           ),
         },
         {
@@ -198,9 +199,7 @@ export function TagTree() {
           },
           danger: true,
           icon: (
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-            </svg>
+            <Trash2 className="w-4 h-4" strokeWidth={2} />
           ),
         },
       ]
@@ -217,9 +216,7 @@ export function TagTree() {
         }`}
         onClick={() => handleSelectTag(null)}
       >
-        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-        </svg>
+        <Inbox className="w-4 h-4" strokeWidth={2} />
         <span className="flex-1 text-sm font-medium">All Atoms</span>
       </div>
 
@@ -236,9 +233,7 @@ export function TagTree() {
           className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
           title="Search tags"
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
+          <Search className="w-4 h-4" strokeWidth={2} />
         </button>
       </div>
 
@@ -254,8 +249,18 @@ export function TagTree() {
             ))}
           </div>
         ) : tags.length === 0 ? (
-          <div className="px-3 py-4 text-sm text-[var(--color-text-tertiary)] text-center">
-            No tags yet
+          <div className="px-3 py-4 space-y-3">
+            <p className="text-xs text-[var(--color-text-secondary)] leading-relaxed">
+              No tag categories are configured for this database, so auto-tagging is off. Set up categories to let Atomic tag your atoms automatically.
+            </p>
+            {onOpenTagSettings && (
+              <button
+                onClick={onOpenTagSettings}
+                className="w-full px-3 py-1.5 text-xs font-medium rounded bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent-hover)] transition-colors"
+              >
+                Configure categories
+              </button>
+            )}
           </div>
         ) : (
           <div
@@ -302,18 +307,14 @@ export function TagTree() {
       </div>
 
       {/* New Tag button */}
-      <div className="p-3 border-t border-[var(--color-border)] shrink-0">
-        <Button
-          variant="ghost"
-          size="sm"
-          className="w-full justify-start"
+      <div className="px-3 py-2 border-t border-[var(--color-border)] shrink-0">
+        <button
+          className="w-full flex items-center justify-start gap-1.5 px-2 py-1.5 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] rounded-md transition-colors"
           onClick={() => setNewTagModal({ isOpen: true, parentId: null, name: '' })}
         >
-          <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
+          <Plus className="w-3.5 h-3.5" strokeWidth={2} />
           New Tag
-        </Button>
+        </button>
       </div>
 
       {/* Context Menu */}

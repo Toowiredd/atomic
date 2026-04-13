@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { toast } from 'sonner';
 import { getTransport } from '../lib/transport';
+import { cacheKey, readCache, writeCache } from '../lib/cache/idb';
+import { useDatabasesStore } from './databases';
 
 export interface Atom {
   id: string;
@@ -133,8 +135,12 @@ interface AtomsStore {
   fetchNextPage: () => Promise<void>;
   createAtom: (content: string, sourceUrl?: string, tagIds?: string[]) => Promise<AtomWithTags>;
   updateAtom: (id: string, content: string, sourceUrl?: string, tagIds?: string[]) => Promise<AtomWithTags>;
+  updateAtomContentOnly: (id: string, content: string, sourceUrl?: string, tagIds?: string[]) => Promise<AtomWithTags>;
   deleteAtom: (id: string) => Promise<void>;
   clearError: () => void;
+
+  // Offline cache
+  hydrateFromCache: (dbId?: string | null) => Promise<void>;
 
   // New methods
   updateAtomStatus: (atomId: string, status: string) => void;
@@ -203,6 +209,11 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
   fetchAtoms: async () => {
     const { sourceFilter, sourceValue, sortBy, sortOrder, atoms: existingAtoms } = get();
     const isRefresh = existingAtoms.length > 0;
+    // Only the "default" query — no source filter, default sort — gets cached
+    // and hydrated. Everything else is situational (search, filtered views)
+    // and the cache would churn without buying much.
+    const isDefaultQuery =
+      sourceFilter === 'all' && !sourceValue && sortBy === 'updated' && sortOrder === 'desc';
     set({
       ...(isRefresh ? {} : { atoms: [], isLoadingInitial: true }),
       error: null, currentTagFilter: null, currentOffset: 0, nextCursor: null, nextCursorId: null,
@@ -223,9 +234,45 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
         nextCursor: result.next_cursor ?? null,
         nextCursorId: result.next_cursor_id ?? null,
       });
+      if (isDefaultQuery) {
+        const dbId = useDatabasesStore.getState().activeId;
+        if (dbId) {
+          void writeCache(cacheKey('atoms-default', dbId), {
+            atoms: result.atoms,
+            totalCount: result.total_count,
+            nextCursor: result.next_cursor ?? null,
+            nextCursorId: result.next_cursor_id ?? null,
+          });
+        }
+      }
     } catch (error) {
       set({ error: String(error), isLoadingInitial: false });
     }
+  },
+
+  hydrateFromCache: async (dbId?: string | null) => {
+    const resolvedDbId = dbId ?? useDatabasesStore.getState().activeId;
+    if (!resolvedDbId) return;
+    // Don't clobber an already-populated store — if the network fetch beat
+    // us we leave its data alone.
+    if (get().atoms.length > 0) return;
+    const cached = await readCache<{
+      atoms: AtomSummary[];
+      totalCount: number;
+      nextCursor: string | null;
+      nextCursorId: string | null;
+    }>(cacheKey('atoms-default', resolvedDbId));
+    if (!cached) return;
+    // Still don't clobber if someone raced us between the await and now.
+    if (get().atoms.length > 0) return;
+    set({
+      atoms: cached.data.atoms,
+      totalCount: cached.data.totalCount,
+      currentOffset: cached.data.atoms.length,
+      hasMore: cached.data.atoms.length < cached.data.totalCount,
+      nextCursor: cached.data.nextCursor,
+      nextCursorId: cached.data.nextCursorId,
+    });
   },
 
   fetchAtomsByTag: async (tagId: string) => {
@@ -319,6 +366,27 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
     set({ error: null });
     try {
       const atom = await getTransport().invoke<AtomWithTags>('update_atom', {
+        id,
+        content,
+        sourceUrl: sourceUrl || null,
+        tagIds: tagIds || [],
+      });
+      const summary = toSummary(atom);
+      set((state) => ({
+        atoms: state.atoms.map((a) => (a.id === id ? summary : a)),
+      }));
+      return atom;
+    } catch (error) {
+      set({ error: String(error) });
+      throw error;
+    }
+  },
+
+  /** Save content/metadata without triggering embedding or tagging pipeline.
+   *  Used by auto-save during inline editing. */
+  updateAtomContentOnly: async (id: string, content: string, sourceUrl?: string, tagIds?: string[]) => {
+    try {
+      const atom = await getTransport().invoke<AtomWithTags>('update_atom_content_only', {
         id,
         content,
         sourceUrl: sourceUrl || null,

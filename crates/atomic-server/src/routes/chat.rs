@@ -152,6 +152,9 @@ pub async fn remove_tag_from_scope(
 pub struct SendMessageBody {
     /// Message content
     pub content: String,
+    /// Optional canvas context for canvas-aware chat tools
+    #[serde(default)]
+    pub canvas_context: Option<atomic_core::CanvasContext>,
 }
 
 #[utoipa::path(post, path = "/api/conversations/{id}/messages", params(("id" = String, Path, description = "Conversation ID")), request_body = SendMessageBody, responses((status = 200, description = "Assistant response (streaming events via WebSocket)", body = atomic_core::ChatMessageWithContext)), tag = "chat")]
@@ -162,13 +165,21 @@ pub async fn send_chat_message(
     body: web::Json<SendMessageBody>,
 ) -> HttpResponse {
     let conversation_id = path.into_inner();
-    let content = body.into_inner().content;
+    let body = body.into_inner();
     let on_event = chat_event_callback(state.event_tx.clone());
 
-    match db.0
-        .send_chat_message(&conversation_id, &content, on_event)
-        .await
-    {
+    let result = if body.canvas_context.is_some() {
+        db.0.send_chat_message_with_canvas(
+            &conversation_id,
+            &body.content,
+            on_event,
+            body.canvas_context,
+        ).await
+    } else {
+        db.0.send_chat_message(&conversation_id, &body.content, on_event).await
+    };
+
+    match result {
         Ok(message) => HttpResponse::Ok().json(message),
         Err(e) => crate::error::error_response(e),
     }

@@ -1,4 +1,5 @@
 use super::PostgresStorage;
+use crate::chat::truncate_preview;
 use crate::error::AtomicCoreError;
 use crate::models::*;
 use crate::storage::traits::*;
@@ -11,8 +12,8 @@ async fn fetch_conversation_tags(
     conversation_id: &str,
     db_id: &str,
 ) -> StorageResult<Vec<Tag>> {
-    let rows = sqlx::query_as::<_, (String, String, Option<String>, String)>(
-        "SELECT t.id, t.name, t.parent_id, t.created_at
+    let rows = sqlx::query_as::<_, (String, String, Option<String>, String, bool)>(
+        "SELECT t.id, t.name, t.parent_id, t.created_at, t.is_autotag_target
          FROM tags t
          JOIN conversation_tags ct ON ct.tag_id = t.id
          WHERE ct.conversation_id = $1 AND ct.db_id = $2 AND t.db_id = $2
@@ -26,11 +27,12 @@ async fn fetch_conversation_tags(
 
     Ok(rows
         .into_iter()
-        .map(|(id, name, parent_id, created_at)| Tag {
+        .map(|(id, name, parent_id, created_at, is_autotag_target)| Tag {
             id,
             name,
             parent_id,
             created_at,
+            is_autotag_target,
         })
         .collect())
 }
@@ -64,13 +66,7 @@ async fn fetch_conversation_summary(
     .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?
     .flatten();
 
-    let preview = last_message_preview.map(|content| {
-        if content.len() > 100 {
-            { let mut e = 100; while e > 0 && !content.is_char_boundary(e) { e -= 1; } format!("{}...", &content[..e]) }
-        } else {
-            content
-        }
-    });
+    let preview = last_message_preview.map(|content| truncate_preview(&content, 100));
 
     Ok((message_count as i32, preview))
 }
@@ -124,8 +120,8 @@ async fn batch_fetch_conversation_tags(
         return Ok(HashMap::new());
     }
 
-    let rows = sqlx::query_as::<_, (String, String, String, Option<String>, String)>(
-        "SELECT ct.conversation_id, t.id, t.name, t.parent_id, t.created_at
+    let rows = sqlx::query_as::<_, (String, String, String, Option<String>, String, bool)>(
+        "SELECT ct.conversation_id, t.id, t.name, t.parent_id, t.created_at, t.is_autotag_target
          FROM conversation_tags ct
          JOIN tags t ON ct.tag_id = t.id
          WHERE ct.conversation_id = ANY($1) AND ct.db_id = $2 AND t.db_id = $2
@@ -138,12 +134,13 @@ async fn batch_fetch_conversation_tags(
     .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
 
     let mut map: HashMap<String, Vec<Tag>> = HashMap::new();
-    for (conv_id, id, name, parent_id, created_at) in rows {
+    for (conv_id, id, name, parent_id, created_at, is_autotag_target) in rows {
         map.entry(conv_id).or_default().push(Tag {
             id,
             name,
             parent_id,
             created_at,
+            is_autotag_target,
         });
     }
 
@@ -195,11 +192,7 @@ async fn batch_fetch_conversation_summaries(
     .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
 
     for (conv_id, content) in preview_rows {
-        let preview = if content.len() > 100 {
-            { let mut e = 100; while e > 0 && !content.is_char_boundary(e) { e -= 1; } format!("{}...", &content[..e]) }
-        } else {
-            content
-        };
+        let preview = truncate_preview(&content, 100);
         map.entry(conv_id).or_insert((0, None)).1 = Some(preview);
     }
 

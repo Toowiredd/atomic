@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { ArrowRight } from 'lucide-react';
 import { useKeyboard } from '../../hooks/useKeyboard';
 
 // Generic citation interface that works with both WikiCitation and ChatCitation
@@ -98,8 +99,9 @@ export function CitationPopover({ citation, anchorRect, onClose, onViewAtom }: C
     return null;
   }
 
-  // Render in a portal to avoid transform containment issues
-  // data-modal="true" prevents RightDrawer's useClickOutside from closing the drawer
+  // Render in a portal to avoid transform containment issues.
+  // data-modal="true" marks this as a modal surface so useClickOutside
+  // on other overlays treats clicks inside as outside-of-self.
   return createPortal(
     <div
       ref={popoverRef}
@@ -116,7 +118,7 @@ export function CitationPopover({ citation, anchorRect, onClose, onViewAtom }: C
       </div>
 
       {/* Excerpt content */}
-      <div className="px-4 py-3 prose prose-invert prose-sm max-w-none">
+      <div className="px-4 py-3 prose prose-invert prose-sm max-w-none [&_h1]:text-sm [&_h2]:text-sm [&_h3]:text-sm [&_h4]:text-sm [&_h1]:m-0 [&_h2]:m-0 [&_h3]:m-0 [&_h4]:m-0 max-h-[200px] overflow-y-auto">
         <ReactMarkdown remarkPlugins={[remarkGfm]}>
           {displayExcerpt}
         </ReactMarkdown>
@@ -129,9 +131,7 @@ export function CitationPopover({ citation, anchorRect, onClose, onViewAtom }: C
           className="flex items-center gap-1 text-sm text-[var(--color-accent)] hover:text-[var(--color-accent-light)] transition-colors"
         >
           View full atom
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
-          </svg>
+          <ArrowRight className="w-4 h-4" strokeWidth={2} />
         </button>
       </div>
     </div>,

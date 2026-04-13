@@ -236,6 +236,129 @@ impl SqliteStorage {
 
         Ok(Some((new_chunks, atom_count)))
     }
+
+    pub(crate) fn save_wiki_proposal_sync(
+        &self,
+        proposal: &WikiProposal,
+    ) -> StorageResult<()> {
+        let conn = self
+            .db
+            .conn
+            .lock()
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+
+        let citations_json = serde_json::to_string(&proposal.citations)
+            .map_err(|e| AtomicCoreError::Wiki(format!("Failed to serialize citations: {}", e)))?;
+        let ops_json = serde_json::to_string(&proposal.ops)
+            .map_err(|e| AtomicCoreError::Wiki(format!("Failed to serialize ops: {}", e)))?;
+
+        conn.execute(
+            "INSERT INTO wiki_proposals
+                (id, tag_id, base_article_id, base_updated_at, content,
+                 citations_json, ops_json, new_atom_count, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(tag_id) DO UPDATE SET
+                id = excluded.id,
+                base_article_id = excluded.base_article_id,
+                base_updated_at = excluded.base_updated_at,
+                content = excluded.content,
+                citations_json = excluded.citations_json,
+                ops_json = excluded.ops_json,
+                new_atom_count = excluded.new_atom_count,
+                created_at = excluded.created_at",
+            rusqlite::params![
+                proposal.id,
+                proposal.tag_id,
+                proposal.base_article_id,
+                proposal.base_updated_at,
+                proposal.content,
+                citations_json,
+                ops_json,
+                proposal.new_atom_count,
+                proposal.created_at,
+            ],
+        )
+        .map_err(|e| AtomicCoreError::Wiki(format!("Failed to save wiki proposal: {}", e)))?;
+
+        Ok(())
+    }
+
+    pub(crate) fn get_wiki_proposal_sync(
+        &self,
+        tag_id: &str,
+    ) -> StorageResult<Option<WikiProposal>> {
+        let conn = self.db.read_conn()?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, tag_id, base_article_id, base_updated_at, content,
+                        citations_json, ops_json, new_atom_count, created_at
+                 FROM wiki_proposals
+                 WHERE tag_id = ?1",
+            )
+            .map_err(|e| {
+                AtomicCoreError::Wiki(format!("Failed to prepare get_wiki_proposal query: {}", e))
+            })?;
+
+        let row = stmt
+            .query_row([tag_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i32>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            })
+            .ok();
+
+        let Some((
+            id,
+            tag_id,
+            base_article_id,
+            base_updated_at,
+            content,
+            citations_json,
+            ops_json,
+            new_atom_count,
+            created_at,
+        )) = row
+        else {
+            return Ok(None);
+        };
+
+        let citations: Vec<WikiCitation> = serde_json::from_str(&citations_json)
+            .map_err(|e| AtomicCoreError::Wiki(format!("Failed to parse citations_json: {}", e)))?;
+        let ops: Vec<crate::wiki::WikiSectionOp> = serde_json::from_str(&ops_json)
+            .map_err(|e| AtomicCoreError::Wiki(format!("Failed to parse ops_json: {}", e)))?;
+
+        Ok(Some(WikiProposal {
+            id,
+            tag_id,
+            base_article_id,
+            base_updated_at,
+            content,
+            citations,
+            ops,
+            new_atom_count,
+            created_at,
+        }))
+    }
+
+    pub(crate) fn delete_wiki_proposal_sync(&self, tag_id: &str) -> StorageResult<()> {
+        let conn = self
+            .db
+            .conn
+            .lock()
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        conn.execute("DELETE FROM wiki_proposals WHERE tag_id = ?1", [tag_id])
+            .map_err(|e| AtomicCoreError::Wiki(format!("Failed to delete wiki proposal: {}", e)))?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -374,5 +497,29 @@ impl WikiStore for SqliteStorage {
         })
         .await
         .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
+    }
+
+    async fn save_wiki_proposal(&self, proposal: &WikiProposal) -> StorageResult<()> {
+        let storage = self.clone();
+        let proposal = proposal.clone();
+        tokio::task::spawn_blocking(move || storage.save_wiki_proposal_sync(&proposal))
+            .await
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
+    }
+
+    async fn get_wiki_proposal(&self, tag_id: &str) -> StorageResult<Option<WikiProposal>> {
+        let storage = self.clone();
+        let tag_id = tag_id.to_string();
+        tokio::task::spawn_blocking(move || storage.get_wiki_proposal_sync(&tag_id))
+            .await
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
+    }
+
+    async fn delete_wiki_proposal(&self, tag_id: &str) -> StorageResult<()> {
+        let storage = self.clone();
+        let tag_id = tag_id.to_string();
+        tokio::task::spawn_blocking(move || storage.delete_wiki_proposal_sync(&tag_id))
+            .await
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
     }
 }

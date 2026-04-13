@@ -282,7 +282,7 @@ export function useCommandPalette({ isOpen, onClose, initialQuery = '' }: UseCom
           if (result) {
             onClose();
             // Open the atom in viewer
-            useUIStore.getState().openDrawer('viewer', result.id, result.matching_chunk_content);
+            useUIStore.getState().openReader(result.id, result.matching_chunk_content);
           }
           break;
         }

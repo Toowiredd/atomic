@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Build script for atomic-server sidecar
+ * Build script for atomic-server and atomic-mcp-bridge sidecars
  *
- * Compiles the standalone server binary and places it in src-tauri/binaries/
+ * Compiles both binaries and places them in src-tauri/binaries/
  * with the correct architecture suffix for Tauri's externalBin feature.
  *
  * Usage:
@@ -55,30 +55,9 @@ function main() {
     process.exit(1);
   }
 
-  console.log(`Building atomic-server for ${target}...`);
-
-  // Build the binary
-  const buildCmd = `cargo build -p atomic-server --release --target ${target}`;
-  console.log(`Running: ${buildCmd}`);
-
-  try {
-    execSync(buildCmd, {
-      cwd: projectRoot,
-      stdio: 'inherit',
-      env: { ...process.env }
-    });
-  } catch (error) {
-    console.error('Build failed');
-    process.exit(1);
-  }
-
-  // Determine binary name and paths
-  const binaryName = process.platform === 'win32' ? 'atomic-server.exe' : 'atomic-server';
-  const ext = process.platform === 'win32' ? '.exe' : '';
-
-  const sourcePath = join(projectRoot, 'target', target, 'release', binaryName);
+  const targetIsWindows = target.includes('windows');
+  const ext = targetIsWindows ? '.exe' : '';
   const destDir = join(projectRoot, 'src-tauri', 'binaries');
-  const destPath = join(destDir, `atomic-server-${target}${ext}`);
 
   // Create binaries directory if needed
   if (!existsSync(destDir)) {
@@ -86,14 +65,37 @@ function main() {
     console.log(`Created directory: ${destDir}`);
   }
 
-  // Copy binary with architecture suffix
-  if (!existsSync(sourcePath)) {
-    console.error(`Binary not found: ${sourcePath}`);
-    process.exit(1);
-  }
+  const crates = ['atomic-server', 'atomic-mcp-bridge'];
 
-  copyFileSync(sourcePath, destPath);
-  console.log(`Copied: ${sourcePath} -> ${destPath}`);
+  for (const crate of crates) {
+    console.log(`Building ${crate} for ${target}...`);
+
+    const buildCmd = `cargo build -p ${crate} --release --target ${target}`;
+    console.log(`Running: ${buildCmd}`);
+
+    try {
+      execSync(buildCmd, {
+        cwd: projectRoot,
+        stdio: 'inherit',
+        env: { ...process.env }
+      });
+    } catch (error) {
+      console.error(`Build failed for ${crate}`);
+      process.exit(1);
+    }
+
+    const binaryName = targetIsWindows ? `${crate}.exe` : crate;
+    const sourcePath = join(projectRoot, 'target', target, 'release', binaryName);
+    const destPath = join(destDir, `${crate}-${target}${ext}`);
+
+    if (!existsSync(sourcePath)) {
+      console.error(`Binary not found: ${sourcePath}`);
+      process.exit(1);
+    }
+
+    copyFileSync(sourcePath, destPath);
+    console.log(`Copied: ${sourcePath} -> ${destPath}`);
+  }
 
   console.log('Done!');
 }

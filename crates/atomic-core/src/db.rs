@@ -199,7 +199,7 @@ impl Database {
     ///   1. Add a new `if version < N` block at the end (before the virtual-table section)
     ///   2. End the block with `PRAGMA user_version = N;`
     ///   3. Bump LATEST_VERSION
-    const LATEST_VERSION: i32 = 7;
+    const LATEST_VERSION: i32 = 12;
 
     pub fn run_migrations(conn: &Connection) -> Result<(), AtomicCoreError> {
         let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -562,6 +562,114 @@ impl Database {
                 CREATE INDEX IF NOT EXISTS idx_wiki_versions_tag ON wiki_article_versions(tag_id, version_number);
 
                 PRAGMA user_version = 7;
+                "#,
+            )?;
+        }
+
+        // --- V7 → V8: Store error reasons for failed embeddings/tagging ---
+        if version < 8 {
+            conn.execute_batch(
+                "ALTER TABLE atoms ADD COLUMN embedding_error TEXT;
+                 ALTER TABLE atoms ADD COLUMN tagging_error TEXT;
+                 PRAGMA user_version = 8;",
+            )?;
+        }
+
+        // --- V8 → V9: Wiki proposals (human-in-the-loop update review) ---
+        if version < 9 {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS wiki_proposals (
+                    id              TEXT PRIMARY KEY,
+                    tag_id          TEXT UNIQUE NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                    base_article_id TEXT NOT NULL,
+                    base_updated_at TEXT NOT NULL,
+                    content         TEXT NOT NULL,
+                    citations_json  TEXT NOT NULL,
+                    ops_json        TEXT NOT NULL,
+                    new_atom_count  INTEGER NOT NULL,
+                    created_at      TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_wiki_proposals_tag_id ON wiki_proposals(tag_id);
+
+                PRAGMA user_version = 9;
+                "#,
+            )?;
+        }
+
+        // --- V9 → V10: Track semantic edge computation status per atom ---
+        if version < 10 {
+            conn.execute_batch(
+                r#"
+                ALTER TABLE atoms ADD COLUMN edges_status TEXT DEFAULT 'pending';
+                CREATE INDEX IF NOT EXISTS idx_atoms_edges_status ON atoms(edges_status);
+                "#,
+            )?;
+            // Atoms that already have embeddings need edges computed
+            // (they may already have edges from before, but we treat them as pending
+            // so the batched pipeline can process them cleanly)
+            conn.execute(
+                "UPDATE atoms SET edges_status = 'pending' WHERE embedding_status = 'complete'",
+                [],
+            )?;
+            // Atoms without embeddings don't need edges yet
+            conn.execute(
+                "UPDATE atoms SET edges_status = 'none' WHERE embedding_status != 'complete'",
+                [],
+            )?;
+            conn.execute_batch("PRAGMA user_version = 10;")?;
+        }
+
+        // --- V10 → V11: Mark which top-level tags the auto-tagger may extend ---
+        if version < 11 {
+            let has_col: bool = conn
+                .query_row(
+                    "SELECT 1 FROM pragma_table_info('tags') WHERE name='is_autotag_target'",
+                    [],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+
+            if !has_col {
+                conn.execute_batch(
+                    "ALTER TABLE tags ADD COLUMN is_autotag_target INTEGER NOT NULL DEFAULT 0;",
+                )?;
+            }
+
+            // Backfill: the five seeded categories are auto-tag targets by default.
+            conn.execute_batch(
+                "UPDATE tags SET is_autotag_target = 1
+                   WHERE parent_id IS NULL
+                     AND name IN ('Topics', 'People', 'Locations', 'Organizations', 'Events');
+                 PRAGMA user_version = 11;",
+            )?;
+        }
+
+        // --- V11 → V12: Daily briefings + briefing citations ---
+        if version < 12 {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS briefings (
+                    id TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    atom_count INTEGER NOT NULL,
+                    last_run_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS briefing_citations (
+                    id TEXT PRIMARY KEY,
+                    briefing_id TEXT NOT NULL REFERENCES briefings(id) ON DELETE CASCADE,
+                    citation_index INTEGER NOT NULL,
+                    atom_id TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+                    excerpt TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_briefings_created ON briefings(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_briefing_citations_briefing
+                    ON briefing_citations(briefing_id);
+
+                PRAGMA user_version = 12;
                 "#,
             )?;
         }

@@ -145,7 +145,7 @@ export function ChatMessage({ message, isStreaming = false, onViewAtom, searchQu
         href={href}
         target="_blank"
         rel="noopener noreferrer"
-        className="text-[var(--color-accent-light)] hover:underline"
+        className="underline underline-offset-2 decoration-[var(--color-border-hover)] hover:decoration-current transition-colors"
       >
         {processChildren(children)}
       </a>
@@ -182,7 +182,7 @@ export function ChatMessage({ message, isStreaming = false, onViewAtom, searchQu
         >
           {/* Message content */}
           {isAssistant ? (
-            <div className="prose prose-invert prose-sm max-w-none">
+            <div className="prose prose-invert prose-sm max-w-none prose-headings:text-[var(--color-text-primary)] prose-p:text-[var(--color-text-primary)] prose-a:text-[var(--color-text-primary)] prose-a:underline prose-a:decoration-[var(--color-border-hover)] prose-a:hover:decoration-current prose-strong:text-[var(--color-text-primary)] prose-code:text-[var(--color-accent-light)] prose-code:bg-[var(--color-bg-card)] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[var(--color-bg-card)] prose-pre:border prose-pre:border-[var(--color-border)] prose-blockquote:border-l-[var(--color-accent)] prose-blockquote:text-[var(--color-text-secondary)] prose-li:text-[var(--color-text-primary)] prose-hr:border-[var(--color-border)]">
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 components={markdownComponents}
@@ -191,7 +191,7 @@ export function ChatMessage({ message, isStreaming = false, onViewAtom, searchQu
               </ReactMarkdown>
             </div>
           ) : (
-            <p className="whitespace-pre-wrap">
+            <p className="whitespace-pre-wrap text-sm">
               {searchQuery.trim() && highlightText
                 ? highlightText(message.content)
                 : message.content}

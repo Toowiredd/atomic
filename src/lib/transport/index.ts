@@ -82,3 +82,14 @@ export function isLocalServer(): boolean {
 export function getLocalServerConfig(): HttpTransportConfig | null {
   return localServerConfig;
 }
+
+/// Get the resolved path to the bundled atomic-mcp-bridge binary (desktop only).
+export async function getMcpBridgePath(): Promise<string | null> {
+  if (!isDesktopApp()) return null;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke<string>('get_mcp_bridge_path');
+  } catch {
+    return null;
+  }
+}

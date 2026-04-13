@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { Loader2 } from 'lucide-react';
 import { useUIStore } from '../../stores/ui';
 import { useDatabasesStore } from '../../stores/databases';
 import { getGlobalCanvas, type GlobalCanvasData } from '../../lib/api';
+import { getTransport } from '../../lib/transport';
 import Graph from 'graphology';
 import Sigma from 'sigma';
 import EdgeCurveProgram from '@sigma/edge-curve';
@@ -12,13 +14,26 @@ import {
   edgeColor,
   type CanvasTheme,
 } from './sigma/themes';
+import { AtomPreviewPopover } from './AtomPreviewPopover';
+import { useCanvasStore } from '../../stores/canvas';
 
 function truncLabel(str: string, max: number): string {
   return str.length > max ? str.substring(0, max - 1) + '\u2026' : str;
 }
 
-export function SigmaCanvas() {
-  const openDrawer = useUIStore(s => s.openDrawer);
+export type SigmaCanvasMode = 'main' | 'preview';
+
+interface SigmaCanvasProps {
+  /** 'main' runs the full interactive canvas; 'preview' renders a static thumbnail
+   *  with no chrome, no mount animation, no pan/zoom, and no chat controller. */
+  mode?: SigmaCanvasMode;
+  /** Click handler for preview mode — fires on any click inside the container. */
+  onPreviewClick?: () => void;
+}
+
+export function SigmaCanvas({ mode = 'main', onPreviewClick }: SigmaCanvasProps = {}) {
+  const isPreview = mode === 'preview';
+  const openReader = useUIStore(s => s.openReader);
   const selectedTagId = useUIStore(s => s.selectedTagId);
   const activeDbId = useDatabasesStore(s => s.activeId);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -31,9 +46,18 @@ export function SigmaCanvas() {
   const [themePickerOpen, setThemePickerOpen] = useState(false);
   const [edgeThreshold, setEdgeThreshold] = useState(0);
   const edgeThresholdRef = useRef(0);
-  const edgeAnimProgress = useRef(1); // 0 = invisible, 1 = fully visible
+  const edgeAnimProgress = useRef(0); // 0 = invisible, 1 = fully visible
   const themeRef = useRef(theme);
   themeRef.current = theme;
+
+  // Atom preview popover state
+  const [previewAtomId, setPreviewAtomId] = useState<string | null>(null);
+  const [previewAnchorRect, setPreviewAnchorRect] = useState<{ top: number; left: number; bottom: number; width: number } | null>(null);
+
+  const closePreview = useCallback(() => {
+    setPreviewAtomId(null);
+    setPreviewAnchorRect(null);
+  }, []);
 
   // Build a set of atom IDs that match the selected tag
   const selectedTagRef = useRef(selectedTagId);
@@ -91,19 +115,29 @@ export function SigmaCanvas() {
     const maxEdges = Math.max(1, ...edgeCounts.values());
     graphDataRef.current = { edgeCounts, maxEdges };
 
+    // Build atom → cluster index map
+    const atomCluster = new Map<string, number>();
+    for (let i = 0; i < data.clusters.length; i++) {
+      for (const atomId of data.clusters[i].atom_ids) {
+        atomCluster.set(atomId, i);
+      }
+    }
+
     // Add atom nodes at center — will animate to PCA positions
     const targetPositions: Record<string, { x: number; y: number }> = {};
     for (const atom of data.atoms) {
       const connectivity = (edgeCounts.get(atom.atom_id) || 0) / maxEdges;
+      const clusterIdx = atomCluster.get(atom.atom_id);
       targetPositions[atom.atom_id] = { x: atom.x * scale, y: atom.y * scale };
       graph.addNode(atom.atom_id, {
         x: 0,
         y: 0,
         size: 2.5 + connectivity * 5,
-        color: nodeColor(theme, connectivity),
+        color: nodeColor(theme, connectivity, clusterIdx),
         label: truncLabel(atom.title || atom.atom_id.substring(0, 8), 30),
         fullLabel: atom.title || atom.atom_id.substring(0, 8),
         connectivity,
+        clusterIndex: clusterIdx,
         tagIds: atom.tag_ids,
       });
     }
@@ -127,10 +161,9 @@ export function SigmaCanvas() {
     }
 
     const sigma = new Sigma(graph, container, {
-      renderLabels: true,
-      labelRenderedSizeThreshold: 7,
-      labelSize: 12,
-      labelColor: { color: theme.nodeLabelColor },
+      // Atom labels are drawn manually on the overlay canvas (drawLabels) with
+      // real collision detection, so Sigma's built-in label pass is disabled.
+      renderLabels: false,
       labelFont: 'system-ui, -apple-system, sans-serif',
       defaultEdgeColor: '#333',
       defaultNodeColor: '#555',
@@ -214,7 +247,7 @@ export function SigmaCanvas() {
     labelCanvas.style.zIndex = '10';
     container.appendChild(labelCanvas);
 
-    function drawClusterLabels() {
+    function drawLabels() {
       const width = container!.clientWidth;
       const height = container!.clientHeight;
       const ratio = window.devicePixelRatio || 1;
@@ -229,15 +262,35 @@ export function SigmaCanvas() {
       ctx.clearRect(0, 0, width, height);
 
       const t = themeRef.current;
-      const fontSize = 13;
-      ctx.font = `600 ${fontSize}px system-ui, -apple-system, sans-serif`;
+
+      // Shared collision list — atom labels avoid cluster pills and vice versa.
+      const placed: { x: number; y: number; w: number; h: number }[] = [];
+      function collides(rect: { x: number; y: number; w: number; h: number }, pad: number) {
+        for (const p of placed) {
+          if (
+            rect.x - pad < p.x + p.w &&
+            rect.x + rect.w + pad > p.x &&
+            rect.y - pad < p.y + p.h &&
+            rect.y + rect.h + pad > p.y
+          ) return true;
+        }
+        return false;
+      }
+
+      // === Cluster labels (highest priority — placed first) ===
+      const clusterFontSize = 13;
+      ctx.font = `600 ${clusterFontSize}px system-ui, -apple-system, sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
 
-      const sorted = [...data!.clusters].sort((a, b) => b.atom_count - a.atom_count);
-      const placed: { x: number; y: number; w: number; h: number }[] = [];
+      const sortedClusters = [...data!.clusters].sort((a, b) => b.atom_count - a.atom_count);
+      const maxClusterLabels = Math.max(4, Math.floor((width * height) / 40000));
+      const clusterPad = 24;
+      let clusterCount = 0;
 
-      for (const cluster of sorted) {
+      for (const cluster of sortedClusters) {
+        if (clusterCount >= maxClusterLabels) break;
+
         // Compute centroid from actual current node positions
         let cx = 0, cy = 0, count = 0;
         for (const atomId of cluster.atom_ids) {
@@ -254,7 +307,7 @@ export function SigmaCanvas() {
         const labelY = pos.y - 20;
         const metrics = ctx.measureText(cluster.label);
         const pillW = metrics.width + 16;
-        const pillH = fontSize + 8;
+        const pillH = clusterFontSize + 8;
         const rect = {
           x: pos.x - pillW / 2,
           y: labelY - pillH / 2,
@@ -262,14 +315,9 @@ export function SigmaCanvas() {
           h: pillH,
         };
 
-        const overlaps = placed.some(p =>
-          rect.x < p.x + p.w &&
-          rect.x + rect.w > p.x &&
-          rect.y < p.y + p.h &&
-          rect.y + rect.h > p.y
-        );
-        if (overlaps) continue;
+        if (collides(rect, clusterPad)) continue;
         placed.push(rect);
+        clusterCount++;
 
         ctx.fillStyle = t.labelBg;
         ctx.beginPath();
@@ -282,10 +330,50 @@ export function SigmaCanvas() {
         ctx.fillStyle = t.labelColor;
         ctx.fillText(cluster.label, pos.x, labelY);
       }
+
+      // === Atom labels (collision-checked against everything already placed) ===
+      const atomFontSize = 12;
+      ctx.font = `${atomFontSize}px system-ui, -apple-system, sans-serif`;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+
+      const tagFilter = selectedTagRef.current;
+      const minRenderedSize = 4;
+      const atomLabelPad = 20;
+
+      type Cand = { vx: number; vy: number; rsize: number; label: string };
+      const candidates: Cand[] = [];
+      graph!.forEachNode((_id, attrs) => {
+        if (tagFilter) {
+          const tagIds = (attrs as any).tagIds as string[] | undefined;
+          if (!tagIds?.includes(tagFilter)) return;
+        }
+        const rsize = sigma!.scaleSize(attrs.size as number);
+        if (rsize < minRenderedSize) return;
+        const pos = sigma!.graphToViewport({ x: attrs.x as number, y: attrs.y as number });
+        // Cull off-screen — generous horizontal margin so labels near the edge still render
+        if (pos.x < -200 || pos.x > width + 50 || pos.y < -30 || pos.y > height + 30) return;
+        const label = (attrs.label as string) || '';
+        if (!label) return;
+        candidates.push({ vx: pos.x, vy: pos.y, rsize, label });
+      });
+      // Largest (most-connected) nodes win label slots in dense regions
+      candidates.sort((a, b) => b.rsize - a.rsize);
+
+      ctx.fillStyle = t.nodeLabelColor;
+      for (const c of candidates) {
+        const tw = ctx.measureText(c.label).width;
+        const lx = c.vx + c.rsize + 4;
+        const ly = c.vy;
+        const rect = { x: lx, y: ly - atomFontSize / 2, w: tw, h: atomFontSize };
+        if (collides(rect, atomLabelPad)) continue;
+        placed.push(rect);
+        ctx.fillText(c.label, lx, ly);
+      }
     }
 
-    sigma.on('afterRender', drawClusterLabels);
-    requestAnimationFrame(drawClusterLabels);
+    sigma.on('afterRender', drawLabels);
+    requestAnimationFrame(drawLabels);
 
     // Lock the bounding box to the final layout so Sigma doesn't
     // recompute normalization as nodes move from center outward
@@ -298,46 +386,134 @@ export function SigmaCanvas() {
     }
     sigma.setCustomBBox({ x: [xMin, xMax], y: [yMin, yMax] });
 
-    // Animate nodes outward from center + fade edges in
-    edgeAnimProgress.current = 0;
-    const animStart = performance.now();
+    // Animate nodes outward from center + fade edges in.
+    // Preview mode skips the animation and snaps to final state so the thumbnail
+    // shows the real layout immediately on mount.
     let cancelledAnim = false;
-    function animateTick(now: number) {
-      if (cancelledAnim) return;
-      const elapsed = now - animStart;
-
-      // Node positions: 0 → target over 2.5s, cubic ease-out
-      const nt = Math.min(1, elapsed / 2000);
-      const ne = 1 - (1 - nt) ** 3;
+    if (isPreview) {
       for (const [id, target] of Object.entries(targetPositions)) {
         if (!graph.hasNode(id)) continue;
-        graph.setNodeAttribute(id, 'x', target.x * ne);
-        graph.setNodeAttribute(id, 'y', target.y * ne);
+        graph.setNodeAttribute(id, 'x', target.x);
+        graph.setNodeAttribute(id, 'y', target.y);
       }
+      edgeAnimProgress.current = 1;
+      sigma.refresh();
+    } else {
+      const animStart = performance.now();
+      function animateTick(now: number) {
+        if (cancelledAnim) return;
+        const elapsed = now - animStart;
 
-      // Edge fade: 0 → 1 over 3s, ease-in
-      const et = Math.min(1, elapsed / 2500);
-      edgeAnimProgress.current = et * et;
+        // Node positions: 0 → target over 2s, cubic ease-out
+        const nt = Math.min(1, elapsed / 2000);
+        const ne = 1 - (1 - nt) ** 3;
+        for (const [id, target] of Object.entries(targetPositions)) {
+          if (!graph.hasNode(id)) continue;
+          graph.setNodeAttribute(id, 'x', target.x * ne);
+          graph.setNodeAttribute(id, 'y', target.y * ne);
+        }
 
-      if (nt < 1 || et < 1) {
-        requestAnimationFrame(animateTick);
+        // Edge fade: 0 → 1 over 2.5s, ease-in
+        const et = Math.min(1, elapsed / 2500);
+        edgeAnimProgress.current = et * et;
+
+        // setNodeAttribute triggers a render but not a reducer re-run —
+        // the edgeReducer reads edgeAnimProgress.current, so force a refresh
+        // each tick so edge color/size track the animation.
+        sigma.refresh();
+
+        if (nt < 1 || et < 1) {
+          requestAnimationFrame(animateTick);
+        }
       }
+      requestAnimationFrame(animateTick);
     }
-    requestAnimationFrame(animateTick);
     const cancelAnim = () => { cancelledAnim = true; };
 
-    sigma.on('clickNode', ({ node }) => {
-      openDrawer('viewer', node);
+    // Helper to show atom preview popover at a node's screen position
+    const showAtomPreview = (atomId: string) => {
+      if (!graph.hasNode(atomId) || !sigma) return;
+      const nodeAttrs = graph.getNodeAttributes(atomId);
+      const viewportPos = sigma.graphToViewport({ x: nodeAttrs.x as number, y: nodeAttrs.y as number });
+      const containerRect = container!.getBoundingClientRect();
+      const nodeSize = (nodeAttrs.size as number) || 4;
+      const screenX = containerRect.left + viewportPos.x;
+      const screenY = containerRect.top + viewportPos.y;
+      setPreviewAnchorRect({
+        top: screenY - nodeSize,
+        left: screenX - nodeSize,
+        bottom: screenY + nodeSize,
+        width: nodeSize * 2,
+      });
+      setPreviewAtomId(atomId);
+    };
+
+    // Build a controller both modes use. Main mode registers it in the global
+    // `controller` slot (driven by the chat agent). Preview mode registers it
+    // in the separate `previewController` slot so dashboard widgets can drive
+    // thumbnail focus without touching the chat agent's target.
+    const bboxW = xMax - xMin || 1;
+    const bboxH = yMax - yMin || 1;
+    const graphToCamera = (gx: number, gy: number) => ({
+      x: (gx - xMin) / bboxW,
+      y: (gy - yMin) / bboxH,
     });
+
+    const controller = {
+      zoomToCluster: (clusterLabel: string) => {
+        const cluster = data.clusters.find(
+          (c) => c.label.toLowerCase() === clusterLabel.toLowerCase()
+        );
+        if (!cluster || !graph || !sigma) return;
+        let cx = 0, cy = 0, count = 0;
+        for (const atomId of cluster.atom_ids) {
+          if (!graph.hasNode(atomId)) continue;
+          cx += graph.getNodeAttribute(atomId, 'x') as number;
+          cy += graph.getNodeAttribute(atomId, 'y') as number;
+          count++;
+        }
+        if (count === 0) return;
+        cx /= count;
+        cy /= count;
+        const cam = graphToCamera(cx, cy);
+        sigma.getCamera().animate({ x: cam.x, y: cam.y, ratio: 0.3 }, { duration: 800 });
+      },
+      focusAtom: (atomId: string) => {
+        if (!graph.hasNode(atomId) || !sigma) return;
+        const gx = graph.getNodeAttribute(atomId, 'x') as number;
+        const gy = graph.getNodeAttribute(atomId, 'y') as number;
+        const cam = graphToCamera(gx, gy);
+        sigma.getCamera().animate({ x: cam.x, y: cam.y, ratio: 0.15 }, { duration: 600 });
+        // Main view shows the popover after the camera settles; preview stays quiet.
+        if (!isPreview) setTimeout(() => showAtomPreview(atomId), 650);
+      },
+    };
+
+    if (isPreview) {
+      useCanvasStore.getState().registerPreviewController(controller);
+    } else {
+      sigma.on('clickNode', ({ node }) => {
+        showAtomPreview(node);
+      });
+      const { registerController, setCanvasData } = useCanvasStore.getState();
+      setCanvasData(data);
+      registerController(controller);
+    }
 
     return () => {
       cancelAnim();
+      const store = useCanvasStore.getState();
+      if (isPreview) {
+        store.unregisterPreviewController();
+      } else {
+        store.unregisterController();
+      }
       sigma.kill();
       labelCanvas.remove();
       sigmaRef.current = null;
       graphRef.current = null;
     };
-  }, [data, openDrawer]); // intentionally exclude theme — handled below
+  }, [data, isPreview]); // intentionally exclude theme — handled below
 
   // Update colors when theme changes (without recreating graph)
   useEffect(() => {
@@ -348,15 +524,13 @@ export function SigmaCanvas() {
     const { edgeCounts, maxEdges } = graphDataRef.current;
 
     // Update node colors
-    graph.forEachNode((node) => {
+    graph.forEachNode((node, attrs) => {
       const connectivity = (edgeCounts.get(node) || 0) / maxEdges;
-      graph.setNodeAttribute(node, 'color', nodeColor(theme, connectivity));
+      graph.setNodeAttribute(node, 'color', nodeColor(theme, connectivity, (attrs as any).clusterIndex));
     });
 
-    // Update sigma label color setting
-    sigma.setSetting('labelColor', { color: theme.nodeLabelColor });
-
-    // Edges update via edgeReducer (reads themeRef.current)
+    // Atom label color comes from themeRef inside drawLabels — just trigger a refresh.
+    // Edges update via edgeReducer (also reads themeRef.current).
     sigma.refresh();
   }, [theme]);
 
@@ -364,6 +538,41 @@ export function SigmaCanvas() {
   useEffect(() => {
     sigmaRef.current?.refresh();
   }, [selectedTagId]);
+
+  // Continuously refresh sigma during chat sidebar transition so the graph resizes smoothly
+  const chatSidebarOpen = useUIStore(s => s.chatSidebarOpen);
+  useEffect(() => {
+    const start = performance.now();
+    let raf: number;
+    function tick(now: number) {
+      sigmaRef.current?.refresh();
+      if (now - start < 350) {
+        raf = requestAnimationFrame(tick);
+      }
+    }
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [chatSidebarOpen]);
+
+  // Subscribe to canvas action events from the chat agent.
+  // Preview instances don't own the controller and shouldn't react to chat actions.
+  useEffect(() => {
+    if (isPreview) return;
+    const transport = getTransport();
+    const unsub = transport.subscribe<{ conversation_id: string; action: string; params: Record<string, string> }>(
+      'chat-canvas-action',
+      (payload) => {
+        const ctrl = useCanvasStore.getState().controller;
+        if (!ctrl) return;
+        if (payload.action === 'zoom_to_cluster') {
+          ctrl.zoomToCluster(payload.params.cluster_label);
+        } else if (payload.action === 'focus_atom') {
+          ctrl.focusAtom(payload.params.atom_id);
+        }
+      }
+    );
+    return () => unsub();
+  }, [isPreview]);
 
   // Animate edge threshold changes
   const thresholdAnimRef = useRef<number | null>(null);
@@ -398,16 +607,13 @@ export function SigmaCanvas() {
     <div className="flex flex-col h-full w-full">
       <div
         className="flex-1 relative overflow-hidden"
-        style={{ backgroundColor: theme.background }}
+        style={{ backgroundColor: isPreview ? 'var(--color-bg-main)' : theme.background }}
       >
         {isLoading && (
           <div className="absolute inset-0 flex items-center justify-center z-10">
             <div className="flex items-center gap-2 text-[var(--color-text-secondary)]">
-              <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-              </svg>
-              <span className="text-sm">Computing layout...</span>
+              <Loader2 className={`animate-spin ${isPreview ? 'h-4 w-4' : 'h-5 w-5'}`} strokeWidth={2} />
+              {!isPreview && <span className="text-sm">Computing layout...</span>}
             </div>
           </div>
         )}
@@ -415,8 +621,14 @@ export function SigmaCanvas() {
         {error && (
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="text-center text-[var(--color-text-secondary)]">
-              <p className="text-lg mb-2">Error loading canvas</p>
-              <p className="text-sm">{error}</p>
+              {isPreview ? (
+                <p className="text-xs">Canvas unavailable</p>
+              ) : (
+                <>
+                  <p className="text-lg mb-2">Error loading canvas</p>
+                  <p className="text-sm">{error}</p>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -424,20 +636,36 @@ export function SigmaCanvas() {
         {!isLoading && data && data.atoms.length === 0 && (
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="text-center text-[var(--color-text-secondary)]">
-              <p className="text-lg mb-2">No atoms with embeddings</p>
-              <p className="text-sm">Create some atoms and wait for embeddings to generate</p>
+              {isPreview ? (
+                <p className="text-xs">No atoms with embeddings yet</p>
+              ) : (
+                <>
+                  <p className="text-lg mb-2">No atoms with embeddings</p>
+                  <p className="text-sm">Create some atoms and wait for embeddings to generate</p>
+                </>
+              )}
             </div>
           </div>
         )}
 
         <div
           ref={containerRef}
-          className="w-full h-full"
-          style={{ minHeight: 200 }}
+          className={`w-full h-full ${isPreview ? 'pointer-events-none' : ''}`}
+          style={isPreview ? undefined : { minHeight: 200 }}
         />
 
-        {/* Theme picker + edge slider */}
-        {!isLoading && data && data.atoms.length > 0 && (
+        {/* Click-through overlay in preview mode — whole widget navigates to the main canvas */}
+        {isPreview && (
+          <button
+            type="button"
+            onClick={onPreviewClick}
+            className="absolute inset-0 z-20 cursor-pointer bg-transparent hover:bg-white/[0.03] transition-colors"
+            aria-label="Open canvas view"
+          />
+        )}
+
+        {/* Theme picker + edge slider — main view only */}
+        {!isPreview && !isLoading && data && data.atoms.length > 0 && (
           <div className="absolute bottom-4 left-4 z-20 flex flex-col gap-2">
             <div className="flex items-center gap-1.5">
               <button
@@ -484,6 +712,20 @@ export function SigmaCanvas() {
             </div>
           </div>
         )}
+
+        {/* Atom preview popover — main view only */}
+        {!isPreview && previewAtomId && previewAnchorRect && (
+          <AtomPreviewPopover
+            atomId={previewAtomId}
+            anchorRect={previewAnchorRect}
+            onClose={closePreview}
+            onViewAtom={(atomId) => {
+              closePreview();
+              openReader(atomId);
+            }}
+          />
+        )}
+
       </div>
     </div>
   );

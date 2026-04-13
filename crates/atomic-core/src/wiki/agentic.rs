@@ -523,18 +523,32 @@ pub(crate) async fn generate(
         atom_count,
         &ctx.wiki_model,
         &ctx.linkable_article_names,
+        ctx.generation_prompt(),
     )
     .await
 }
 
-/// Update an existing wiki article using the agentic research strategy.
-/// Re-runs full research with existing article as context, then full re-synthesis.
-pub(crate) async fn update(
+/// Run the research loop against an existing article and return the selected
+/// chunks + atom count. Used by both the legacy full-rewrite update path and
+/// the new propose path.
+///
+/// When `filter_existing` is true, any selected chunk whose `(atom_id, chunk_index)`
+/// is already present in the existing article's citations is dropped — the
+/// propose path only wants net-new sources so citation numbering stays clean.
+/// The legacy full-rewrite path passes `false` (preserving its current behavior
+/// of feeding everything to synthesis).
+pub(crate) async fn research_for_update(
     ctx: &WikiStrategyContext,
     existing: &WikiArticleWithCitations,
-) -> Result<Option<WikiArticleWithCitations>, String> {
+    filter_existing: bool,
+) -> Result<Option<(Vec<ChunkWithContext>, i32)>, String> {
     let max_tokens = ctx.max_source_tokens();
-    tracing::info!(tag_name = %ctx.tag_name, budget_tokens = max_tokens, "[wiki/agentic] Starting agentic update");
+    tracing::info!(
+        tag_name = %ctx.tag_name,
+        budget_tokens = max_tokens,
+        filter_existing,
+        "[wiki/agentic] Starting agentic research for update"
+    );
 
     let scope_tag_ids = ctx.storage.get_tag_hierarchy_impl(&ctx.tag_id)
         .map_err(|e| e.to_string())?;
@@ -568,13 +582,60 @@ pub(crate) async fn update(
         return Ok(None);
     }
 
-    let chunks = trim_to_budget(raw_chunks, max_tokens);
+    // Optional filter: drop chunks that already appear as existing citations.
+    // Match on (atom_id, chunk_index) — the same key used when extracting
+    // citations from the LLM output.
+    let filtered = if filter_existing {
+        let cited: std::collections::HashSet<(String, i32)> = existing
+            .citations
+            .iter()
+            .map(|c| (c.atom_id.clone(), c.chunk_index.unwrap_or(0)))
+            .collect();
+        let before = raw_chunks.len();
+        let filtered: Vec<ChunkWithContext> = raw_chunks
+            .into_iter()
+            .filter(|c| !cited.contains(&(c.atom_id.clone(), c.chunk_index)))
+            .collect();
+        if filtered.len() < before {
+            tracing::info!(
+                before,
+                after = filtered.len(),
+                "[wiki/agentic] Filtered out already-cited chunks"
+            );
+        }
+        if filtered.is_empty() {
+            tracing::info!("[wiki/agentic] All selected chunks were already cited, no update needed");
+            return Ok(None);
+        }
+        filtered
+    } else {
+        raw_chunks
+    };
+
+    let chunks = trim_to_budget(filtered, max_tokens);
     if chunks.len() < rc.selected_indices.len() {
         tracing::info!(
             chunks = chunks.len(),
             "[wiki/agentic] Trimmed to fit token budget"
         );
     }
+
+    Ok(Some((chunks, atom_count)))
+}
+
+/// Update an existing wiki article using the agentic research strategy.
+/// Re-runs full research with existing article as context, then full re-synthesis.
+///
+/// Legacy full-rewrite path used by `strategy_update` (deprecated `/update` route).
+/// The propose path uses `research_for_update` directly + the shared section-ops
+/// generator; it does not go through this function.
+pub(crate) async fn update(
+    ctx: &WikiStrategyContext,
+    existing: &WikiArticleWithCitations,
+) -> Result<Option<WikiArticleWithCitations>, String> {
+    let Some((chunks, atom_count)) = research_for_update(ctx, existing, false).await? else {
+        return Ok(None);
+    };
 
     tracing::info!("[wiki/agentic] Synthesizing updated article...");
     let result = synthesize_article(
@@ -585,6 +646,7 @@ pub(crate) async fn update(
         atom_count,
         &ctx.wiki_model,
         &ctx.linkable_article_names,
+        ctx.update_prompt(),
     )
     .await?;
 

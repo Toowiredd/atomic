@@ -63,5 +63,8 @@ postgres = ["sqlx", "pgvector"]
 tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# test-util is required for #[tokio::test(start_paused = true)] so retry/backoff
+# tests don't sleep real wall-clock seconds — time auto-advances to the next
+# pending Sleep deadline when the runtime has no other work.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }

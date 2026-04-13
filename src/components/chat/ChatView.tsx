@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { MessageSquare, Search as SearchIcon } from 'lucide-react';
 import { useChatStore } from '../../stores/chat';
 import { useUIStore } from '../../stores/ui';
 import { useChatEvents } from '../../hooks/useChatEvents';
@@ -14,11 +15,12 @@ export function ChatView() {
   const isLoading = useChatStore(s => s.isLoading);
   const isStreaming = useChatStore(s => s.isStreaming);
   const streamingContent = useChatStore(s => s.streamingContent);
+  const retrievalSteps = useChatStore(s => s.retrievalSteps);
   const error = useChatStore(s => s.error);
   const sendMessage = useChatStore(s => s.sendMessage);
   const goBack = useChatStore(s => s.goBack);
 
-  const openDrawer = useUIStore(s => s.openDrawer);
+  const openReader = useUIStore(s => s.openReader);
 
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -106,8 +108,8 @@ export function ChatView() {
 
   // Handle viewing an atom from citation - switch drawer to viewer mode
   const handleViewAtom = useCallback((atomId: string) => {
-    openDrawer('viewer', atomId);
-  }, [openDrawer]);
+    openReader(atomId);
+  }, [openReader]);
 
   if (!currentConversation) {
     return (
@@ -145,9 +147,7 @@ export function ChatView() {
         {messages.length === 0 && !isStreaming && (
           <div className="flex flex-col items-center justify-center h-full gap-4 text-center">
             <div className="w-16 h-16 rounded-full bg-[var(--color-bg-card)] flex items-center justify-center">
-              <svg className="w-8 h-8 text-[var(--color-accent)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
-              </svg>
+              <MessageSquare className="w-8 h-8 text-[var(--color-accent)]" strokeWidth={2} />
             </div>
             <div>
               <p className="text-[var(--color-text-primary)] font-medium mb-1">Start the conversation</p>
@@ -167,6 +167,39 @@ export function ChatView() {
             highlightText={highlightText}
           />
         ))}
+
+        {/* Thinking indicator — before any streaming content arrives */}
+        {isStreaming && !streamingContent && (
+          <div className="flex justify-start">
+            <div className="max-w-[85%] rounded-lg px-4 py-3 bg-[var(--color-bg-card)] text-[var(--color-text-primary)]">
+              <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
+                <div className="flex gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] animate-bounce" style={{ animationDelay: '300ms' }} />
+                </div>
+                <span>Thinking…</span>
+              </div>
+              {retrievalSteps.length > 0 && (
+                <div className="mt-2 space-y-1">
+                  {retrievalSteps.map((step, i) => {
+                    let displayQuery = step.query;
+                    try {
+                      const parsed = JSON.parse(step.query);
+                      displayQuery = parsed.query || parsed.search || parsed.text || step.query;
+                    } catch { /* use raw */ }
+                    return (
+                      <div key={i} className="flex items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
+                        <SearchIcon className="w-3 h-3 flex-shrink-0 animate-pulse" />
+                        <span className="truncate">Searching: {displayQuery}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Streaming message */}
         {isStreaming && streamingContent && (

@@ -114,48 +114,6 @@ export async function getAtomsWithEmbeddings(): Promise<AtomWithEmbedding[]> {
   return getTransport().invoke('get_atoms_with_embeddings');
 }
 
-// Hierarchical canvas types and commands
-export type CanvasNodeType = 'category' | 'tag' | 'semantic_cluster' | 'atom';
-
-export interface CanvasNode {
-  id: string;
-  node_type: CanvasNodeType;
-  label: string;
-  atom_count: number;
-  children_ids: string[];
-  dominant_tags: string[];
-  centroid: number[] | null;
-}
-
-export interface CanvasEdge {
-  source_id: string;
-  target_id: string;
-  weight: number;
-}
-
-export interface BreadcrumbEntry {
-  id: string;
-  label: string;
-}
-
-export interface CanvasLevel {
-  parent_id: string | null;
-  parent_label: string | null;
-  breadcrumb: BreadcrumbEntry[];
-  nodes: CanvasNode[];
-  edges: CanvasEdge[];
-}
-
-export async function getCanvasLevel(
-  parentId: string | null,
-  childrenHint?: string[]
-): Promise<CanvasLevel> {
-  return getTransport().invoke('get_canvas_level', {
-    parentId: parentId ?? undefined,
-    childrenHint,
-  });
-}
-
 // Global canvas (PCA-projected positions)
 export interface CanvasAtomPosition {
   atom_id: string;
@@ -282,6 +240,18 @@ export interface AvailableModel {
 
 export async function getAvailableLlmModels(): Promise<AvailableModel[]> {
   return getTransport().invoke('get_available_llm_models');
+}
+
+// OpenRouter embedding model registry (curated list with known vector dimensions)
+export interface OpenRouterEmbeddingModel {
+  id: string;
+  name: string;
+  dimension: number;
+  context_length: number;
+}
+
+export async function getOpenRouterEmbeddingModels(): Promise<OpenRouterEmbeddingModel[]> {
+  return getTransport().invoke('get_openrouter_embedding_models');
 }
 
 // Ollama types and commands
@@ -415,14 +385,27 @@ export async function pollFeed(id: string): Promise<FeedPollResult> {
   return getTransport().invoke('poll_feed', { id });
 }
 
-// MCP config — now HTTP-based via the server's /mcp endpoint
-export interface McpConfig {
+// MCP config — stdio for local desktop, HTTP+auth for remote/web
+export interface McpStdioConfig {
   mcpServers: {
     atomic: {
-      url: string;
+      command: string;
     };
   };
 }
+
+export interface McpHttpConfig {
+  mcpServers: {
+    atomic: {
+      url: string;
+      headers: {
+        Authorization: string;
+      };
+    };
+  };
+}
+
+export type McpConfig = McpStdioConfig | McpHttpConfig;
 
 // Logs
 export async function exportLogs(): Promise<string> {
@@ -430,136 +413,25 @@ export async function exportLogs(): Promise<string> {
   return result.logs;
 }
 
-export async function persistLogs(): Promise<{ atom_id?: string; message?: string }> {
-  return getTransport().invoke('persist_logs');
-}
-
-export function getMcpConfig(serverBaseUrl: string): McpConfig {
+export function getMcpStdioConfig(bridgePath: string): McpStdioConfig {
   return {
     mcpServers: {
       atomic: {
-        url: `${serverBaseUrl}/mcp`,
+        command: bridgePath,
       },
     },
   };
 }
 
-// ==================== Extended Import ====================
-
-export interface ImportConversationsResult {
-  conversations_imported: number;
-  messages_imported: number;
-}
-
-export async function importConversations(
-  sourceType: 'chatgpt' | 'claude' | 'markdown',
-  path: string
-): Promise<ImportConversationsResult> {
-  return getTransport().invoke('import_conversations', { sourceType, path });
-}
-
-export interface ImportLogsOptions {
-  path?: string;
-  content?: string;
-  format?: 'auto' | 'json_lines' | 'syslog' | 'plain_text';
-  sourceName: string;
-  tagRoot?: string;
-  tagCategory?: string;
-}
-
-export async function importLogs(options: ImportLogsOptions): Promise<{ atom_id: string }> {
-  return getTransport().invoke('import_logs', {
-    path: options.path,
-    content: options.content,
-    format: options.format,
-    sourceName: options.sourceName,
-    tagRoot: options.tagRoot,
-    tagCategory: options.tagCategory,
-  });
-}
-
-export async function importRemote(
-  url: string,
-  token?: string,
-  maxItems?: number
-): Promise<ImportConversationsResult> {
-  return getTransport().invoke('import_remote', {
-    url,
-    token,
-    importType: 'conversations',
-    maxItems,
-  });
-}
-
-// ==================== Sync Sources ====================
-
-export interface SyncSource {
-  id: string;
-  name: string;
-  source_type: 'chatgpt' | 'claude' | 'markdown_dir' | 'remote_atomic' | 'log_file';
-  source_url: string | null;
-  source_path: string | null;
-  target_db_id: string | null;
-  interval_secs: number;
-  enabled: boolean;
-  last_synced_at: string | null;
-  last_sync_status: string | null;
-  created_at: string;
-  has_token: boolean;
-}
-
-export interface CreateSyncSourceRequest {
-  name: string;
-  sourceType: string;
-  sourceUrl?: string;
-  sourcePath?: string;
-  sourceToken?: string;
-  targetDbId?: string;
-  intervalSecs?: number;
-}
-
-export async function listSyncSources(): Promise<SyncSource[]> {
-  return getTransport().invoke('list_sync_sources');
-}
-
-export async function createSyncSource(req: CreateSyncSourceRequest): Promise<SyncSource> {
-  return getTransport().invoke('create_sync_source', req);
-}
-
-export async function updateSyncSource(
-  id: string,
-  updates: Partial<{
-    name: string;
-    sourceUrl: string | null;
-    sourcePath: string | null;
-    sourceToken: string | null;
-    targetDbId: string | null;
-    intervalSecs: number;
-    enabled: boolean;
-  }>
-): Promise<SyncSource> {
-  return getTransport().invoke('update_sync_source', { id, ...updates });
-}
-
-export async function deleteSyncSource(id: string): Promise<void> {
-  return getTransport().invoke('delete_sync_source', { id });
-}
-
-export async function runSyncSource(id: string): Promise<{ message: string; source_id: string }> {
-  return getTransport().invoke('run_sync_source', { id });
-}
-
-export async function getSyncStatus(): Promise<{
-  sources: SyncSource[];
-  total: number;
-  enabled: number;
-}> {
-  return getTransport().invoke('get_sync_status');
-}
-
-export async function testSyncConnection(id: string): Promise<{
-  ok: boolean;
-  message: string;
-}> {
-  return getTransport().invoke('test_sync_connection', { id });
+export function getMcpHttpConfig(serverBaseUrl: string, token: string): McpHttpConfig {
+  return {
+    mcpServers: {
+      atomic: {
+        url: `${serverBaseUrl}/mcp`,
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    },
+  };
 }

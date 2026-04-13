@@ -18,9 +18,7 @@
 //! let atom = core.create_atom(
 //!     CreateAtomRequest {
 //!         content: "My note content".to_string(),
-//!         source_url: None,
-//!         published_at: None,
-//!         tag_ids: vec![],
+//!         ..Default::default()
 //!     },
 //!     |event| match event {
 //!         EmbeddingEvent::EmbeddingComplete { atom_id } => println!("Done: {}", atom_id),
@@ -30,6 +28,7 @@
 //! ```
 
 pub mod agent;
+pub mod briefing;
 pub mod canvas_level;
 pub mod chunking;
 pub mod chat;
@@ -42,12 +41,12 @@ pub mod executor;
 pub mod extraction;
 pub mod ingest;
 pub mod import;
-pub mod insights;
 pub mod manager;
 pub mod models;
 pub mod projection;
 pub mod providers;
 pub mod registry;
+pub mod scheduler;
 pub mod search;
 pub mod storage;
 pub mod settings;
@@ -55,7 +54,8 @@ pub mod tokens;
 pub mod wiki;
 
 // Re-exports for convenience
-pub use agent::ChatEvent;
+pub use agent::{ChatEvent, CanvasContext, CanvasClusterSummary};
+pub use briefing::{Briefing, BriefingCitation, BriefingWithCitations};
 pub use db::Database;
 pub use embedding::EmbeddingEvent;
 pub use error::AtomicCoreError;
@@ -63,10 +63,10 @@ pub use models::*;
 pub use providers::{ProviderConfig, ProviderType};
 pub use search::{SearchMode, SearchOptions};
 pub use tokens::ApiTokenInfo;
-pub use import::{ImportProgress, ImportResult, ImportedConversation, ImportedMessage};
+pub use import::{ImportProgress, ImportResult};
 pub use ingest::{IngestionEvent, IngestionRequest, IngestionResult, FeedPollResult};
 pub use manager::DatabaseManager;
-pub use registry::{DatabaseInfo, OAuthCodeInfo, Registry, SyncSourceInfo};
+pub use registry::{DatabaseInfo, OAuthCodeInfo, Registry};
 
 use chrono::Utc;
 use rusqlite::Connection;
@@ -76,12 +76,14 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 /// Request to create a new atom
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CreateAtomRequest {
     pub content: String,
     pub source_url: Option<String>,
     pub published_at: Option<String>,
     pub tag_ids: Vec<String>,
+    /// When true, silently skip creation if an atom with the same source_url already exists.
+    pub skip_if_source_exists: bool,
 }
 
 /// Request to update an existing atom
@@ -91,6 +93,133 @@ pub struct UpdateAtomRequest {
     pub source_url: Option<String>,
     pub published_at: Option<String>,
     pub tag_ids: Option<Vec<String>>,
+}
+
+/// Rebuilder closure registered by `AtomicCore` so the cache can recompute
+/// itself in the background during debounced invalidations. Captures
+/// `StorageBackend` only (not `AtomicCore`) to avoid a reference cycle.
+type CanvasRebuilder = Box<dyn Fn() -> Result<Arc<GlobalCanvasData>, AtomicCoreError> + Send + Sync + 'static>;
+
+/// How long `invalidate_debounced` waits after the last invalidation before
+/// kicking off a background rebuild. Sized so that bulk-event storms (e.g.
+/// a 100-atom embedding batch) collapse into a single rebuild.
+const CANVAS_CACHE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// In-memory cache for the global canvas payload.
+///
+/// `compute_and_get_canvas_data` is expensive: it runs PCA on every atom
+/// embedding, materializes metadata + edges, and re-clusters from scratch.
+/// The cache holds the last computed `GlobalCanvasData` behind an `Arc` so
+/// subsequent reads are a lock-free-ish pointer clone.
+///
+/// Two invalidation flavors:
+/// - `invalidate()` — eager clear for direct user mutations. Next read pays
+///   full compute cost.
+/// - `invalidate_debounced()` — keeps the stale payload visible and spawns
+///   a background rebuild after [`CANVAS_CACHE_DEBOUNCE`]. Only the latest
+///   request wins (via a generation counter), so bursts of background events
+///   coalesce into a single rebuild. Used by the batch embedding and edge
+///   pipelines so streaming updates don't thrash the cache.
+#[derive(Clone, Default)]
+pub struct CanvasCache {
+    inner: Arc<CanvasCacheInner>,
+}
+
+#[derive(Default)]
+struct CanvasCacheInner {
+    data: std::sync::RwLock<Option<Arc<GlobalCanvasData>>>,
+    rebuild_gen: std::sync::atomic::AtomicU64,
+    rebuilder: std::sync::OnceLock<CanvasRebuilder>,
+    /// Serializes concurrent cold-cache computes so N simultaneous misses
+    /// don't all pay the full PCA + edge-load cost. Paired with a
+    /// double-checked read of `data` on either side of the lock acquire.
+    compute_lock: std::sync::Mutex<()>,
+}
+
+impl CanvasCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the cached payload if present.
+    pub fn get(&self) -> Option<Arc<GlobalCanvasData>> {
+        self.inner.data.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Store a freshly computed payload.
+    pub fn set(&self, data: Arc<GlobalCanvasData>) {
+        if let Ok(mut g) = self.inner.data.write() {
+            *g = Some(data);
+        }
+    }
+
+    /// Eager invalidation: drop the cached payload immediately and bump the
+    /// rebuild generation so any in-flight debounced rebuild no-ops on
+    /// completion. Next read pays full compute cost.
+    pub fn invalidate(&self) {
+        self.inner.rebuild_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut g) = self.inner.data.write() {
+            *g = None;
+        }
+    }
+
+    /// Register the rebuilder closure used by debounced invalidations.
+    /// First call wins (backed by `OnceLock`); subsequent calls are no-ops.
+    pub(crate) fn set_rebuilder(&self, rebuilder: CanvasRebuilder) {
+        let _ = self.inner.rebuilder.set(rebuilder);
+    }
+
+    /// Acquire the compute guard used by [`AtomicCore::compute_and_get_canvas_data`]
+    /// to serialize cold-cache rebuilds. The caller double-checks the cache
+    /// after acquiring so only the first waiter pays the compute cost.
+    pub(crate) fn compute_guard(&self) -> Result<std::sync::MutexGuard<'_, ()>, AtomicCoreError> {
+        self.inner
+            .compute_lock
+            .lock()
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))
+    }
+
+    /// Debounced invalidation: schedule a background rebuild after
+    /// [`CANVAS_CACHE_DEBOUNCE`], keeping the current (stale) payload visible
+    /// to readers in the meantime. Only the latest scheduled rebuild wins —
+    /// rapid successive calls collapse into a single rebuild. No-op if no
+    /// rebuilder has been registered.
+    pub fn invalidate_debounced(&self) {
+        use std::sync::atomic::Ordering;
+        let my_gen = self.inner.rebuild_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let cache = self.clone();
+        crate::executor::spawn(async move {
+            tokio::time::sleep(CANVAS_CACHE_DEBOUNCE).await;
+            if cache.inner.rebuild_gen.load(Ordering::SeqCst) != my_gen {
+                return;
+            }
+            let cache_compute = cache.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                cache_compute
+                    .inner
+                    .rebuilder
+                    .get()
+                    .map(|f| f())
+            })
+            .await;
+            match result {
+                Ok(Some(Ok(fresh))) => {
+                    if cache.inner.rebuild_gen.load(Ordering::SeqCst) == my_gen {
+                        cache.set(fresh);
+                    }
+                }
+                Ok(Some(Err(e))) => {
+                    tracing::warn!(error = %e, "Debounced canvas rebuild failed");
+                }
+                Ok(None) => {
+                    tracing::debug!("Debounced canvas rebuild skipped: no rebuilder registered");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Debounced canvas rebuild panicked");
+                }
+            }
+        });
+    }
 }
 
 /// Main library facade providing high-level operations
@@ -104,6 +233,20 @@ pub struct AtomicCore {
     /// When present, settings and token operations delegate to the shared registry.
     /// When absent (standalone use, tests), uses per-db tables as before.
     registry: Option<Arc<registry::Registry>>,
+    /// Per-tag locks to serialize wiki operations (update, propose, accept,
+    /// dismiss) against the same article. Prevents background + manual runs
+    /// from racing and ensures supersede semantics are consistent. Entries are
+    /// created lazily and persist for the lifetime of the process — the
+    /// working set is bounded by the number of wiki articles touched.
+    wiki_tag_locks: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Single-flight guard for `run_daily_briefing`. Both the scheduler tick
+    /// loop and the `POST /api/briefings/run` route contend for this lock —
+    /// `try_lock` rejects the loser with `Conflict` so we never fire two
+    /// overlapping LLM calls for the same coverage window.
+    briefing_lock: Arc<tokio::sync::Mutex<()>>,
+    /// In-memory cache for `compute_and_get_canvas_data`. Shared across clones
+    /// so every handle sees the same cached payload.
+    canvas_cache: CanvasCache,
 }
 
 impl AtomicCore {
@@ -111,7 +254,15 @@ impl AtomicCore {
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self, AtomicCoreError> {
         let db = Arc::new(Database::open(db_path)?);
         let storage = storage::StorageBackend::Sqlite(storage::SqliteStorage::new(db));
-        Ok(Self { storage, registry: None })
+        let core = Self {
+            storage,
+            registry: None,
+            wiki_tag_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            briefing_lock: Arc::new(tokio::sync::Mutex::new(())),
+            canvas_cache: CanvasCache::new(),
+        };
+        core.register_canvas_rebuilder();
+        Ok(core)
     }
 
     /// Open an existing database with a larger read pool sized for server workloads.
@@ -174,16 +325,29 @@ impl AtomicCore {
             }
         }
 
-        Ok(Self { storage, registry })
+        let core = Self {
+            storage,
+            registry,
+            wiki_tag_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            briefing_lock: Arc::new(tokio::sync::Mutex::new(())),
+            canvas_cache: CanvasCache::new(),
+        };
+        core.register_canvas_rebuilder();
+        Ok(core)
     }
 
     /// Create an AtomicCore from an existing PostgresStorage (for multi-db in Postgres mode).
     #[cfg(feature = "postgres")]
     pub fn from_postgres_storage(pg: storage::PostgresStorage) -> Self {
-        Self {
+        let core = Self {
             storage: storage::StorageBackend::Postgres(pg),
             registry: None,
-        }
+            wiki_tag_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            briefing_lock: Arc::new(tokio::sync::Mutex::new(())),
+            canvas_cache: CanvasCache::new(),
+        };
+        core.register_canvas_rebuilder();
+        core
     }
 
     /// Open an existing database or create a new one
@@ -192,25 +356,13 @@ impl AtomicCore {
         Self::seed_and_backfill(db, None)
     }
 
-    /// Shared initialization: seed default tags, reconcile vec dimension, backfill centroids.
+    /// Shared initialization: reconcile vec dimension, backfill centroids.
+    ///
+    /// Note: default category tags are NOT auto-seeded. The onboarding wizard
+    /// (or the user via the settings tab / API) decides which top-level categories
+    /// the auto-tagger may extend. Existing databases that were seeded before this
+    /// change keep their tags via the V11 migration's backfill.
     fn seed_and_backfill(db: Database, registry: Option<Arc<registry::Registry>>) -> Result<Self, AtomicCoreError> {
-        // Seed default category tags if tags table is empty
-        {
-            let conn = db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
-            let tag_count: i64 = conn
-                .query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0))
-                .unwrap_or(0);
-            if tag_count == 0 {
-                let now = Utc::now().to_rfc3339();
-                for category in &["Topics", "People", "Locations", "Organizations", "Events"] {
-                    let id = Uuid::new_v4().to_string();
-                    conn.execute(
-                        "INSERT OR IGNORE INTO tags (id, name, parent_id, created_at) VALUES (?1, ?2, NULL, ?3)",
-                        rusqlite::params![&id, category, &now],
-                    )?;
-                }
-            }
-        }
 
         // Reconcile vec_chunks dimension with the configured embedding model.
         // Only for empty databases (no atoms yet) — e.g. newly created databases
@@ -297,7 +449,15 @@ impl AtomicCore {
 
         let db = Arc::new(db);
         let storage = storage::StorageBackend::Sqlite(storage::SqliteStorage::new(db));
-        Ok(Self { storage, registry })
+        let core = Self {
+            storage,
+            registry,
+            wiki_tag_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            briefing_lock: Arc::new(tokio::sync::Mutex::new(())),
+            canvas_cache: CanvasCache::new(),
+        };
+        core.register_canvas_rebuilder();
+        Ok(core)
     }
 
     /// Get settings map for passing to background tasks when registry is present.
@@ -315,6 +475,13 @@ impl AtomicCore {
     /// Returns None for Postgres backend.
     pub fn database(&self) -> Option<Arc<Database>> {
         self.storage.as_sqlite().map(|s| Arc::clone(&s.db))
+    }
+
+    /// Get a reference to the underlying storage backend. Used by sibling
+    /// modules (briefing, scheduler helpers) that need to issue storage
+    /// calls directly without going through the full facade surface.
+    pub(crate) fn storage(&self) -> &storage::StorageBackend {
+        &self.storage
     }
 
     // ==================== Settings ====================
@@ -425,6 +592,11 @@ impl AtomicCore {
         self.storage.get_atom_impl(id)
     }
 
+    /// Get an atom by its source URL
+    pub fn get_atom_by_source_url(&self, url: &str) -> Result<Option<AtomWithTags>, AtomicCoreError> {
+        self.storage.get_atom_by_source_url_sync(url)
+    }
+
     /// Create a new atom and trigger embedding generation
     ///
     /// The `on_event` callback will be invoked with progress events during
@@ -433,26 +605,36 @@ impl AtomicCore {
         &self,
         request: CreateAtomRequest,
         on_event: F,
-    ) -> Result<AtomWithTags, AtomicCoreError>
+    ) -> Result<Option<AtomWithTags>, AtomicCoreError>
     where
         F: Fn(EmbeddingEvent) + Send + Sync + 'static,
     {
+        // Skip if an atom with this source_url already exists
+        if request.skip_if_source_exists {
+            if let Some(ref url) = request.source_url {
+                if self.storage.source_url_exists_sync(url)? {
+                    return Ok(None);
+                }
+            }
+        }
+
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         let content = request.content.clone();
 
         let atom_with_tags = self.storage.insert_atom_impl(&id, &request, &now)?;
+        self.canvas_cache.invalidate();
 
         // Spawn embedding task (non-blocking)
         embedding::spawn_embedding_task_single_with_settings(
             self.storage.clone(),
             id,
             content,
-            on_event,
+            self.wrap_event_for_cache(on_event),
             self.settings_for_background(),
         );
 
-        Ok(atom_with_tags)
+        Ok(Some(atom_with_tags))
     }
 
     /// Create multiple atoms in a single transaction and trigger batch embedding.
@@ -483,20 +665,28 @@ impl AtomicCore {
         let now = Utc::now().to_rfc3339();
         let mut skipped: usize = 0;
 
-        // Dedup: build set of existing source_urls
-        let source_urls: Vec<String> = requests
-            .iter()
-            .filter_map(|r| r.source_url.clone())
-            .collect();
-        let existing_urls = self.storage.check_existing_source_urls_sync(&source_urls)?;
+        // Dedup: check existing source_urls if any request opts in
+        let any_skip = requests.iter().any(|r| r.skip_if_source_exists);
+        let existing_urls = if any_skip {
+            let source_urls: Vec<String> = requests
+                .iter()
+                .filter(|r| r.skip_if_source_exists)
+                .filter_map(|r| r.source_url.clone())
+                .collect();
+            self.storage.check_existing_source_urls_sync(&source_urls)?
+        } else {
+            std::collections::HashSet::new()
+        };
 
-        // Filter requests, skipping duplicates
+        // Filter requests, skipping duplicates when flagged
         let mut atoms_to_insert: Vec<(String, CreateAtomRequest, String)> = Vec::with_capacity(requests.len());
         for request in requests {
-            if let Some(ref url) = request.source_url {
-                if existing_urls.contains(url) {
-                    skipped += 1;
-                    continue;
+            if request.skip_if_source_exists {
+                if let Some(ref url) = request.source_url {
+                    if existing_urls.contains(url) {
+                        skipped += 1;
+                        continue;
+                    }
                 }
             }
             let id = Uuid::new_v4().to_string();
@@ -505,26 +695,62 @@ impl AtomicCore {
 
         // Bulk insert via storage
         let atoms_with_tags = self.storage.insert_atoms_bulk_impl(&atoms_to_insert)?;
+        self.canvas_cache.invalidate();
 
-        // Build embedding pairs from inserted atoms
-        let embedding_pairs: Vec<(String, String)> = atoms_with_tags
+        // Collect atom IDs for background embedding (don't clone content — read from DB later)
+        let atom_ids: Vec<String> = atoms_with_tags
             .iter()
-            .map(|awt| (awt.atom.id.clone(), awt.atom.content.clone()))
+            .map(|awt| awt.atom.id.clone())
             .collect();
 
-        // Spawn batch embedding (same pattern as import_obsidian_vault)
-        if !embedding_pairs.is_empty() {
-            for (atom_id, _) in &embedding_pairs {
-                self.storage.set_embedding_status_sync(atom_id, "processing").ok();
+        // Spawn batch embedding
+        if !atom_ids.is_empty() {
+            for atom_id in &atom_ids {
+                self.storage.set_embedding_status_sync(atom_id, "processing", None).ok();
             }
 
             let storage_clone = self.storage.clone();
             let bg_settings = self.settings_for_background();
+            let on_event = self.wrap_event_for_cache(on_event);
+            let canvas_cache = Some(self.canvas_cache.clone());
             executor::spawn(async move {
-                match bg_settings {
-                    Some(s) => embedding::process_embedding_batch_with_settings(storage_clone, embedding_pairs, false, on_event, s).await,
-                    None => embedding::process_embedding_batch(storage_clone, embedding_pairs, false, on_event).await,
+                // Limit concurrent batch tasks to bound memory from queued work
+                let _permit = executor::EMBEDDING_BATCH_SEMAPHORE
+                    .acquire()
+                    .await
+                    .expect("Embedding batch semaphore closed unexpectedly");
+
+                // Read content from DB in one query (not captured at spawn time)
+                let embedding_pairs = match storage_clone.get_atom_contents_batch_impl(&atom_ids) {
+                    Ok(pairs) => {
+                        // Mark any missing atoms as failed so they don't stay stuck in "processing"
+                        if pairs.len() < atom_ids.len() {
+                            let found_ids: std::collections::HashSet<&str> = pairs.iter().map(|(id, _)| id.as_str()).collect();
+                            for atom_id in &atom_ids {
+                                if !found_ids.contains(atom_id.as_str()) {
+                                    tracing::warn!(atom_id, "Atom not found for embedding, marking as failed");
+                                    storage_clone.set_embedding_status_sync(atom_id, "failed", Some("Atom not found")).ok();
+                                }
+                            }
+                        }
+                        pairs
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to batch-read atom contents for embedding");
+                        for atom_id in &atom_ids {
+                            storage_clone.set_embedding_status_sync(atom_id, "failed", Some(&e.to_string())).ok();
+                        }
+                        return;
+                    }
                 };
+
+                if !embedding_pairs.is_empty() {
+                    let input = embedding::AtomInput::Preloaded(embedding_pairs);
+                    match bg_settings {
+                        Some(s) => embedding::process_embedding_batch_with_settings(storage_clone, input, false, on_event, s, canvas_cache).await,
+                        None => embedding::process_embedding_batch(storage_clone, input, false, on_event, canvas_cache).await,
+                    };
+                }
             });
         }
 
@@ -550,22 +776,40 @@ impl AtomicCore {
         let content = request.content.clone();
 
         let atom_with_tags = self.storage.update_atom_impl(id, &request, &now)?;
+        self.canvas_cache.invalidate();
 
         // Spawn embedding task (non-blocking)
         embedding::spawn_embedding_task_single_with_settings(
             self.storage.clone(),
             id.to_string(),
             content,
-            on_event,
+            self.wrap_event_for_cache(on_event),
             self.settings_for_background(),
         );
 
         Ok(atom_with_tags)
     }
 
+    /// Update an existing atom's content/metadata without triggering re-embedding or tagging.
+    /// Used by auto-save during inline editing to persist content frequently without
+    /// flooding the embedding pipeline. The full `update_atom` should be called when
+    /// the user finishes editing to trigger the pipeline.
+    pub fn update_atom_content_only(
+        &self,
+        id: &str,
+        request: UpdateAtomRequest,
+    ) -> Result<AtomWithTags, AtomicCoreError> {
+        let now = Utc::now().to_rfc3339();
+        let result = self.storage.update_atom_content_only_impl(id, &request, &now)?;
+        self.canvas_cache.invalidate();
+        Ok(result)
+    }
+
     /// Delete an atom
     pub fn delete_atom(&self, id: &str) -> Result<(), AtomicCoreError> {
-        self.storage.delete_atom_impl(id)
+        self.storage.delete_atom_impl(id)?;
+        self.canvas_cache.invalidate();
+        Ok(())
     }
 
     /// Get atoms by tag (includes atoms with descendant tags)
@@ -635,12 +879,47 @@ impl AtomicCore {
         name: &str,
         parent_id: Option<&str>,
     ) -> Result<Tag, AtomicCoreError> {
-        self.storage.update_tag_impl(id, name, parent_id)
+        let tag = self.storage.update_tag_impl(id, name, parent_id)?;
+        self.canvas_cache.invalidate();
+        Ok(tag)
     }
 
     /// Delete a tag
     pub fn delete_tag(&self, id: &str, recursive: bool) -> Result<(), AtomicCoreError> {
-        self.storage.delete_tag_impl(id, recursive)
+        self.storage.delete_tag_impl(id, recursive)?;
+        self.canvas_cache.invalidate();
+        Ok(())
+    }
+
+    /// Mark or unmark a top-level tag as a candidate for AI auto-tagging to extend.
+    /// When false, the auto-tagger will not create new sub-tags under this tag.
+    pub fn set_tag_autotag_target(&self, id: &str, value: bool) -> Result<(), AtomicCoreError> {
+        self.storage.set_tag_autotag_target_impl(id, value)
+    }
+
+    /// Configure auto-tag targets in one shot — used by the onboarding wizard
+    /// and the settings tab.
+    ///
+    /// `keep_default_names`: which of the well-known default category names
+    /// (case-insensitive) the user wants. Each one is created if it doesn't exist
+    /// and flagged as an auto-tag target.
+    ///
+    /// `add_custom_names`: new top-level tag names to create with the flag set.
+    /// Names that already exist as top-level tags are flagged in place rather than duplicated.
+    ///
+    /// Defaults that exist but are NOT in `keep_default_names` are deleted if they
+    /// have no atoms or sub-tags (the safe case during onboarding). If they have
+    /// content, they're unflagged instead so their data isn't lost — re-runs from
+    /// settings after the user has tagged things stay non-destructive.
+    ///
+    /// All steps run in a single storage-layer transaction, so a failure mid-flight
+    /// rolls back cleanly rather than leaving the tags table partially modified.
+    pub fn configure_autotag_targets(
+        &self,
+        keep_default_names: &[String],
+        add_custom_names: &[String],
+    ) -> Result<Vec<Tag>, AtomicCoreError> {
+        self.storage.configure_autotag_targets_impl(keep_default_names, add_custom_names)
     }
 
     // ==================== Search Operations ====================
@@ -753,7 +1032,7 @@ impl AtomicCore {
             ProviderType::OpenRouter => settings_map
                 .get("wiki_model")
                 .cloned()
-                .unwrap_or_else(|| "anthropic/claude-sonnet-4.5".to_string()),
+                .unwrap_or_else(|| "anthropic/claude-sonnet-4.6".to_string()),
         };
         let strategy = wiki::WikiStrategy::from_string(
             settings_map.get("wiki_strategy").map(|s| s.as_str()).unwrap_or("centroid"),
@@ -774,6 +1053,8 @@ impl AtomicCore {
             tag_id: tag_id.to_string(),
             tag_name: tag_name.to_string(),
             linkable_article_names,
+            custom_generation_prompt: settings_map.get("wiki_generation_prompt").cloned(),
+            custom_update_prompt: settings_map.get("wiki_update_prompt").cloned(),
         };
         Ok((strategy, ctx))
     }
@@ -784,6 +1065,10 @@ impl AtomicCore {
         tag_id: &str,
         tag_name: &str,
     ) -> Result<WikiArticleWithCitations, AtomicCoreError> {
+        // Hold the per-tag lock for the whole operation so a concurrent
+        // propose/accept can't race the regeneration and leave a proposal
+        // pointing at an article version that's about to be replaced.
+        let _guard = self.wiki_tag_lock(tag_id).await;
         tracing::info!(tag_name, tag_id, "[wiki] Generating article");
 
         let (strategy, ctx) = self.build_wiki_strategy_context(tag_id, tag_name)?;
@@ -803,16 +1088,45 @@ impl AtomicCore {
         // Save to database
         self.storage.save_wiki_with_links_sync(&result.article, &result.citations, &wiki_links)?;
 
+        // Any pending proposal was computed against the previous live article
+        // and is now meaningless — drop it. Log-and-continue on error; a stale
+        // proposal will still be caught by the base_updated_at check on accept.
+        if let Err(e) = self.storage.delete_wiki_proposal_sync(tag_id) {
+            tracing::warn!(tag_id, error = %e, "[wiki] Failed to clean up pending proposal after regenerate");
+        }
+
         tracing::info!("[wiki] Article saved successfully");
         Ok(result)
     }
 
-    /// Update an existing wiki article with new content
+    /// Acquire the per-tag wiki lock. Serializes propose/accept/dismiss/update
+    /// operations against the same article so background + manual runs can't
+    /// race and proposals can't be applied mid-rewrite.
+    async fn wiki_tag_lock(&self, tag_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut map = self
+                .wiki_tag_locks
+                .lock()
+                .expect("wiki_tag_locks mutex poisoned");
+            map.entry(tag_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        lock.lock_owned().await
+    }
+
+    /// Update an existing wiki article with new content (legacy full-rewrite path).
+    ///
+    /// Deprecated: prefer `propose_wiki_update` + `accept_wiki_proposal` for the
+    /// human-in-the-loop review flow. This method remains for backwards
+    /// compatibility with external MCP clients and will be removed in a later release.
     pub async fn update_wiki(
         &self,
         tag_id: &str,
         tag_name: &str,
     ) -> Result<WikiArticleWithCitations, AtomicCoreError> {
+        tracing::warn!(tag_id, "[wiki] update_wiki is deprecated; use propose_wiki_update instead");
+        let _guard = self.wiki_tag_lock(tag_id).await;
         tracing::info!(tag_name, tag_id, "[wiki] Updating article");
 
         let existing = self.get_wiki(tag_id)?
@@ -844,6 +1158,152 @@ impl AtomicCore {
         Ok(result)
     }
 
+    /// Propose an update to an existing wiki article.
+    ///
+    /// Runs the strategy's chunk selector, then the shared section-ops
+    /// generator, and writes the result to `wiki_proposals`. Supersedes any
+    /// existing pending proposal for the tag. Returns `None` when the strategy
+    /// determines no update is warranted (no new atoms, or the LLM returned
+    /// NoChange).
+    pub async fn propose_wiki_update(
+        &self,
+        tag_id: &str,
+        tag_name: &str,
+    ) -> Result<Option<WikiProposal>, AtomicCoreError> {
+        let _guard = self.wiki_tag_lock(tag_id).await;
+        tracing::info!(tag_name, tag_id, "[wiki] Proposing article update");
+
+        let existing = self.get_wiki(tag_id)?.ok_or_else(|| {
+            AtomicCoreError::Wiki("No existing article to propose update against".to_string())
+        })?;
+
+        let (strategy, ctx) = self.build_wiki_strategy_context(tag_id, tag_name)?;
+
+        let draft = match wiki::strategy_propose(&strategy, &ctx, &existing)
+            .await
+            .map_err(|e| AtomicCoreError::Wiki(e))?
+        {
+            Some(d) => d,
+            None => {
+                tracing::info!(tag_id, "[wiki] No update warranted; no proposal created");
+                return Ok(None);
+            }
+        };
+
+        let proposal = WikiProposal {
+            id: uuid::Uuid::new_v4().to_string(),
+            tag_id: tag_id.to_string(),
+            base_article_id: existing.article.id.clone(),
+            base_updated_at: existing.article.updated_at.clone(),
+            content: draft.merged_content,
+            citations: draft.citations,
+            ops: draft.ops,
+            new_atom_count: draft.new_atom_count,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        self.storage.save_wiki_proposal_sync(&proposal)?;
+        tracing::info!(
+            tag_id,
+            proposal_id = %proposal.id,
+            ops = proposal.ops.len(),
+            "[wiki] Proposal saved"
+        );
+
+        Ok(Some(proposal))
+    }
+
+    /// Get the pending wiki proposal for a tag, if any.
+    pub fn get_wiki_proposal(
+        &self,
+        tag_id: &str,
+    ) -> Result<Option<WikiProposal>, AtomicCoreError> {
+        self.storage.get_wiki_proposal_sync(tag_id)
+    }
+
+    /// Accept the pending wiki proposal: promote to live article, archive the
+    /// prior version, delete the proposal row.
+    ///
+    /// Rejects the accept if the live article has been updated out-of-band
+    /// since the proposal was computed (stale base). The caller should catch
+    /// this error, refetch, and ask the user to regenerate the proposal.
+    pub async fn accept_wiki_proposal(
+        &self,
+        tag_id: &str,
+    ) -> Result<WikiArticleWithCitations, AtomicCoreError> {
+        let _guard = self.wiki_tag_lock(tag_id).await;
+
+        let proposal = self.storage.get_wiki_proposal_sync(tag_id)?.ok_or_else(|| {
+            AtomicCoreError::Wiki("No pending proposal for this tag".to_string())
+        })?;
+
+        let existing = self.get_wiki(tag_id)?.ok_or_else(|| {
+            AtomicCoreError::Wiki("Live article disappeared while proposal was pending".to_string())
+        })?;
+
+        if existing.article.updated_at != proposal.base_updated_at
+            || existing.article.id != proposal.base_article_id
+        {
+            tracing::warn!(
+                tag_id,
+                base = %proposal.base_updated_at,
+                live = %existing.article.updated_at,
+                "[wiki] Stale proposal — live article was updated out-of-band"
+            );
+            return Err(AtomicCoreError::Wiki(
+                "Proposal is stale — live article was updated since the proposal was computed. Regenerate the proposal to review it.".to_string(),
+            ));
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let article = WikiArticle {
+            id: existing.article.id.clone(),
+            tag_id: tag_id.to_string(),
+            content: proposal.content.clone(),
+            created_at: existing.article.created_at.clone(),
+            updated_at: now,
+            atom_count: existing.article.atom_count + proposal.new_atom_count,
+        };
+
+        // Extract wiki links from the merged content. Build the linkable-
+        // article-names list the same way build_wiki_strategy_context does.
+        const MAX_CROSS_LINK_TAGS: usize = 50;
+        let related = self
+            .storage
+            .get_related_tags_impl(tag_id, MAX_CROSS_LINK_TAGS)
+            .unwrap_or_default();
+        let linkable_names: Vec<(String, String)> = related
+            .into_iter()
+            .filter(|t| t.has_article)
+            .map(|t| (t.tag_id, t.tag_name))
+            .collect();
+        let wiki_links =
+            wiki::extract_wiki_links(&article.id, &article.content, &linkable_names);
+
+        // save_wiki_with_links archives the previous version into
+        // wiki_article_versions as part of its normal flow.
+        self.storage
+            .save_wiki_with_links_sync(&article, &proposal.citations, &wiki_links)?;
+
+        // Delete the proposal row after successful save.
+        self.storage.delete_wiki_proposal_sync(tag_id)?;
+
+        tracing::info!(tag_id, "[wiki] Proposal accepted and promoted to live article");
+
+        Ok(WikiArticleWithCitations {
+            article,
+            citations: proposal.citations,
+        })
+    }
+
+    /// Dismiss the pending wiki proposal (delete without promoting). Idempotent.
+    pub async fn dismiss_wiki_proposal(&self, tag_id: &str) -> Result<(), AtomicCoreError> {
+        let _guard = self.wiki_tag_lock(tag_id).await;
+        self.storage.delete_wiki_proposal_sync(tag_id)?;
+        tracing::info!(tag_id, "[wiki] Proposal dismissed");
+        Ok(())
+    }
+
     /// Get an existing wiki article
     pub fn get_wiki(&self, tag_id: &str) -> Result<Option<WikiArticleWithCitations>, AtomicCoreError> {
         self.storage.get_wiki_sync(tag_id)
@@ -854,9 +1314,15 @@ impl AtomicCore {
         self.storage.get_wiki_status_sync(tag_id)
     }
 
-    /// Delete a wiki article
+    /// Delete a wiki article (and any pending proposal for it — once the
+    /// underlying article is gone, the proposal references a base that no
+    /// longer exists).
     pub fn delete_wiki(&self, tag_id: &str) -> Result<(), AtomicCoreError> {
-        self.storage.delete_wiki_sync(tag_id)
+        self.storage.delete_wiki_sync(tag_id)?;
+        if let Err(e) = self.storage.delete_wiki_proposal_sync(tag_id) {
+            tracing::warn!(tag_id, error = %e, "[wiki] Failed to clean up pending proposal after delete");
+        }
+        Ok(())
     }
 
     /// Get tags related to a given tag by semantic connectivity
@@ -879,6 +1345,46 @@ impl AtomicCore {
         self.storage.get_wiki_version_sync(version_id)
     }
 
+    // ==================== Daily Briefing ====================
+
+    /// Run the daily briefing pipeline immediately. Used by the scheduled
+    /// task and the `/briefings/run` route. Computes `since` from the
+    /// persisted `task.daily_briefing.last_run` (or a 7-day lookback on the
+    /// first run), invokes the agentic loop, and persists the result.
+    ///
+    /// Updates `task.daily_briefing.last_run` on success so the next
+    /// scheduled tick correctly waits for the full interval. On failure the
+    /// error bubbles up and `last_run` is left unchanged — the scheduler
+    /// will retry on the next tick.
+    pub async fn run_daily_briefing(&self) -> Result<briefing::BriefingWithCitations, AtomicCoreError> {
+        let _guard = self.briefing_lock.try_lock().map_err(|_| {
+            AtomicCoreError::Conflict("A daily briefing is already running".to_string())
+        })?;
+        let since = scheduler::state::get_last_run(self, "daily_briefing")?
+            .unwrap_or_else(|| chrono::Utc::now() - chrono::Duration::days(7));
+        let result = briefing::run_briefing(self, since).await?;
+        if let Err(e) = scheduler::state::set_last_run(self, "daily_briefing", chrono::Utc::now()) {
+            tracing::warn!(error = %e, "[briefing] Failed to persist daily_briefing last_run");
+        }
+        Ok(result)
+    }
+
+    /// Get the most recent briefing joined with citations.
+    pub fn get_latest_briefing(&self) -> Result<Option<briefing::BriefingWithCitations>, AtomicCoreError> {
+        self.storage.get_latest_briefing_sync()
+    }
+
+    /// Get a specific briefing by id, joined with citations. Returns `None`
+    /// if no briefing with that id exists.
+    pub fn get_briefing(&self, id: &str) -> Result<Option<briefing::BriefingWithCitations>, AtomicCoreError> {
+        self.storage.get_briefing_sync(id)
+    }
+
+    /// List recent briefings (without citations) for a lightweight history view.
+    pub fn list_briefings(&self, limit: i32) -> Result<Vec<briefing::Briefing>, AtomicCoreError> {
+        self.storage.list_briefings_sync(limit)
+    }
+
     // ==================== Embedding Management ====================
 
     /// Process all pending embeddings
@@ -886,12 +1392,21 @@ impl AtomicCore {
     where
         F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
     {
+        let on_event = self.wrap_event_for_cache(on_event);
+        let canvas_cache = Some(self.canvas_cache.clone());
         match self.settings_for_background() {
-            Some(s) => embedding::process_pending_embeddings_with_settings(self.storage.clone(), on_event, s)
+            Some(s) => embedding::process_pending_embeddings_with_settings(self.storage.clone(), on_event, s, canvas_cache)
                 .map_err(|e| AtomicCoreError::Embedding(e)),
-            None => embedding::process_pending_embeddings(self.storage.clone(), on_event)
+            None => embedding::process_pending_embeddings(self.storage.clone(), on_event, canvas_cache)
                 .map_err(|e| AtomicCoreError::Embedding(e)),
         }
+    }
+
+    /// Process all atoms with pending edge computation in batches.
+    /// Runs in the background with checkpointing so it survives restarts.
+    pub fn process_pending_edges(&self) -> Result<i32, AtomicCoreError> {
+        embedding::process_pending_edges(self.storage.clone(), Some(self.canvas_cache.clone()))
+            .map_err(|e| AtomicCoreError::Embedding(e))
     }
 
     /// Reset atoms stuck in 'processing' state back to 'pending'
@@ -904,6 +1419,14 @@ impl AtomicCore {
     where
         F: Fn(EmbeddingEvent) + Send + Sync + 'static,
     {
+        let status = self.storage.get_embedding_status_impl(atom_id)?;
+        if status == "processing" {
+            return Err(AtomicCoreError::Validation(format!(
+                "Atom {} is already being embedded",
+                atom_id
+            )));
+        }
+
         let content = self.storage.get_atom_content_impl(atom_id)?
             .ok_or_else(|| AtomicCoreError::NotFound(format!("Atom {} not found", atom_id)))?;
 
@@ -911,11 +1434,52 @@ impl AtomicCore {
             self.storage.clone(),
             atom_id.to_string(),
             content,
-            on_event,
+            self.wrap_event_for_cache(on_event),
             self.settings_for_background(),
         );
 
         Ok(())
+    }
+
+    /// Claim atoms currently marked `pending`/`processing` and spawn a background
+    /// task to re-embed them (with tagging skipped — existing tags are preserved).
+    /// Returns the number of atoms queued. Used after a dimension change to
+    /// re-embed each database's content.
+    pub fn spawn_reembed_pending<F>(&self, on_event: F) -> Result<i32, AtomicCoreError>
+    where
+        F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
+    {
+        let pending_ids = self.storage.claim_pending_reembedding_sync()?;
+        let count = pending_ids.len() as i32;
+
+        if count > 0 {
+            let storage_clone = self.storage.clone();
+            let bg_settings = self.settings_for_background();
+            let input = embedding::AtomInput::IdsOnly(pending_ids);
+            let on_event = self.wrap_event_for_cache(on_event);
+            let canvas_cache = Some(self.canvas_cache.clone());
+            executor::spawn(async move {
+                match bg_settings {
+                    Some(s) => embedding::process_embedding_batch_with_settings(
+                        storage_clone,
+                        input,
+                        true, // skip tagging - re-embedding only
+                        on_event,
+                        s,
+                        canvas_cache,
+                    ).await,
+                    None => embedding::process_embedding_batch(
+                        storage_clone,
+                        input,
+                        true,
+                        on_event,
+                        canvas_cache,
+                    ).await,
+                };
+            });
+        }
+
+        Ok(count)
     }
 
     /// Re-embed all atoms in the database
@@ -923,26 +1487,35 @@ impl AtomicCore {
     where
         F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
     {
-        let atoms = self.storage.claim_all_for_reembedding_sync()?;
-        let count = atoms.len() as i32;
+        let atom_ids = self.storage.claim_all_for_reembedding_sync()?;
+        // The claim flips every atom 'complete' → 'processing' unconditionally,
+        // so atoms disappear from the canvas query immediately. Drop any warm
+        // cache so reads during the re-embed window don't serve stale data.
+        self.canvas_cache.invalidate();
+        let count = atom_ids.len() as i32;
 
         if count > 0 {
             let storage_clone = self.storage.clone();
             let bg_settings = self.settings_for_background();
+            let input = embedding::AtomInput::IdsOnly(atom_ids);
+            let on_event = self.wrap_event_for_cache(on_event);
+            let canvas_cache = Some(self.canvas_cache.clone());
             executor::spawn(async move {
                 match bg_settings {
                     Some(s) => embedding::process_embedding_batch_with_settings(
                         storage_clone,
-                        atoms,
+                        input,
                         false,
                         on_event,
                         s,
+                        canvas_cache,
                     ).await,
                     None => embedding::process_embedding_batch(
                         storage_clone,
-                        atoms,
+                        input,
                         false,
                         on_event,
+                        canvas_cache,
                     ).await,
                 };
             });
@@ -959,12 +1532,20 @@ impl AtomicCore {
         // Verify atom exists
         self.storage.get_atom_content_impl(atom_id)?
             .ok_or_else(|| AtomicCoreError::NotFound(format!("Atom {} not found", atom_id)))?;
+        let status = self.storage.get_tagging_status_impl(atom_id)?;
+        if status == "processing" {
+            return Err(AtomicCoreError::Validation(format!(
+                "Atom {} is already being tagged",
+                atom_id
+            )));
+        }
         // Reset tagging status to pending
-        self.storage.set_tagging_status_sync(atom_id, "pending")?;
+        self.storage.set_tagging_status_sync(atom_id, "pending", None)?;
 
         let storage = self.storage.clone();
         let atom_id = atom_id.to_string();
         let bg_settings = self.settings_for_background();
+        let on_event = self.wrap_event_for_cache(on_event);
         executor::spawn(async move {
             let settings = bg_settings.unwrap_or_default();
             embedding::process_tagging_batch_with_settings(storage, vec![atom_id], on_event, settings).await;
@@ -1009,7 +1590,9 @@ impl AtomicCore {
         &self,
         merges: &[compaction::TagMerge],
     ) -> Result<compaction::CompactionResult, AtomicCoreError> {
-        self.storage.apply_tag_merges_impl(merges)
+        let result = self.storage.apply_tag_merges_impl(merges)?;
+        self.canvas_cache.invalidate();
+        Ok(result)
     }
 
     // ==================== Chat Operations ====================
@@ -1107,6 +1690,29 @@ impl AtomicCore {
         .map_err(|e| AtomicCoreError::DatabaseOperation(e))
     }
 
+    /// Send a chat message with canvas context for canvas-aware tools.
+    pub async fn send_chat_message_with_canvas<F>(
+        &self,
+        conversation_id: &str,
+        content: &str,
+        on_event: F,
+        canvas_context: Option<CanvasContext>,
+    ) -> Result<ChatMessageWithContext, AtomicCoreError>
+    where
+        F: Fn(ChatEvent) + Send + Sync,
+    {
+        agent::send_chat_message_with_canvas(
+            self.storage.clone(),
+            conversation_id,
+            content,
+            on_event,
+            self.settings_for_background(),
+            canvas_context,
+        )
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e))
+    }
+
     // ==================== Canvas Operations ====================
 
     /// Get all stored atom positions
@@ -1124,15 +1730,83 @@ impl AtomicCore {
         self.storage.get_atoms_with_embeddings_impl()
     }
 
+    /// Return a handle to the canvas cache so background tasks (e.g. embedding
+    /// pipeline completion) can invalidate it from outside this facade.
+    pub fn canvas_cache(&self) -> CanvasCache {
+        self.canvas_cache.clone()
+    }
+
+    /// Invalidate the in-memory canvas cache. Called by every mutation path
+    /// that could change canvas output.
+    pub fn invalidate_canvas_cache(&self) {
+        self.canvas_cache.invalidate();
+    }
+
+    /// Wrap a user-provided embedding/tagging event callback so that
+    /// visibility-changing events (`EmbeddingComplete`, `TaggingComplete`)
+    /// schedule a debounced canvas cache rebuild. The returned closure is
+    /// `Clone` so it can be passed to both single-atom and batch spawn sites.
+    /// Debounced (not eager) so streaming batches collapse into one rebuild.
+    fn wrap_event_for_cache<F>(&self, on_event: F) -> impl Fn(EmbeddingEvent) + Send + Sync + Clone + 'static
+    where
+        F: Fn(EmbeddingEvent) + Send + Sync + 'static,
+    {
+        let cache = self.canvas_cache.clone();
+        let on_event = Arc::new(on_event);
+        move |event: EmbeddingEvent| {
+            if matches!(
+                &event,
+                EmbeddingEvent::EmbeddingComplete { .. }
+                    | EmbeddingEvent::TaggingComplete { .. }
+            ) {
+                cache.invalidate_debounced();
+            }
+            on_event(event);
+        }
+    }
+
     /// Compute PCA 2D projection of all atom embeddings and return positioned atoms,
     /// top-K edges per atom, and cluster centroid labels.
     /// Pure read operation — does not persist positions to the database.
     /// Works with both SQLite and Postgres backends via storage dispatch.
-    pub fn compute_and_get_canvas_data(&self) -> Result<GlobalCanvasData, AtomicCoreError> {
-        // Load all average embeddings via storage abstraction
-        let embeddings = self.storage.get_all_embedding_pairs_sync()?;
+    ///
+    /// Results are memoized via `canvas_cache`; subsequent calls return the
+    /// cached `Arc` until a mutation invalidates it. Cold-cache rebuilds are
+    /// serialized by a compute guard so N simultaneous misses collapse into
+    /// one compute (the first waiter runs it; the rest re-read the cache).
+    pub fn compute_and_get_canvas_data(&self) -> Result<Arc<GlobalCanvasData>, AtomicCoreError> {
+        if let Some(cached) = self.canvas_cache.get() {
+            return Ok(cached);
+        }
+        // Serialize the first compute so concurrent misses don't all pay the
+        // full PCA + edge-load cost. Double-checked after acquiring the
+        // guard — if another waiter already populated the cache while we
+        // blocked, use theirs.
+        let _guard = self.canvas_cache.compute_guard()?;
+        if let Some(cached) = self.canvas_cache.get() {
+            return Ok(cached);
+        }
+        let data = Self::compute_canvas_data_impl(&self.storage)?;
+        self.canvas_cache.set(Arc::clone(&data));
+        Ok(data)
+    }
+
+    /// The pure compute path for the global canvas payload. No cache
+    /// interaction — callers decide whether to read/write the cache. Takes
+    /// `&StorageBackend` instead of `&self` so the debounced rebuilder
+    /// closure (registered on `CanvasCache`) can invoke it without needing
+    /// a full `AtomicCore` handle.
+    fn compute_canvas_data_impl(
+        storage: &storage::StorageBackend,
+    ) -> Result<Arc<GlobalCanvasData>, AtomicCoreError> {
+        // Load all average embeddings via storage abstraction (single scan of atom_chunks)
+        let embeddings = storage.get_all_embedding_pairs_sync()?;
         if embeddings.is_empty() {
-            return Ok(GlobalCanvasData { atoms: vec![], edges: vec![], clusters: vec![] });
+            return Ok(Arc::new(GlobalCanvasData {
+                atoms: vec![],
+                edges: vec![],
+                clusters: vec![],
+            }));
         }
 
         // Run PCA projection (pure math, backend-agnostic)
@@ -1143,36 +1817,82 @@ impl AtomicCore {
             .map(|(id, x, y)| (id.clone(), (*x, *y)))
             .collect();
 
-        // Load atom metadata and merge with projected positions
-        let atoms_with_embeddings = self.storage.get_atoms_with_embeddings_impl()?;
-        let mut atom_tag_map = self.storage.get_all_atom_tag_ids_sync()?;
+        // Load lightweight canvas metadata (id, title, first tag, tag count, tag_ids)
+        // — no full content, no embedding blobs, single query with LEFT JOIN
+        let atom_metadata = storage.get_canvas_atom_metadata_light_sync()?;
+        let mut atom_tag_map = storage.get_all_atom_tag_ids_sync()?;
 
-        let atoms: Vec<CanvasAtomPosition> = atoms_with_embeddings.iter()
-            .filter_map(|awe| {
-                let (x, y) = position_map.get(&awe.atom.atom.id)?;
-                let (title, _) = extract_title_and_snippet(&awe.atom.atom.content, 60);
-                let primary_tag = awe.atom.tags.first().map(|t| t.name.clone());
-                let tag_ids = atom_tag_map.remove(&awe.atom.atom.id).unwrap_or_default();
+        let atoms: Vec<CanvasAtomPosition> = atom_metadata.into_iter()
+            .filter_map(|(atom_id, title, primary_tag, tag_count)| {
+                let (x, y) = position_map.get(&atom_id)?;
+                let tag_ids = atom_tag_map.remove(&atom_id).unwrap_or_default();
                 Some(CanvasAtomPosition {
-                    atom_id: awe.atom.atom.id.clone(),
+                    atom_id,
                     x: *x,
                     y: *y,
                     title,
                     primary_tag,
-                    tag_count: awe.atom.tags.len() as i32,
+                    tag_count,
                     tag_ids,
                 })
             })
             .collect();
 
-        // Load top-2 semantic edges per atom
-        let edges = self.storage.get_top_k_canvas_edges_sync(2)?;
+        // Load semantic edges once, use for both canvas edges and clustering
+        let all_edges = storage.get_semantic_edges_raw_sync(0.5)?;
 
-        // Compute cluster centroids
-        let cluster_data = self.storage.compute_clusters_sync(0.5, 3)?;
+        // Build top-k canvas edges from the loaded data
+        let edges = Self::filter_top_k_edges(&all_edges, 2);
+
+        // Compute clusters from the same edge data (no second DB scan)
+        let cluster_data = clustering::compute_clusters_from_edges(&all_edges, 3);
+        // Enrich clusters with dominant tag names
+        let cluster_data = storage.enrich_clusters_with_tags_sync(cluster_data)?;
         let clusters = Self::build_cluster_centroids(&cluster_data, &position_map);
 
-        Ok(GlobalCanvasData { atoms, edges, clusters })
+        Ok(Arc::new(GlobalCanvasData { atoms, edges, clusters }))
+    }
+
+    /// Register the canvas cache rebuilder so background-debounced
+    /// invalidations can recompute the payload. Called once per constructor.
+    /// Captures a `StorageBackend` clone — no reference cycle.
+    fn register_canvas_rebuilder(&self) {
+        let storage = self.storage.clone();
+        self.canvas_cache.set_rebuilder(Box::new(move || {
+            Self::compute_canvas_data_impl(&storage)
+        }));
+    }
+
+    /// Filter edges to keep at most top_k per atom, input must be sorted by score DESC.
+    fn filter_top_k_edges(
+        all_edges: &[(String, String, f32)],
+        top_k: usize,
+    ) -> Vec<CanvasEdgeData> {
+        let mut per_atom: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let mut kept: Vec<(&str, &str, f32)> = Vec::new();
+
+        for (src, tgt, score) in all_edges {
+            let src_count = per_atom.get(src.as_str()).copied().unwrap_or(0);
+            let tgt_count = per_atom.get(tgt.as_str()).copied().unwrap_or(0);
+            if src_count >= top_k && tgt_count >= top_k {
+                continue;
+            }
+            *per_atom.entry(src.as_str()).or_insert(0) += 1;
+            *per_atom.entry(tgt.as_str()).or_insert(0) += 1;
+            kept.push((src.as_str(), tgt.as_str(), *score));
+        }
+
+        let min_w = kept.iter().map(|(_, _, w)| *w).fold(f32::MAX, f32::min);
+        let max_w = kept.iter().map(|(_, _, w)| *w).fold(f32::MIN, f32::max);
+        let range = (max_w - min_w).max(0.001);
+
+        kept.into_iter().map(|(src, tgt, score)| {
+            CanvasEdgeData {
+                source: src.to_string(),
+                target: tgt.to_string(),
+                weight: (score - min_w) / range,
+            }
+        }).collect()
     }
 
     /// Build cluster centroid labels from cluster data and position map (pure math).
@@ -1235,9 +1955,27 @@ impl AtomicCore {
         self.storage.get_atom_neighborhood_sync(atom_id, depth, min_similarity)
     }
 
-    /// Rebuild semantic edges for all atoms with embeddings
+    /// Rebuild semantic edges for all atoms with embeddings.
+    ///
+    /// Returns the number of atoms **queued** for edge recomputation, not
+    /// the number of edges written. This call returns as soon as the edge
+    /// pipeline is spawned — actual edge computation runs in the background
+    /// and completes asynchronously. Callers watching for completion should
+    /// subscribe to pipeline events rather than treating the return value
+    /// as a completion signal.
     pub fn rebuild_semantic_edges(&self) -> Result<i32, AtomicCoreError> {
-        self.storage.rebuild_semantic_edges_sync()
+        let count = self.storage.rebuild_semantic_edges_sync()?;
+        self.canvas_cache.invalidate();
+        if count > 0 {
+            // Kick off the background edge pipeline with the cache handle so
+            // each completed batch invalidates the cache as edges land on disk.
+            embedding::process_pending_edges(
+                self.storage.clone(),
+                Some(self.canvas_cache.clone()),
+            )
+            .map_err(|e| AtomicCoreError::Embedding(e))?;
+        }
+        Ok(count)
     }
 
     // ==================== Hierarchical Canvas ====================
@@ -1262,6 +2000,11 @@ impl AtomicCore {
         self.storage.get_embedding_status_impl(atom_id)
     }
 
+    /// Get pipeline status (embedding counts + failed atoms)
+    pub fn get_pipeline_status(&self) -> Result<models::PipelineStatus, AtomicCoreError> {
+        self.storage.get_pipeline_status()
+    }
+
     /// Process pending tag extraction for atoms with complete embeddings
     pub fn process_pending_tagging<F>(&self, on_event: F) -> Result<i32, AtomicCoreError>
     where
@@ -1274,6 +2017,7 @@ impl AtomicCore {
         if count > 0 {
             let storage = self.storage.clone();
             let bg_settings = self.settings_for_background();
+            let on_event = self.wrap_event_for_cache(on_event);
             executor::spawn(async move {
                 match bg_settings {
                     Some(s) => embedding::process_tagging_batch_with_settings(storage, pending_atoms, on_event, s).await,
@@ -1295,38 +2039,43 @@ impl AtomicCore {
     // ==================== Settings with Re-embed ====================
 
     /// Set a setting, handling embedding dimension changes.
-    /// Returns (dimension_changed, pending_reembed_count).
+    /// Returns (dimension_changed, old_dim, new_dim, total_atom_count, retried_failed_count).
+    /// Does NOT auto-re-embed on dimension change — caller must confirm with user first,
+    /// then call `reembed_all_atoms` explicitly.
+    /// DOES auto-retry failed atoms when provider config changes (URL, key, model).
     pub fn set_setting_with_reembed<F>(
         &self,
         key: &str,
         value: &str,
         on_event: F,
-    ) -> Result<(bool, i32), AtomicCoreError>
+    ) -> Result<SettingChangeResult, AtomicCoreError>
     where
         F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
     {
+        let current_settings = self.get_settings()?;
+        let value_changed = current_settings.get(key).map(|s| s.as_str()) != Some(value);
+
         let dimension_affecting_keys = ["provider", "embedding_model", "ollama_embedding_model", "openai_compat_embedding_model", "openai_compat_embedding_dimension"];
         let mut dimension_changed = false;
+        let mut old_dim = 0usize;
+        let mut new_dim = 0usize;
 
-        if dimension_affecting_keys.contains(&key) {
-            // Use registry settings if available for dimension calculation
-            let current_settings = self.get_settings()?;
+        if dimension_affecting_keys.contains(&key) && value_changed {
             let current_config = ProviderConfig::from_settings(&current_settings);
-            let current_dim = current_config.embedding_dimension();
+            old_dim = current_config.embedding_dimension();
 
-            let mut new_settings = current_settings;
+            let mut new_settings = current_settings.clone();
             new_settings.insert(key.to_string(), value.to_string());
             let new_config = ProviderConfig::from_settings(&new_settings);
-            let new_dim = new_config.embedding_dimension();
+            new_dim = new_config.embedding_dimension();
 
-            if current_dim != new_dim {
+            if old_dim != new_dim {
                 tracing::info!(
-                    current_dim,
+                    old_dim,
                     new_dim,
                     key,
-                    "Embedding dimension changing due to setting change - recreating vec_chunks"
+                    "Embedding dimension change detected — recreating vector index and re-embedding all atoms"
                 );
-                self.storage.recreate_vector_index_sync(new_dim)?;
                 dimension_changed = true;
             }
         }
@@ -1338,36 +2087,48 @@ impl AtomicCore {
             self.storage.set_setting_sync(key, value)?;
         }
 
-        let mut pending_count = 0i32;
         if dimension_changed {
-            pending_count = self.storage.count_pending_embeddings_sync()?;
+            // Recreate the active database's vector index at the new dimension.
+            // This drops vec_chunks, recreates it, clears atom_chunks/semantic_edges,
+            // and resets every atom's embedding_status to 'pending'.
+            self.storage.recreate_vector_index_sync(new_dim)?;
+            self.canvas_cache.invalidate();
+            tracing::info!(new_dim, "Recreated active database vector index for dimension change");
+            // Now spawn re-embedding — atoms are in 'pending' status after the recreate.
+            let queued = self.spawn_reembed_pending(on_event.clone())?;
+            tracing::info!(queued, "Queued atoms for re-embedding after dimension change");
+        }
 
-            if pending_count > 0 {
-                let pending_atoms = self.storage.claim_pending_reembedding_sync()?;
-
-                let storage_clone = self.storage.clone();
-                let bg_settings = self.settings_for_background();
-                executor::spawn(async move {
-                    match bg_settings {
-                        Some(s) => embedding::process_embedding_batch_with_settings(
-                            storage_clone,
-                            pending_atoms,
-                            true,
-                            on_event,
-                            s,
-                        ).await,
-                        None => embedding::process_embedding_batch(
-                            storage_clone,
-                            pending_atoms,
-                            true, // skip tagging - re-embedding only
-                            on_event,
-                        ).await,
-                    };
-                });
+        // Auto-retry failed atoms when provider config changes
+        // (covers: URL, API key, model, provider type)
+        let retry_keys = [
+            "provider", "embedding_model", "ollama_embedding_model", "ollama_host",
+            "openai_compat_embedding_model", "openai_compat_base_url", "openai_compat_api_key",
+            "openrouter_api_key",
+        ];
+        let mut retried_failed = 0i32;
+        if retry_keys.contains(&key) && !dimension_changed && value_changed {
+            retried_failed = self.storage.reset_failed_embeddings_sync()?;
+            if retried_failed > 0 {
+                tracing::info!(
+                    retried_failed,
+                    key,
+                    "Provider config updated — retrying previously failed atoms"
+                );
+                let _ = self.process_pending_embeddings(on_event.clone());
+                let _ = self.process_pending_tagging(on_event);
             }
         }
 
-        Ok((dimension_changed, pending_count))
+        let total_atoms = self.storage.count_pending_embeddings_sync().unwrap_or(0);
+
+        Ok(SettingChangeResult {
+            dimension_changed,
+            old_dim,
+            new_dim,
+            total_atom_count: total_atoms,
+            retried_failed_count: retried_failed,
+        })
     }
 
     // ==================== Utility Operations ====================
@@ -1534,6 +2295,7 @@ impl AtomicCore {
                     source_url: Some(note.source_url.clone()),
                     published_at: None,
                     tag_ids: vec![],
+                    ..Default::default()
                 },
                 &note.created_at,
             ) {
@@ -1618,232 +2380,24 @@ impl AtomicCore {
         // Trigger embedding processing for all imported atoms
         if !imported_atoms.is_empty() {
             for (atom_id, _) in &imported_atoms {
-                self.storage.set_embedding_status_sync(atom_id, "processing").ok();
+                self.storage.set_embedding_status_sync(atom_id, "processing", None).ok();
             }
+            self.canvas_cache.invalidate();
 
             let storage_clone = self.storage.clone();
             let bg_settings = self.settings_for_background();
+            let input = embedding::AtomInput::Preloaded(imported_atoms);
+            let on_event = self.wrap_event_for_cache(on_event);
+            let canvas_cache = Some(self.canvas_cache.clone());
             executor::spawn(async move {
                 match bg_settings {
-                    Some(s) => embedding::process_embedding_batch_with_settings(storage_clone, imported_atoms, false, on_event, s).await,
-                    None => embedding::process_embedding_batch(storage_clone, imported_atoms, false, on_event).await,
+                    Some(s) => embedding::process_embedding_batch_with_settings(storage_clone, input, false, on_event, s, canvas_cache).await,
+                    None => embedding::process_embedding_batch(storage_clone, input, false, on_event, canvas_cache).await,
                 };
             });
         }
 
         Ok(stats)
-    }
-
-    /// Import conversations from an external source (ChatGPT, Claude, or Markdown).
-    ///
-    /// Each imported conversation is written to the local chat tables.
-    /// Returns the number of conversations and messages imported.
-    pub fn import_conversations<P>(
-        &self,
-        conversations: &[import::ImportedConversation],
-        on_progress: P,
-    ) -> Result<(i32, i32), AtomicCoreError>
-    where
-        P: Fn(ImportProgress),
-    {
-        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
-            AtomicCoreError::Configuration(
-                "Conversation import is only supported with the SQLite backend".to_string(),
-            )
-        })?;
-        let conn = sqlite.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
-
-        // Build a fingerprint set of existing (title, first_message_content) pairs
-        // so we can skip re-importing conversations that are already present.
-        let existing_fingerprints: std::collections::HashSet<(String, String)> = {
-            let mut stmt = conn.prepare(
-                "SELECT c.title, m.content
-                 FROM conversations c
-                 JOIN chat_messages m ON m.conversation_id = c.id AND m.message_index = 0",
-            )?;
-            stmt.query_map([], |row| {
-                let title: Option<String> = row.get(0)?;
-                let content: String = row.get(1)?;
-                Ok((title.unwrap_or_default(), content))
-            })?
-            .filter_map(|r| r.ok())
-            .collect()
-        };
-
-        // Wrap the entire import in a transaction so a mid-import failure does
-        // not leave partially-imported conversations in the database.
-        conn.execute_batch("BEGIN")?;
-
-        let total = conversations.len() as i32;
-        let mut conv_count = 0i32;
-        let mut msg_count = 0i32;
-        // Track fingerprints added during this run to also deduplicate within the
-        // input slice (e.g. if the same conversation appears twice in one export).
-        let mut added_this_run: std::collections::HashSet<(String, String)> =
-            std::collections::HashSet::new();
-
-        let import_result: Result<(), AtomicCoreError> = (|| {
-            for (i, imported) in conversations.iter().enumerate() {
-                if imported.messages.is_empty() {
-                    continue;
-                }
-
-                // Deduplication: skip if title + first message content already exists
-                // either in the database or earlier in this same import batch.
-                let title_str = imported.title.as_deref().unwrap_or("");
-                let first_content = imported.messages[0].content.as_str();
-                let fp = (title_str.to_string(), first_content.to_string());
-                if existing_fingerprints.contains(&fp) || added_this_run.contains(&fp) {
-                    tracing::debug!(
-                        title = title_str,
-                        "skipping duplicate conversation"
-                    );
-                    continue;
-                }
-
-                let title = imported.title.as_deref();
-                let conv = chat::create_conversation(&conn, &[], title)?;
-                conv_count += 1;
-                added_this_run.insert(fp);
-
-                for msg in &imported.messages {
-                    chat::save_message_with_timestamp(
-                        &conn,
-                        &conv.conversation.id,
-                        &msg.role,
-                        &msg.content,
-                        msg.created_at.as_deref(),
-                    )?;
-                    msg_count += 1;
-                }
-
-                on_progress(ImportProgress {
-                    current: i as i32 + 1,
-                    total,
-                    current_file: imported.title.clone().unwrap_or_else(|| format!("Conversation {}", i + 1)),
-                    status: "importing".to_string(),
-                });
-            }
-            Ok(())
-        })();
-
-        match import_result {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")?;
-                Ok((conv_count, msg_count))
-            }
-            Err(e) => {
-                // Best-effort rollback — the lock is released after this scope.
-                let _ = conn.execute_batch("ROLLBACK");
-                Err(e)
-            }
-        }
-    }
-
-    /// Ingest a log file as an atom, tagged under a hierarchical tag path.
-    ///
-    /// Returns the atom ID of the newly created atom.
-    pub fn ingest_log_file<F>(
-        &self,
-        request: import::IngestLogRequest,
-        on_event: F,
-    ) -> Result<String, AtomicCoreError>
-    where
-        F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
-    {
-        let prepared = import::log_ingest::prepare_log_atom(&request);
-
-        if prepared.content.trim().is_empty() {
-            return Err(AtomicCoreError::Validation("Log content is empty".to_string()));
-        }
-
-        // Resolve or create the tag path hierarchy (e.g. ["Logs", "System", "host1"])
-        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
-            AtomicCoreError::Configuration(
-                "Log ingestion is only supported with the SQLite backend".to_string(),
-            )
-        })?;
-
-        let atom_id = Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
-
-        self.storage.insert_atom_impl(
-            &atom_id,
-            &CreateAtomRequest {
-                content: prepared.content.clone(),
-                source_url: None,
-                published_at: None,
-                tag_ids: vec![],
-            },
-            &now,
-        )?;
-
-        // Build and attach tag hierarchy
-        {
-            let conn = sqlite.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
-            let mut tag_cache: HashMap<(String, Option<String>), String> = HashMap::new();
-            let mut stats = ImportResult { imported: 0, skipped: 0, errors: 0, tags_created: 0, tags_linked: 0 };
-            let mut parent_id: Option<String> = None;
-
-            for segment in &prepared.tag_path {
-                if let Some(tag_id) = get_or_create_tag(
-                    &conn,
-                    &mut tag_cache,
-                    segment,
-                    parent_id.as_deref(),
-                    &mut stats,
-                ) {
-                    conn.execute(
-                        "INSERT OR IGNORE INTO atom_tags (atom_id, tag_id) VALUES (?1, ?2)",
-                        rusqlite::params![&atom_id, &tag_id],
-                    )?;
-                    parent_id = Some(tag_id);
-                }
-            }
-        }
-
-        // Trigger embedding
-        self.storage.set_embedding_status_sync(&atom_id, "processing").ok();
-        let storage_clone = self.storage.clone();
-        let bg_settings = self.settings_for_background();
-        let content_clone = prepared.content.clone();
-        let atom_id_clone = atom_id.clone();
-        executor::spawn(async move {
-            match bg_settings {
-                Some(s) => embedding::process_embedding_batch_with_settings(
-                    storage_clone, vec![(atom_id_clone, content_clone)], false, on_event, s,
-                ).await,
-                None => embedding::process_embedding_batch(
-                    storage_clone, vec![(atom_id_clone, content_clone)], false, on_event,
-                ).await,
-            };
-        });
-
-        Ok(atom_id)
-    }
-
-    /// Persist the current in-memory log buffer as an atom.
-    ///
-    /// This is called by the server to checkpoint recent logs before restart
-    /// or on a schedule.  The log text itself is provided by the caller (the
-    /// server owns the `LogBuffer`).
-    pub fn persist_logs_as_atom<F>(
-        &self,
-        log_text: String,
-        source_name: &str,
-        on_event: F,
-    ) -> Result<String, AtomicCoreError>
-    where
-        F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
-    {
-        let request = import::IngestLogRequest {
-            content: log_text,
-            format: import::LogFormat::PlainText,
-            source_name: source_name.to_string(),
-            tag_root: Some("Logs".to_string()),
-            tag_category: Some("Server".to_string()),
-        };
-        self.ingest_log_file(request, on_event)
     }
 
     // ==================== Content Ingestion ====================
@@ -1902,9 +2456,10 @@ impl AtomicCore {
                 source_url: Some(request.url.clone()),
                 published_at: request.published_at,
                 tag_ids: request.tag_ids,
+                ..Default::default()
             },
             on_embed,
-        )?;
+        )?.ok_or_else(|| AtomicCoreError::Validation("Atom creation returned None".to_string()))?;
 
         let result = ingest::IngestionResult {
             atom_id: atom.atom.id.clone(),
@@ -2087,12 +2642,17 @@ impl AtomicCore {
                             source_url: Some(link),
                             published_at: item.published_at.clone(),
                             tag_ids: feed.tag_ids.clone(),
+                            skip_if_source_exists: true,
                         },
                         on_embed.clone(),
                     ) {
-                        Ok(atom) => {
+                        Ok(Some(atom)) => {
                             self.complete_feed_item(feed_id, &item.guid, &atom.atom.id)?;
                             new_items += 1;
+                        }
+                        Ok(None) => {
+                            self.mark_feed_item_skipped(feed_id, &item.guid, "duplicate source_url")?;
+                            skipped += 1;
                         }
                         Err(e) => {
                             self.mark_feed_item_skipped(feed_id, &item.guid, &e.to_string())?;
@@ -2192,76 +2752,6 @@ impl AtomicCore {
     /// Useful for backfilling after this feature is added to an existing database.
     pub fn recompute_all_tag_embeddings(&self) -> Result<i32, AtomicCoreError> {
         self.storage.recompute_all_tag_embeddings_sync()
-    }
-
-    // ==================== Insights / Novel Discovery ====================
-
-    /// Analyse the knowledge graph for gaps and underexplored areas.
-    ///
-    /// Returns isolated atoms (no connections), sparse tags (few atoms), and
-    /// bridge atoms (connecting otherwise-disconnected clusters).
-    ///
-    /// Requires SQLite backend.
-    pub fn knowledge_gaps(
-        &self,
-        isolation_threshold: i32,
-        sparse_tag_threshold: i32,
-        max_results: usize,
-    ) -> Result<crate::models::KnowledgeGapsResult, AtomicCoreError> {
-        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
-            AtomicCoreError::Configuration(
-                "knowledge_gaps is not yet supported with Postgres backend".to_string(),
-            )
-        })?;
-        let conn = sqlite.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
-        insights::knowledge_gaps(&conn, isolation_threshold, sparse_tag_threshold, max_results)
-    }
-
-    /// Walk the semantic graph from `start_atom_id` for `steps` hops, following
-    /// edges with controlled randomness to surface unexpected connections.
-    ///
-    /// `randomness` controls exploration temperature (0.0 = deterministic best
-    /// neighbour, 1.0 = uniform random). `seed` makes the walk reproducible.
-    ///
-    /// Requires SQLite backend.
-    pub fn serendipity_walk(
-        &self,
-        start_atom_id: &str,
-        steps: usize,
-        randomness: f32,
-        seed: u64,
-    ) -> Result<crate::models::SerendipityWalkResult, AtomicCoreError> {
-        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
-            AtomicCoreError::Configuration(
-                "serendipity_walk is not yet supported with Postgres backend".to_string(),
-            )
-        })?;
-        let conn = sqlite.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
-        insights::serendipity_walk(&conn, start_atom_id, steps, randomness, seed)
-    }
-
-    /// Surface old atoms that are semantically similar to recently added ones —
-    /// resurfacing forgotten-but-relevant knowledge.
-    ///
-    /// - `lookback_days`: atoms older than this many days are considered "old".
-    /// - `recent_days`: atoms newer than this many days are considered "new".
-    /// - `similarity_threshold`: minimum semantic similarity for a pair to appear.
-    ///
-    /// Requires SQLite backend.
-    pub fn time_capsule(
-        &self,
-        lookback_days: i32,
-        recent_days: i32,
-        similarity_threshold: f32,
-        limit: usize,
-    ) -> Result<crate::models::TimeCapsuleResult, AtomicCoreError> {
-        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
-            AtomicCoreError::Configuration(
-                "time_capsule is not yet supported with Postgres backend".to_string(),
-            )
-        })?;
-        let conn = sqlite.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
-        insights::time_capsule(&conn, lookback_days, recent_days, similarity_threshold, limit)
     }
 }
 
@@ -2774,10 +3264,10 @@ pub(crate) fn parse_source(source_url: &str) -> String {
 }
 
 /// Standard SELECT columns for reading an Atom from the DB.
-pub(crate) const ATOM_COLUMNS: &str = "id, content, title, snippet, source_url, source, published_at, created_at, updated_at, COALESCE(embedding_status, 'pending'), COALESCE(tagging_status, 'pending')";
+pub(crate) const ATOM_COLUMNS: &str = "id, content, title, snippet, source_url, source, published_at, created_at, updated_at, COALESCE(embedding_status, 'pending'), COALESCE(tagging_status, 'pending'), embedding_error, tagging_error";
 
 /// Same columns but table-aliased for JOINs.
-pub(crate) const ATOM_COLUMNS_A: &str = "a.id, a.content, a.title, a.snippet, a.source_url, a.source, a.published_at, a.created_at, a.updated_at, COALESCE(a.embedding_status, 'pending'), COALESCE(a.tagging_status, 'pending')";
+pub(crate) const ATOM_COLUMNS_A: &str = "a.id, a.content, a.title, a.snippet, a.source_url, a.source, a.published_at, a.created_at, a.updated_at, COALESCE(a.embedding_status, 'pending'), COALESCE(a.tagging_status, 'pending'), a.embedding_error, a.tagging_error";
 
 /// Parse an Atom from a row selected with ATOM_COLUMNS.
 pub(crate) fn atom_from_row(row: &rusqlite::Row) -> rusqlite::Result<Atom> {
@@ -2793,6 +3283,8 @@ pub(crate) fn atom_from_row(row: &rusqlite::Row) -> rusqlite::Result<Atom> {
         updated_at: row.get(8)?,
         embedding_status: row.get(9)?,
         tagging_status: row.get(10)?,
+        embedding_error: row.get(11)?,
+        tagging_error: row.get(12)?,
     })
 }
 
@@ -2800,7 +3292,7 @@ pub(crate) fn atom_from_row(row: &rusqlite::Row) -> rusqlite::Result<Atom> {
 pub(crate) fn get_tags_for_atom(conn: &Connection, atom_id: &str) -> Result<Vec<Tag>, AtomicCoreError> {
     let mut stmt = conn
         .prepare(
-            "SELECT t.id, t.name, t.parent_id, t.created_at
+            "SELECT t.id, t.name, t.parent_id, t.created_at, t.is_autotag_target
              FROM tags t
              INNER JOIN atom_tags at ON t.id = at.tag_id
              WHERE at.atom_id = ?1",
@@ -2814,6 +3306,7 @@ pub(crate) fn get_tags_for_atom(conn: &Connection, atom_id: &str) -> Result<Vec<
                 name: row.get(1)?,
                 parent_id: row.get(2)?,
                 created_at: row.get(3)?,
+                is_autotag_target: row.get::<_, i32>(4)? != 0,
             })
         })
         ?
@@ -2828,7 +3321,7 @@ pub(crate) fn get_tags_for_atom(conn: &Connection, atom_id: &str) -> Result<Vec<
 pub(crate) fn get_all_atom_tags_map(conn: &Connection) -> Result<std::collections::HashMap<String, Vec<Tag>>, AtomicCoreError> {
     let mut stmt = conn
         .prepare(
-            "SELECT at.atom_id, t.id, t.name, t.parent_id, t.created_at
+            "SELECT at.atom_id, t.id, t.name, t.parent_id, t.created_at, t.is_autotag_target
              FROM atom_tags at
              INNER JOIN tags t ON at.tag_id = t.id",
         )?;
@@ -2844,6 +3337,7 @@ pub(crate) fn get_all_atom_tags_map(conn: &Connection) -> Result<std::collection
                     name: row.get(2)?,
                     parent_id: row.get(3)?,
                     created_at: row.get(4)?,
+                    is_autotag_target: row.get::<_, i32>(5)? != 0,
                 },
             ))
         })?;
@@ -2864,7 +3358,7 @@ pub(crate) fn get_atom_tags_map_for_ids(conn: &Connection, atom_ids: &[String]) 
 
     let placeholders = atom_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let query = format!(
-        "SELECT at.atom_id, t.id, t.name, t.parent_id, t.created_at
+        "SELECT at.atom_id, t.id, t.name, t.parent_id, t.created_at, t.is_autotag_target
          FROM atom_tags at
          INNER JOIN tags t ON at.tag_id = t.id
          WHERE at.atom_id IN ({})",
@@ -2884,6 +3378,7 @@ pub(crate) fn get_atom_tags_map_for_ids(conn: &Connection, atom_ids: &[String]) 
                     name: row.get(2)?,
                     parent_id: row.get(3)?,
                     created_at: row.get(4)?,
+                    is_autotag_target: row.get::<_, i32>(5)? != 0,
                 },
             ))
         })?;
@@ -2973,8 +3468,22 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
-    /// Test utility: Create a test database
+    /// Test utility: Create a test database with the five default category tags seeded.
+    /// (Production code no longer auto-seeds; tests opt in via this helper.)
     fn create_test_db() -> (AtomicCore, NamedTempFile) {
+        let temp_file = NamedTempFile::new().unwrap();
+        let db = AtomicCore::open_or_create(temp_file.path()).unwrap();
+        let defaults: Vec<String> = ["Topics", "People", "Locations", "Organizations", "Events"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        db.configure_autotag_targets(&defaults, &[]).unwrap();
+        (db, temp_file)
+    }
+
+    /// Test utility: Create an empty test database with no seeded tags.
+    #[allow(dead_code)]
+    fn create_empty_test_db() -> (AtomicCore, NamedTempFile) {
         let temp_file = NamedTempFile::new().unwrap();
         let db = AtomicCore::open_or_create(temp_file.path()).unwrap();
         (db, temp_file)
@@ -2984,14 +3493,14 @@ mod tests {
     fn get_seeded_tag(db: &AtomicCore, name: &str) -> Tag {
         let sqlite = db.storage.as_sqlite().unwrap();
         let conn = sqlite.db.conn.lock().unwrap();
-        let (id, tag_name, parent_id, created_at): (String, String, Option<String>, String) = conn
+        let (id, tag_name, parent_id, created_at, is_autotag_target): (String, String, Option<String>, String, i32) = conn
             .query_row(
-                "SELECT id, name, parent_id, created_at FROM tags WHERE LOWER(name) = LOWER(?1)",
+                "SELECT id, name, parent_id, created_at, is_autotag_target FROM tags WHERE LOWER(name) = LOWER(?1)",
                 [name],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .unwrap();
-        Tag { id, name: tag_name, parent_id, created_at }
+        Tag { id, name: tag_name, parent_id, created_at, is_autotag_target: is_autotag_target != 0 }
     }
 
     /// Test utility: Create a test atom
@@ -2999,12 +3508,11 @@ mod tests {
         db.create_atom(
             CreateAtomRequest {
                 content: content.to_string(),
-                source_url: None,
-                published_at: None,
-                tag_ids: vec![],
+                ..Default::default()
             },
             |_| {}, // no-op callback
         )
+        .unwrap()
         .unwrap()
     }
 
@@ -3167,12 +3675,12 @@ mod tests {
             .create_atom(
                 CreateAtomRequest {
                     content: "Tagged content".to_string(),
-                    source_url: None,
-                    published_at: None,
                     tag_ids: vec![tag1.id.clone(), tag2.id.clone()],
+                    ..Default::default()
                 },
                 |_| {},
             )
+            .unwrap()
             .unwrap();
 
         // Verify tags are attached
@@ -3195,12 +3703,12 @@ mod tests {
             .create_atom(
                 CreateAtomRequest {
                     content: "AI content".to_string(),
-                    source_url: None,
-                    published_at: None,
                     tag_ids: vec![ai.id.clone()],
+                    ..Default::default()
                 },
                 |_| {},
             )
+            .unwrap()
             .unwrap();
 
         // Query by parent tag (Topics) should include atoms tagged with AI
@@ -3222,9 +3730,8 @@ mod tests {
             db.create_atom(
                 CreateAtomRequest {
                     content: format!("Atom {}", i),
-                    source_url: None,
-                    published_at: None,
                     tag_ids: vec![topics.id.clone()],
+                    ..Default::default()
                 },
                 |_| {},
             )
@@ -3236,6 +3743,25 @@ mod tests {
         let topics_tag = all_tags.iter().find(|t| t.tag.name == "Topics").unwrap();
 
         assert_eq!(topics_tag.atom_count, 3);
+    }
+
+    #[tokio::test]
+    async fn run_daily_briefing_rejects_concurrent_call_with_conflict() {
+        let (db, _temp) = create_test_db();
+
+        // Simulate an in-flight briefing by holding the single-flight lock.
+        // The lock is acquired as the very first step of `run_daily_briefing`
+        // (before any DB or LLM work), so we don't need a working provider to
+        // exercise the contention path.
+        let _held = db.briefing_lock.clone().lock_owned().await;
+
+        let result = db.run_daily_briefing().await;
+        match result {
+            Err(AtomicCoreError::Conflict(msg)) => {
+                assert!(msg.contains("already running"), "unexpected message: {msg}");
+            }
+            other => panic!("expected Conflict, got {:?}", other.err()),
+        }
     }
 
     #[test]

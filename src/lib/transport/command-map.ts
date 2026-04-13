@@ -13,6 +13,7 @@ function atomBody(args: Record<string, unknown>) {
     source_url: args.sourceUrl ?? null,
     published_at: args.publishedAt ?? null,
     tag_ids: args.tagIds ?? [],
+    skip_if_source_exists: args.skipIfSourceExists ?? false,
   };
 }
 
@@ -50,6 +51,10 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'GET',
     path: (a) => `/api/atoms/${encodeURIComponent(a.id as string)}`,
   },
+  get_atom_by_source_url: {
+    method: 'GET',
+    path: (a) => `/api/atoms/by-source-url?url=${encodeURIComponent(a.url as string)}`,
+  },
   get_atom_by_id: {
     method: 'GET',
     path: (a) => `/api/atoms/${encodeURIComponent(a.id as string)}`,
@@ -60,9 +65,21 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     argsMode: 'body',
     transformArgs: atomBody,
   },
+  bulk_create_atoms: {
+    method: 'POST',
+    path: '/api/atoms/bulk',
+    argsMode: 'body',
+    transformArgs: (a) => (a.atoms as unknown[]).map((atom: any) => atomBody(atom)),
+  },
   update_atom: {
     method: 'PUT',
     path: (a) => `/api/atoms/${encodeURIComponent(a.id as string)}`,
+    argsMode: 'body',
+    transformArgs: atomBody,
+  },
+  update_atom_content_only: {
+    method: 'PUT',
+    path: (a) => `/api/atoms/${encodeURIComponent(a.id as string)}/content`,
     argsMode: 'body',
     transformArgs: atomBody,
   },
@@ -107,6 +124,21 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
   delete_tag: {
     method: 'DELETE',
     path: (a) => `/api/tags/${encodeURIComponent(a.id as string)}${a.recursive ? '?recursive=true' : ''}`,
+  },
+  set_tag_autotag_target: {
+    method: 'PUT',
+    path: (a) => `/api/tags/${encodeURIComponent(a.id as string)}/autotag-target`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ value: a.value }),
+  },
+  configure_autotag_targets: {
+    method: 'POST',
+    path: '/api/tags/configure-autotag-targets',
+    argsMode: 'body',
+    transformArgs: (a) => ({
+      keep_defaults: a.keepDefaults ?? [],
+      add_custom: a.addCustom ?? [],
+    }),
   },
 
   // ==================== Search ====================
@@ -168,6 +200,28 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     transformResponse: (d: any) => d.status as string,
   },
 
+  // ==================== Briefings ====================
+  get_latest_briefing: {
+    method: 'GET',
+    path: '/api/briefings/latest',
+  },
+  list_briefings: {
+    method: 'GET',
+    path: (a) => {
+      const params = new URLSearchParams();
+      if (a.limit != null) params.set('limit', String(a.limit));
+      return `/api/briefings${params.toString() ? `?${params}` : ''}`;
+    },
+  },
+  get_briefing: {
+    method: 'GET',
+    path: (a) => `/api/briefings/${encodeURIComponent(a.id as string)}`,
+  },
+  run_briefing_now: {
+    method: 'POST',
+    path: '/api/briefings/run',
+  },
+
   // ==================== Wiki ====================
   get_all_wiki_articles: {
     method: 'GET',
@@ -192,6 +246,24 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     path: (a) => `/api/wiki/${encodeURIComponent(a.tagId as string)}/update`,
     argsMode: 'body',
     transformArgs: (a) => ({ tag_name: a.tagName }),
+  },
+  propose_wiki_article: {
+    method: 'POST',
+    path: (a) => `/api/wiki/${encodeURIComponent(a.tagId as string)}/propose`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ tag_name: a.tagName }),
+  },
+  get_wiki_proposal: {
+    method: 'GET',
+    path: (a) => `/api/wiki/${encodeURIComponent(a.tagId as string)}/proposal`,
+  },
+  accept_wiki_proposal: {
+    method: 'POST',
+    path: (a) => `/api/wiki/${encodeURIComponent(a.tagId as string)}/proposal/accept`,
+  },
+  dismiss_wiki_proposal: {
+    method: 'POST',
+    path: (a) => `/api/wiki/${encodeURIComponent(a.tagId as string)}/proposal/dismiss`,
   },
   delete_wiki_article: {
     method: 'DELETE',
@@ -244,6 +316,10 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
   get_available_llm_models: {
     method: 'GET',
     path: '/api/settings/models',
+  },
+  get_openrouter_embedding_models: {
+    method: 'GET',
+    path: '/api/settings/embedding-models',
   },
   test_openai_compat_connection: {
     method: 'POST',
@@ -373,7 +449,10 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'POST',
     path: (a) => `/api/conversations/${encodeURIComponent(a.conversationId as string)}/messages`,
     argsMode: 'body',
-    transformArgs: (a) => ({ content: a.content }),
+    transformArgs: (a) => ({
+      content: a.content,
+      ...(a.canvasContext ? { canvas_context: a.canvasContext } : {}),
+    }),
   },
 
   // ==================== Ollama ====================
@@ -554,94 +633,5 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
   get_logs: {
     method: 'GET',
     path: '/api/logs',
-  },
-
-  // ==================== Import (extended) ====================
-  import_conversations: {
-    method: 'POST',
-    path: '/api/import/conversations',
-    argsMode: 'body',
-    transformArgs: (a) => ({
-      source_type: a.sourceType,
-      path: a.path,
-    }),
-  },
-  import_logs: {
-    method: 'POST',
-    path: '/api/import/logs',
-    argsMode: 'body',
-    transformArgs: (a) => ({
-      path: a.path ?? null,
-      content: a.content ?? null,
-      format: a.format ?? null,
-      source_name: a.sourceName,
-      tag_root: a.tagRoot ?? null,
-      tag_category: a.tagCategory ?? null,
-    }),
-  },
-  import_remote: {
-    method: 'POST',
-    path: '/api/import/remote',
-    argsMode: 'body',
-    transformArgs: (a) => ({
-      url: a.url,
-      token: a.token ?? null,
-      import_type: a.importType ?? 'conversations',
-      max_items: a.maxItems ?? null,
-    }),
-  },
-  persist_logs: {
-    method: 'POST',
-    path: '/api/import/persist-logs',
-  },
-
-  // ==================== Sync Sources ====================
-  list_sync_sources: {
-    method: 'GET',
-    path: '/api/sync/sources',
-  },
-  create_sync_source: {
-    method: 'POST',
-    path: '/api/sync/sources',
-    argsMode: 'body',
-    transformArgs: (a) => ({
-      name: a.name,
-      source_type: a.sourceType,
-      source_url: a.sourceUrl ?? null,
-      source_path: a.sourcePath ?? null,
-      source_token: a.sourceToken ?? null,
-      target_db_id: a.targetDbId ?? null,
-      interval_secs: a.intervalSecs ?? 0,
-    }),
-  },
-  update_sync_source: {
-    method: 'PUT',
-    path: (a) => `/api/sync/sources/${encodeURIComponent(a.id as string)}`,
-    argsMode: 'body',
-    transformArgs: (a) => ({
-      name: a.name ?? null,
-      source_url: a.sourceUrl !== undefined ? a.sourceUrl : null,
-      source_path: a.sourcePath !== undefined ? a.sourcePath : null,
-      source_token: a.sourceToken !== undefined ? a.sourceToken : null,
-      target_db_id: a.targetDbId !== undefined ? a.targetDbId : null,
-      interval_secs: a.intervalSecs ?? null,
-      enabled: a.enabled !== undefined ? a.enabled : null,
-    }),
-  },
-  delete_sync_source: {
-    method: 'DELETE',
-    path: (a) => `/api/sync/sources/${encodeURIComponent(a.id as string)}`,
-  },
-  run_sync_source: {
-    method: 'POST',
-    path: (a) => `/api/sync/sources/${encodeURIComponent(a.id as string)}/run`,
-  },
-  get_sync_status: {
-    method: 'GET',
-    path: '/api/sync/status',
-  },
-  test_sync_connection: {
-    method: 'POST',
-    path: (a) => `/api/sync/sources/${encodeURIComponent(a.id as string)}/test-connection`,
   },
 };

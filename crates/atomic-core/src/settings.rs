@@ -20,9 +20,9 @@ pub const DEFAULT_SETTINGS: &[(&str, &str)] = &[
     ("openrouter_context_length", ""),
     ("embedding_model", "openai/text-embedding-3-small"),
     ("tagging_model", "openai/gpt-4o-mini"),
-    ("wiki_model", "anthropic/claude-sonnet-4.5"),
+    ("wiki_model", "anthropic/claude-sonnet-4.6"),
     ("wiki_strategy", "centroid"),
-    ("chat_model", "anthropic/claude-sonnet-4.5"),
+    ("chat_model", "anthropic/claude-sonnet-4.6"),
     ("auto_tagging_enabled", "true"),
     ("openai_compat_base_url", ""),
     ("openai_compat_embedding_model", ""),
@@ -30,6 +30,11 @@ pub const DEFAULT_SETTINGS: &[(&str, &str)] = &[
     ("openai_compat_embedding_dimension", "1536"),
     ("openai_compat_context_length", "65536"),
     ("openai_compat_timeout_secs", "300"), // 5 minutes default for OpenAI-compatible servers
+    ("wiki_generation_prompt", ""),
+    ("wiki_update_prompt", ""),
+    // Scheduled tasks — see crate::scheduler::state for key format
+    ("task.daily_briefing.enabled", "true"),
+    ("task.daily_briefing.interval_hours", "24"),
 ];
 
 /// Migrate settings - add any missing default settings

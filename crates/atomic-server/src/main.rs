@@ -7,7 +7,7 @@ mod config;
 
 use actix_cors::Cors;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer, Responder};
-use atomic_server::{auth, event_bridge, log_buffer::LogBuffer, mcp, mcp_auth, rate_limiter, request_logger, routes, security_headers, state::AppState, ws, Scalar, Servable};
+use atomic_server::{auth, event_bridge, log_buffer::LogBuffer, mcp, mcp_auth, routes, state::AppState, ws, Scalar, Servable};
 use utoipa::OpenApi;
 use clap::Parser;
 use config::{Cli, Command, TokenAction};
@@ -15,9 +15,6 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp_actix_web::transport::StreamableHttpService;
 use std::sync::Arc;
 use std::time::Duration;
-
-/// Default rate limit: 600 requests per minute per IP (10 req/s).
-const DEFAULT_RATE_LIMIT: u64 = config::DEFAULT_RATE_LIMIT;
 
 async fn health() -> impl Responder {
     HttpResponse::Ok().json(serde_json::json!({
@@ -54,17 +51,17 @@ async fn main() -> std::io::Result<()> {
         }
 
         // Server mode
-        Some(Command::Serve { port, bind, public_url, storage, database_url, allowed_origins, rate_limit }) => {
+        Some(Command::Serve { port, bind, public_url, storage, database_url }) => {
             // Auto-detect public URL on Fly.io if not explicitly set
             let public_url = public_url.or_else(|| {
                 std::env::var("FLY_APP_NAME").ok().map(|name| format!("https://{name}.fly.dev"))
             });
             let manager = create_manager(&data_dir, &storage, database_url.as_deref());
-            run_server(manager, &data_dir.display().to_string(), port, &bind, public_url, log_buffer, allowed_origins, rate_limit).await
+            run_server(manager, &data_dir.display().to_string(), port, &bind, public_url, log_buffer).await
         }
         None => {
             let manager = create_manager(&data_dir, "sqlite", None);
-            run_server(manager, &data_dir.display().to_string(), 8080, "127.0.0.1", None, log_buffer, None, DEFAULT_RATE_LIMIT).await
+            run_server(manager, &data_dir.display().to_string(), 8080, "127.0.0.1", None, log_buffer).await
         }
     }
 }
@@ -161,8 +158,6 @@ async fn run_server(
     bind: &str,
     public_url: Option<String>,
     log_buffer: LogBuffer,
-    allowed_origins: Option<String>,
-    rate_limit: u64,
 ) -> std::io::Result<()> {
     let manager = Arc::new(manager);
 
@@ -197,8 +192,6 @@ async fn run_server(
         event_tx: event_tx.clone(),
         public_url: public_url.clone(),
         log_buffer,
-        sync_running: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
-        sync_cooldowns: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     });
 
     // Create MCP service with multi-database support via ?db= query param
@@ -266,7 +259,56 @@ async fn run_server(
                 Ok(_) => {}
                 Err(e) => tracing::warn!(db = %db_info.name, error = %e, "failed to start pending tagging"),
             }
+
+            match db_core.process_pending_edges() {
+                Ok(count) if count > 0 => tracing::info!(db = %db_info.name, count = count, "processing pending edge computation in background"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(db = %db_info.name, error = %e, "failed to start pending edge computation"),
+            }
         }
+    }
+
+    // Canvas cache warmup: compute the global canvas payload for every
+    // database in the background so the first request after startup hits a
+    // warm cache. Sequenced across databases (not parallel) to avoid an
+    // N-way PCA spike on startup, and off-loaded to the blocking pool so it
+    // never ties up an async worker.
+    {
+        let warm_manager = Arc::clone(&manager);
+        tokio::spawn(async move {
+            let (databases, _) = match warm_manager.list_databases() {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(error = %e, "canvas warmup: failed to list databases");
+                    return;
+                }
+            };
+            for db_info in &databases {
+                let db_core = match warm_manager.get_core(&db_info.id) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(db = %db_info.name, error = %e, "canvas warmup: failed to load database");
+                        continue;
+                    }
+                };
+                let db_name = db_info.name.clone();
+                let started = std::time::Instant::now();
+                let result = tokio::task::spawn_blocking(move || {
+                    db_core.compute_and_get_canvas_data().map(|d| d.atoms.len())
+                })
+                .await;
+                match result {
+                    Ok(Ok(atom_count)) => tracing::info!(
+                        db = %db_name,
+                        atoms = atom_count,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "canvas cache warmed"
+                    ),
+                    Ok(Err(e)) => tracing::warn!(db = %db_name, error = %e, "canvas cache warmup failed"),
+                    Err(e) => tracing::warn!(db = %db_name, error = %e, "canvas cache warmup panicked"),
+                }
+            }
+        });
     }
 
     // Spawn feed polling scheduler (ticks every 60 seconds, polls all databases)
@@ -307,43 +349,68 @@ async fn run_server(
         });
     }
 
-    // Spawn sync source scheduler (ticks every 60 seconds, runs due sources)
+    // Spawn scheduled-tasks runner (ticks every 60 seconds across all databases).
+    // Each registered task checks its own due-ness and state; we just hand it
+    // a core + context. A per-(task, db) lock in the registry prevents the
+    // next tick from re-entering a still-running task.
     {
-        let sync_manager = Arc::clone(&manager);
-        let sync_tx = event_tx.clone();
-        let sync_running = app_state.sync_running.clone();
-        atomic_server::sync::spawn_sync_scheduler(sync_manager, sync_tx, sync_running);
+        let task_manager = Arc::clone(&manager);
+        let task_tx = event_tx.clone();
+        tokio::spawn(async move {
+            let mut registry = atomic_core::scheduler::TaskRegistry::new();
+            registry.register(Arc::new(atomic_core::briefing::DailyBriefingTask));
+            let registry = Arc::new(registry);
+
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let databases = match task_manager.list_databases() {
+                    Ok((dbs, _)) => dbs,
+                    Err(_) => continue,
+                };
+                for db_info in &databases {
+                    let db_core = match task_manager.get_core(&db_info.id) {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+                    for task in registry.tasks() {
+                        let Some(guard) = registry.try_lock(task.id(), &db_info.id) else {
+                            continue;
+                        };
+                        let task_clone = Arc::clone(task);
+                        let db_core_clone = db_core.clone();
+                        let tx = task_tx.clone();
+                        let db_id = db_info.id.clone();
+                        tokio::spawn(async move {
+                            let ctx = atomic_core::scheduler::TaskContext {
+                                event_cb: event_bridge::task_event_callback(tx),
+                            };
+                            if let Err(e) = task_clone.run(&db_core_clone, &ctx).await {
+                                tracing::debug!(
+                                    task = task_clone.id(),
+                                    db = %db_id,
+                                    error = %e,
+                                    "task run ended"
+                                );
+                            }
+                            drop(guard);
+                        });
+                    }
+                }
+            }
+        });
     }
 
     let bind_owned = bind.to_string();
     let shutdown_manager = Arc::clone(&manager);
 
     HttpServer::new(move || {
-        // Configure CORS: permissive by default, or restrict to specified origins.
-        let cors = match &allowed_origins {
-            Some(origins) => {
-                let mut builder = Cors::default()
-                    .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"])
-                    .allowed_headers(vec![
-                        actix_web::http::header::AUTHORIZATION,
-                        actix_web::http::header::CONTENT_TYPE,
-                        actix_web::http::header::ACCEPT,
-                    ])
-                    .max_age(3600);
-                for origin in origins.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                    builder = builder.allowed_origin(origin);
-                }
-                builder
-            }
-            None => Cors::permissive(),
-        };
+        let cors = Cors::permissive();
 
         App::new()
             .wrap(cors)
             .wrap(middleware::Compress::default())
-            .wrap(request_logger::RequestLogger)
-            .wrap(security_headers::SecurityHeaders)
-            .wrap(rate_limiter::RateLimiter::new(rate_limit, 60))
             .app_data(app_state.clone())
             // Public routes (no auth)
             .route("/health", web::get().to(health))

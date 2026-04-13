@@ -27,6 +27,7 @@ impl SqliteStorage {
         &self,
         atom_id: &str,
         status: &str,
+        error: Option<&str>,
     ) -> StorageResult<()> {
         let conn = self
             .db
@@ -34,9 +35,42 @@ impl SqliteStorage {
             .lock()
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
         conn.execute(
-            "UPDATE atoms SET embedding_status = ?2 WHERE id = ?1",
-            rusqlite::params![atom_id, status],
+            "UPDATE atoms SET embedding_status = ?2, embedding_error = ?3 WHERE id = ?1",
+            rusqlite::params![atom_id, status, error],
         )?;
+        Ok(())
+    }
+
+    /// Set embedding status for multiple atoms in a single statement.
+    pub(crate) fn set_embedding_status_batch_sync(
+        &self,
+        atom_ids: &[String],
+        status: &str,
+        error: Option<&str>,
+    ) -> StorageResult<()> {
+        if atom_ids.is_empty() {
+            return Ok(());
+        }
+        let conn = self
+            .db
+            .conn
+            .lock()
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        let placeholders = atom_ids.iter().enumerate()
+            .map(|(i, _)| format!("?{}", i + 3))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "UPDATE atoms SET embedding_status = ?1, embedding_error = ?2 WHERE id IN ({})",
+            placeholders
+        );
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(2 + atom_ids.len());
+        params.push(Box::new(status.to_string()));
+        params.push(Box::new(error.map(|e| e.to_string())));
+        for id in atom_ids {
+            params.push(Box::new(id.clone()));
+        }
+        conn.execute(&sql, rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())))?;
         Ok(())
     }
 
@@ -44,6 +78,7 @@ impl SqliteStorage {
         &self,
         atom_id: &str,
         status: &str,
+        error: Option<&str>,
     ) -> StorageResult<()> {
         let conn = self
             .db
@@ -51,8 +86,8 @@ impl SqliteStorage {
             .lock()
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
         conn.execute(
-            "UPDATE atoms SET tagging_status = ?2 WHERE id = ?1",
-            rusqlite::params![atom_id, status],
+            "UPDATE atoms SET tagging_status = ?2, tagging_error = ?3 WHERE id = ?1",
+            rusqlite::params![atom_id, status, error],
         )?;
         Ok(())
     }
@@ -67,7 +102,59 @@ impl SqliteStorage {
             .conn
             .lock()
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        Self::save_chunks_for_atom(&conn, atom_id, chunks)
+    }
 
+    /// Save chunks and embeddings for multiple atoms in a single transaction.
+    /// Each atom is wrapped in a SAVEPOINT so a mid-atom failure rolls back
+    /// only that atom's partial state (DELETEs + INSERTs), not the whole batch.
+    pub(crate) fn save_chunks_and_embeddings_batch_sync(
+        &self,
+        atoms: &[(String, Vec<(String, Vec<f32>)>)],
+    ) -> StorageResult<Vec<String>> {
+        if atoms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut conn = self
+            .db
+            .conn
+            .lock()
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        let mut tx = conn.transaction()
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+
+        let mut succeeded = Vec::new();
+        for (atom_id, chunks) in atoms {
+            // SAVEPOINT per atom: if save_chunks_for_atom fails mid-way
+            // (after DELETE but during INSERTs), the SAVEPOINT rollback
+            // restores the atom's prior chunk/FTS state instead of
+            // committing a partial write.
+            let sp = tx.savepoint()
+                .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+            match Self::save_chunks_for_atom(&sp, atom_id, chunks) {
+                Ok(()) => {
+                    sp.commit()
+                        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+                    succeeded.push(atom_id.clone());
+                }
+                Err(e) => {
+                    // sp is dropped without commit → implicit rollback to savepoint
+                    tracing::warn!(atom_id = %atom_id, error = %e, "Failed to save chunks for atom, rolled back");
+                }
+            }
+        }
+
+        tx.commit()
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        Ok(succeeded)
+    }
+
+    /// Inner helper: save chunks for a single atom on an existing connection/transaction.
+    fn save_chunks_for_atom(
+        conn: &rusqlite::Connection,
+        atom_id: &str,
+        chunks: &[(String, Vec<f32>)],
+    ) -> StorageResult<()> {
         // Remove old FTS entries before deleting chunks
         conn.execute(
             "INSERT INTO atom_chunks_fts(atom_chunks_fts, rowid, id, atom_id, chunk_index, content)
@@ -155,6 +242,33 @@ impl SqliteStorage {
             [],
         )?;
 
+        // Reset edges stuck in 'processing' back to 'pending'
+        let edges_count = conn.execute(
+            "UPDATE atoms SET edges_status = 'pending' WHERE edges_status = 'processing'",
+            [],
+        )?;
+
+        Ok((embedding_count + tagging_count + edges_count) as i32)
+    }
+
+    /// Reset failed embedding and tagging atoms back to pending (for auto-retry on config fix).
+    pub(crate) fn reset_failed_embeddings_sync(&self) -> StorageResult<i32> {
+        let conn = self
+            .db
+            .conn
+            .lock()
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+
+        let embedding_count = conn.execute(
+            "UPDATE atoms SET embedding_status = 'pending', embedding_error = NULL WHERE embedding_status = 'failed'",
+            [],
+        )?;
+
+        let tagging_count = conn.execute(
+            "UPDATE atoms SET tagging_status = 'pending', tagging_error = NULL WHERE tagging_status = 'failed'",
+            [],
+        )?;
+
         Ok((embedding_count + tagging_count) as i32)
     }
 
@@ -165,43 +279,41 @@ impl SqliteStorage {
             .lock()
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
 
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT a.id FROM atoms a
-             INNER JOIN atom_chunks ac ON a.id = ac.atom_id
-             WHERE a.embedding_status = 'complete'",
-        )?;
-
-        let atom_ids: Vec<String> = stmt
-            .query_map([], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-
+        // Clear all existing edges and mark all embedded atoms as needing edge recomputation.
+        // The facade (`AtomicCore::rebuild_semantic_edges`) kicks off
+        // `process_pending_edges` afterwards so it can supply the canvas cache
+        // handle — storage has no knowledge of the cache.
         conn.execute("DELETE FROM semantic_edges", [])?;
+        let count = conn.execute(
+            "UPDATE atoms SET edges_status = 'pending' WHERE embedding_status = 'complete'",
+            [],
+        )? as i32;
 
-        let mut total_edges = 0;
-        for (idx, atom_id) in atom_ids.iter().enumerate() {
-            match embedding::compute_semantic_edges_for_atom(&conn, atom_id, 0.5, 15) {
-                Ok(edge_count) => {
-                    total_edges += edge_count;
-                    if (idx + 1) % 50 == 0 {
-                        tracing::info!(
-                            progress = idx + 1,
-                            total = atom_ids.len(),
-                            total_edges,
-                            "Edge computation progress"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        atom_id = %atom_id,
-                        error = %e,
-                        "Failed to compute edges for atom"
-                    );
-                }
-            }
+        if count > 0 {
+            tracing::info!(count, "Marked atoms for edge recomputation");
         }
 
-        Ok(total_edges)
+        Ok(count)
+    }
+
+    /// Raw edge triples (source, target, score) sorted by score DESC.
+    /// Lightweight — no full SemanticEdge struct, no chunk indexes, no timestamps.
+    pub(crate) fn get_semantic_edges_raw_sync(
+        &self,
+        min_similarity: f32,
+    ) -> StorageResult<Vec<(String, String, f32)>> {
+        let conn = self.db.read_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT source_atom_id, target_atom_id, similarity_score
+             FROM semantic_edges
+             WHERE similarity_score >= ?1
+             ORDER BY similarity_score DESC"
+        )?;
+        let edges = stmt.query_map([min_similarity], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+        Ok(edges)
     }
 
     pub(crate) fn get_semantic_edges_sync(
@@ -335,31 +447,100 @@ impl SqliteStorage {
         Ok(results)
     }
 
-    pub(crate) fn delete_chunks_batch_sync(&self, atom_ids: &[String]) -> StorageResult<()> {
+    /// Atomically claim atoms that need edge computation: sets edges_status to 'processing'
+    /// and returns their IDs.
+    pub(crate) fn claim_pending_edges_sync(&self, limit: i32) -> StorageResult<Vec<String>> {
         let conn = self
             .db
             .conn
             .lock()
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        let mut stmt = conn.prepare(
+            "UPDATE atoms SET edges_status = 'processing'
+             WHERE id IN (SELECT id FROM atoms WHERE edges_status = 'pending' AND embedding_status = 'complete' LIMIT ?1)
+             RETURNING id",
+        )?;
+        let results = stmt
+            .query_map([limit], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(results)
+    }
+
+    /// Mark edges_status for a batch of atoms.
+    pub(crate) fn set_edges_status_batch_sync(
+        &self,
+        atom_ids: &[String],
+        status: &str,
+    ) -> StorageResult<()> {
+        if atom_ids.is_empty() {
+            return Ok(());
+        }
+        let conn = self
+            .db
+            .conn
+            .lock()
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        let placeholders = atom_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "UPDATE atoms SET edges_status = ?1 WHERE id IN ({})",
+            placeholders
+        );
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(1 + atom_ids.len());
+        params.push(Box::new(status.to_string()));
+        for id in atom_ids {
+            params.push(Box::new(id.clone()));
+        }
+        conn.execute(
+            &sql,
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+        )?;
+        Ok(())
+    }
+
+    /// Count atoms with pending edge computation.
+    pub(crate) fn count_pending_edges_sync(&self) -> StorageResult<i32> {
+        let conn = self.db.read_conn()?;
+        let count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM atoms WHERE edges_status = 'pending' AND embedding_status = 'complete'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    pub(crate) fn delete_chunks_batch_sync(&self, atom_ids: &[String]) -> StorageResult<()> {
+        if atom_ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self
+            .db
+            .conn
+            .lock()
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+
+        let tx = conn.transaction()
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
 
         for atom_id in atom_ids {
             // Remove FTS entries
-            conn.execute(
+            tx.execute(
                 "INSERT INTO atom_chunks_fts(atom_chunks_fts, rowid, id, atom_id, chunk_index, content)
                  SELECT 'delete', rowid, id, atom_id, chunk_index, content FROM atom_chunks WHERE atom_id = ?1",
                 [atom_id],
             )
             .ok();
 
-            conn.execute(
+            tx.execute(
                 "DELETE FROM vec_chunks WHERE chunk_id IN (SELECT id FROM atom_chunks WHERE atom_id = ?1)",
                 [atom_id],
             )
             .ok();
 
-            conn.execute("DELETE FROM atom_chunks WHERE atom_id = ?1", [atom_id])?;
+            tx.execute("DELETE FROM atom_chunks WHERE atom_id = ?1", [atom_id])?;
         }
 
+        tx.commit()
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
         Ok(())
     }
 
@@ -376,6 +557,41 @@ impl SqliteStorage {
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
         embedding::compute_semantic_edges_for_atom(&conn, atom_id, threshold, max_edges)
             .map_err(|e| AtomicCoreError::Embedding(e))
+    }
+
+    /// Compute semantic edges for a batch of atoms, processing in sub-batches
+    /// of EDGE_SUB_BATCH atoms each. Each sub-batch acquires the write lock,
+    /// runs a transaction, and releases — keeping mutex hold times short so
+    /// concurrent writes (e.g. UI atom saves) aren't stalled.
+    pub(crate) fn compute_semantic_edges_batch_sync(
+        &self,
+        atom_ids: &[String],
+        threshold: f32,
+        max_edges: i32,
+    ) -> StorageResult<i32> {
+        const EDGE_SUB_BATCH: usize = 50;
+        let mut total_edges = 0;
+        for chunk in atom_ids.chunks(EDGE_SUB_BATCH) {
+            let mut conn = self
+                .db
+                .conn
+                .lock()
+                .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+            let tx = conn.transaction()
+                .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+            for atom_id in chunk {
+                match embedding::compute_semantic_edges_for_atom(&tx, atom_id, threshold, max_edges) {
+                    Ok(count) => total_edges += count,
+                    Err(e) => {
+                        tracing::warn!(atom_id = %atom_id, error = %e, "Failed to compute edges for atom");
+                    }
+                }
+            }
+            tx.commit()
+                .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+            // conn lock dropped here — other writers can proceed between sub-batches
+        }
+        Ok(total_edges)
     }
 
     pub(crate) fn rebuild_fts_index_sync(&self) -> StorageResult<()> {
@@ -443,7 +659,7 @@ impl SqliteStorage {
         crate::db::recreate_vec_chunks_with_dimension(&conn, dimension)
     }
 
-    pub(crate) fn claim_pending_reembedding_sync(&self) -> StorageResult<Vec<(String, String)>> {
+    pub(crate) fn claim_pending_reembedding_sync(&self) -> StorageResult<Vec<String>> {
         let conn = self
             .db
             .conn
@@ -452,15 +668,15 @@ impl SqliteStorage {
         let mut stmt = conn.prepare(
             "UPDATE atoms SET embedding_status = 'processing'
              WHERE embedding_status IN ('pending', 'processing')
-             RETURNING id, content",
+             RETURNING id",
         )?;
         let results = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map([], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(results)
     }
 
-    pub(crate) fn claim_all_for_reembedding_sync(&self) -> StorageResult<Vec<(String, String)>> {
+    pub(crate) fn claim_all_for_reembedding_sync(&self) -> StorageResult<Vec<String>> {
         let conn = self
             .db
             .conn
@@ -468,12 +684,82 @@ impl SqliteStorage {
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
         let mut stmt = conn.prepare(
             "UPDATE atoms SET embedding_status = 'processing'
-             RETURNING id, content",
+             RETURNING id",
         )?;
         let results = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map([], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(results)
+    }
+
+    pub(crate) fn get_pipeline_status_sync(&self) -> StorageResult<PipelineStatus> {
+        let conn = self.db.read_conn()?;
+        let pending: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM atoms WHERE embedding_status = 'pending'",
+            [],
+            |r| r.get(0),
+        )?;
+        let processing: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM atoms WHERE embedding_status = 'processing'",
+            [],
+            |r| r.get(0),
+        )?;
+        let complete: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM atoms WHERE embedding_status = 'complete'",
+            [],
+            |r| r.get(0),
+        )?;
+        let failed_count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM atoms WHERE embedding_status = 'failed'",
+            [],
+            |r| r.get(0),
+        )?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, title, snippet, embedding_error, updated_at FROM atoms WHERE embedding_status = 'failed' ORDER BY updated_at DESC LIMIT 100",
+        )?;
+        let failed: Vec<FailedAtom> = stmt
+            .query_map([], |row| {
+                Ok(FailedAtom {
+                    atom_id: row.get(0)?,
+                    title: row.get(1)?,
+                    snippet: row.get(2)?,
+                    error: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let tagging_failed_count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM atoms WHERE tagging_status = 'failed'",
+            [],
+            |r| r.get(0),
+        )?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, title, snippet, tagging_error, updated_at FROM atoms WHERE tagging_status = 'failed' ORDER BY updated_at DESC LIMIT 100",
+        )?;
+        let tagging_failed: Vec<FailedAtom> = stmt
+            .query_map([], |row| {
+                Ok(FailedAtom {
+                    atom_id: row.get(0)?,
+                    title: row.get(1)?,
+                    snippet: row.get(2)?,
+                    error: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(PipelineStatus {
+            pending,
+            processing,
+            complete,
+            failed_count,
+            failed,
+            tagging_failed_count,
+            tagging_failed,
+        })
     }
 }
 
@@ -487,16 +773,18 @@ impl ChunkStore for SqliteStorage {
         &self,
         atom_id: &str,
         status: &str,
+        error: Option<&str>,
     ) -> StorageResult<()> {
-        self.set_embedding_status_sync(atom_id, status)
+        self.set_embedding_status_sync(atom_id, status, error)
     }
 
     async fn set_tagging_status(
         &self,
         atom_id: &str,
         status: &str,
+        error: Option<&str>,
     ) -> StorageResult<()> {
-        self.set_tagging_status_sync(atom_id, status)
+        self.set_tagging_status_sync(atom_id, status, error)
     }
 
     async fn save_chunks_and_embeddings(
@@ -515,6 +803,10 @@ impl ChunkStore for SqliteStorage {
         self.reset_stuck_processing_sync()
     }
 
+    async fn reset_failed_embeddings(&self) -> StorageResult<i32> {
+        self.reset_failed_embeddings_sync()
+    }
+
     async fn rebuild_semantic_edges(&self) -> StorageResult<i32> {
         self.rebuild_semantic_edges_sync()
     }
@@ -524,6 +816,13 @@ impl ChunkStore for SqliteStorage {
         min_similarity: f32,
     ) -> StorageResult<Vec<SemanticEdge>> {
         self.get_semantic_edges_sync(min_similarity)
+    }
+
+    async fn get_semantic_edges_raw(
+        &self,
+        min_similarity: f32,
+    ) -> StorageResult<Vec<(String, String, f32)>> {
+        self.get_semantic_edges_raw_sync(min_similarity)
     }
 
     async fn get_atom_neighborhood(
@@ -591,11 +890,27 @@ impl ChunkStore for SqliteStorage {
         self.recreate_vector_index_sync(dimension)
     }
 
-    async fn claim_pending_reembedding(&self) -> StorageResult<Vec<(String, String)>> {
+    async fn claim_pending_reembedding(&self) -> StorageResult<Vec<String>> {
         self.claim_pending_reembedding_sync()
     }
 
-    async fn claim_all_for_reembedding(&self) -> StorageResult<Vec<(String, String)>> {
+    async fn claim_all_for_reembedding(&self) -> StorageResult<Vec<String>> {
         self.claim_all_for_reembedding_sync()
+    }
+
+    async fn claim_pending_edges(&self, limit: i32) -> StorageResult<Vec<String>> {
+        self.claim_pending_edges_sync(limit)
+    }
+
+    async fn set_edges_status_batch(
+        &self,
+        atom_ids: &[String],
+        status: &str,
+    ) -> StorageResult<()> {
+        self.set_edges_status_batch_sync(atom_ids, status)
+    }
+
+    async fn count_pending_edges(&self) -> StorageResult<i32> {
+        self.count_pending_edges_sync()
     }
 }

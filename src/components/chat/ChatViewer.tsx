@@ -1,47 +1,47 @@
 import { useEffect, useRef } from 'react';
+import { X } from 'lucide-react';
 import { useChatStore } from '../../stores/chat';
 import { useUIStore } from '../../stores/ui';
+import { useDatabasesStore } from '../../stores/databases';
 import { ConversationsList } from './ConversationsList';
 import { ChatView } from './ChatView';
 
-interface ChatViewerProps {
-  initialTagId?: string | null;
-  initialConversationId?: string | null;
-}
-
-export function ChatViewer({ initialTagId, initialConversationId }: ChatViewerProps) {
+export function ChatViewer() {
   const view = useChatStore(s => s.view);
   const showList = useChatStore(s => s.showList);
   const openConversation = useChatStore(s => s.openConversation);
   const openOrCreateForTag = useChatStore(s => s.openOrCreateForTag);
-  const reset = useChatStore(s => s.reset);
-  const closeDrawer = useUIStore(s => s.closeDrawer);
+  const setChatSidebarOpen = useUIStore(s => s.setChatSidebarOpen);
+  const initialTagId = useUIStore(s => s.chatSidebarInitialTagId);
+  const initialConversationId = useUIStore(s => s.chatSidebarInitialConversationId);
+  const lastConversationId = useUIStore(s => s.chatSidebarConversationId);
+  const activeDbId = useDatabasesStore(s => s.activeId);
   const initializedRef = useRef(false);
 
-  // Initialize the chat view based on props - only run once
+  // Re-initialize when database changes
   useEffect(() => {
-    // Prevent double initialization in React Strict Mode
-    if (initializedRef.current) return;
-    initializedRef.current = true;
-
-    if (initialConversationId) {
-      // Open specific conversation
-      openConversation(initialConversationId);
-    } else if (initialTagId) {
-      // Find existing conversation with exactly this tag, or create new one
-      openOrCreateForTag(initialTagId);
-    } else {
-      // Show list with no filter
+    if (initializedRef.current) {
       showList();
     }
-  }, [initialTagId, initialConversationId, showList, openConversation, openOrCreateForTag]);
+  }, [activeDbId, showList]);
 
-  // Separate cleanup effect that only runs on unmount
+  // Initialize on first mount, and navigate when new initial values are set
   useEffect(() => {
-    return () => {
-      reset();
-    };
-  }, [reset]);
+    if (initialConversationId) {
+      openConversation(initialConversationId);
+      useUIStore.getState().clearChatSidebarInitial();
+    } else if (initialTagId) {
+      openOrCreateForTag(initialTagId);
+      useUIStore.getState().clearChatSidebarInitial();
+    } else if (!initializedRef.current) {
+      if (lastConversationId) {
+        openConversation(lastConversationId);
+      } else {
+        showList();
+      }
+    }
+    initializedRef.current = true;
+  }, [initialTagId, initialConversationId, lastConversationId, showList, openConversation, openOrCreateForTag]);
 
   return (
     <div className="h-full flex flex-col bg-[var(--color-bg-panel)]">
@@ -51,23 +51,11 @@ export function ChatViewer({ initialTagId, initialConversationId }: ChatViewerPr
           {view === 'list' ? 'Conversations' : 'Chat'}
         </h2>
         <button
-          onClick={closeDrawer}
+          onClick={() => setChatSidebarOpen(false)}
           className="p-1 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
           aria-label="Close"
         >
-          <svg
-            className="w-5 h-5"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M6 18L18 6M6 6l12 12"
-            />
-          </svg>
+          <X className="w-5 h-5" strokeWidth={2} />
         </button>
       </div>
 

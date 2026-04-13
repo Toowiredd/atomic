@@ -10,6 +10,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing;
@@ -17,6 +18,40 @@ use tracing;
 const DEFAULT_PORT: u16 = 44380;
 const DEFAULT_HOST: &str = "127.0.0.1";
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
+const TOKEN_FILE_NAME: &str = "local_server_token";
+
+/// Resolve the platform-specific Atomic data directory.
+/// Must match Tauri's `app.path().app_data_dir()` for identifier `com.atomic.app`.
+fn atomic_data_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("com.atomic.app"))
+}
+
+/// Discover the auth token: ATOMIC_TOKEN env var, then local token file on disk.
+fn discover_token() -> Option<String> {
+    if let Ok(token) = env::var("ATOMIC_TOKEN") {
+        if !token.is_empty() {
+            return Some(token);
+        }
+    }
+
+    let data_dir = atomic_data_dir()?;
+    let token_path = data_dir.join(TOKEN_FILE_NAME);
+    match std::fs::read_to_string(&token_path) {
+        Ok(token) => {
+            let token = token.trim().to_string();
+            if token.is_empty() {
+                None
+            } else {
+                tracing::info!(path = ?token_path, "Read auth token from disk");
+                Some(token)
+            }
+        }
+        Err(_) => {
+            tracing::warn!(path = ?token_path, "Could not read token file");
+            None
+        }
+    }
+}
 
 /// JSON-RPC error response
 #[derive(Serialize)]
@@ -99,7 +134,7 @@ async fn process_sse_stream(
 
                     // Combine data lines and output
                     if !data_lines.is_empty() {
-                        let data = data_lines.join("");
+                        let data = data_lines.join("\n");
                         if data != "[DONE]" {
                             send_stdout(&data);
                         }
@@ -131,6 +166,7 @@ async fn process_message(
     client: &reqwest::Client,
     endpoint: &str,
     session_id: Arc<Mutex<Option<String>>>,
+    auth_token: Option<&str>,
     line: String,
 ) {
     // Parse the message to get ID and method
@@ -147,6 +183,10 @@ async fn process_message(
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream")
         .header("Mcp-Protocol-Version", MCP_PROTOCOL_VERSION);
+
+    if let Some(token) = auth_token {
+        request = request.header("Authorization", format!("Bearer {}", token));
+    }
 
     // Add session ID if we have one (not for initialize request)
     let current_session = session_id.lock().unwrap().clone();
@@ -240,9 +280,12 @@ async fn main() {
     let host = env::var("ATOMIC_HOST").unwrap_or_else(|_| DEFAULT_HOST.to_string());
     let endpoint = format!("http://{}:{}/mcp", host, port);
 
+    let auth_token = discover_token();
+
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         endpoint = %endpoint,
+        has_token = auth_token.is_some(),
         protocol_version = MCP_PROTOCOL_VERSION,
         "Atomic MCP Bridge starting"
     );
@@ -279,6 +322,6 @@ async fn main() {
 
     // Process messages from stdin
     while let Some(line) = rx.recv().await {
-        process_message(&client, &endpoint, session_id.clone(), line).await;
+        process_message(&client, &endpoint, session_id.clone(), auth_token.as_deref(), line).await;
     }
 }

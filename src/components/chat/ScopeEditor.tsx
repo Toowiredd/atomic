@@ -1,4 +1,5 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
+import { X, Plus } from 'lucide-react';
 import { ConversationWithTags, useChatStore } from '../../stores/chat';
 import { useTagsStore } from '../../stores/tags';
 
@@ -187,9 +188,7 @@ export function ScopeEditor({ conversation }: ScopeEditorProps) {
               className="opacity-0 group-hover:opacity-100 hover:text-red-400 transition-all"
               aria-label={`Remove ${tag.name} from scope`}
             >
-              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
+              <X className="w-3 h-3" strokeWidth={2} />
             </button>
           </span>
         ))
@@ -238,9 +237,7 @@ export function ScopeEditor({ conversation }: ScopeEditorProps) {
           onClick={() => setIsAdding(true)}
           className="inline-flex items-center gap-1 px-2 py-0.5 text-sm rounded border border-dashed border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent-light)] transition-colors"
         >
-          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
+          <Plus className="w-3 h-3" strokeWidth={2} />
           Add tag
         </button>
       )}

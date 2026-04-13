@@ -117,6 +117,37 @@ pub async fn get_atom(db: Db, path: web::Path<String>) -> HttpResponse {
     }
 }
 
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct GetAtomBySourceUrlQuery {
+    /// The source URL to look up
+    pub url: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/atoms/by-source-url",
+    params(GetAtomBySourceUrlQuery),
+    responses(
+        (status = 200, description = "Atom found", body = AtomWithTags),
+        (status = 404, description = "No atom with this source URL", body = ApiErrorResponse),
+    ),
+    tag = "atoms",
+)]
+pub async fn get_atom_by_source_url(
+    db: Db,
+    query: web::Query<GetAtomBySourceUrlQuery>,
+) -> HttpResponse {
+    let url = query.into_inner().url;
+    let core = db.0;
+    match web::block(move || core.get_atom_by_source_url(&url)).await {
+        Ok(Ok(Some(atom))) => HttpResponse::Ok().json(atom),
+        Ok(Ok(None)) => HttpResponse::NotFound().json(serde_json::json!({"error": "No atom found with this source URL"})),
+        Ok(Err(e)) => crate::error::error_response(e),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct CreateAtomRequest {
     /// Markdown content of the atom
@@ -128,6 +159,9 @@ pub struct CreateAtomRequest {
     /// Tag IDs to assign
     #[serde(default)]
     pub tag_ids: Vec<String>,
+    /// When true, skip creation if an atom with the same source_url already exists
+    #[serde(default)]
+    pub skip_if_source_exists: bool,
 }
 
 #[utoipa::path(
@@ -156,13 +190,17 @@ pub async fn create_atom(
                 source_url: req.source_url,
                 published_at: req.published_at,
                 tag_ids: req.tag_ids,
+                skip_if_source_exists: req.skip_if_source_exists,
             },
             on_event,
         )
     }).await {
-        Ok(Ok(atom)) => {
+        Ok(Ok(Some(atom))) => {
             let _ = event_tx.send(ServerEvent::AtomCreated { atom: atom.clone() });
             HttpResponse::Created().json(atom)
+        }
+        Ok(Ok(None)) => {
+            HttpResponse::Ok().json(serde_json::json!({"skipped": true}))
         }
         Ok(Err(e)) => crate::error::error_response(e),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()})),
@@ -192,6 +230,7 @@ pub async fn bulk_create_atoms(
             source_url: r.source_url,
             published_at: r.published_at,
             tag_ids: r.tag_ids,
+            skip_if_source_exists: r.skip_if_source_exists,
         })
         .collect();
     let on_event = embedding_event_callback(state.event_tx.clone());
@@ -255,6 +294,42 @@ pub async fn update_atom(
                 tag_ids: req.tag_ids,
             },
             on_event,
+        )
+    }).await
+}
+
+/// Update atom content/metadata without triggering embedding or tagging pipeline.
+/// Used by auto-save during inline editing.
+#[utoipa::path(
+    put,
+    path = "/api/atoms/{id}/content",
+    params(
+        ("id" = String, Path, description = "Atom ID"),
+    ),
+    request_body = UpdateAtomRequest,
+    responses(
+        (status = 200, description = "Updated atom (no pipeline triggered)", body = AtomWithTags),
+        (status = 404, description = "Atom not found", body = ApiErrorResponse),
+    ),
+    tag = "atoms",
+)]
+pub async fn update_atom_content_only(
+    db: Db,
+    path: web::Path<String>,
+    body: web::Json<UpdateAtomRequest>,
+) -> HttpResponse {
+    let id = path.into_inner();
+    let req = body.into_inner();
+    let core = db.0;
+    blocking_ok(move || {
+        core.update_atom_content_only(
+            &id,
+            atomic_core::UpdateAtomRequest {
+                content: req.content,
+                source_url: req.source_url,
+                published_at: req.published_at,
+                tag_ids: req.tag_ids,
+            },
         )
     }).await
 }
@@ -425,4 +500,66 @@ pub async fn delete_tag(
     let recursive = query.get("recursive").map(|v| v == "true").unwrap_or(false);
     let core = db.0;
     blocking_ok(move || core.delete_tag(&id, recursive)).await
+}
+
+#[derive(Deserialize, Serialize, ToSchema)]
+pub struct SetAutotagTargetRequest {
+    /// Whether the tag should be a candidate for AI auto-tagging.
+    pub value: bool,
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/tags/{id}/autotag-target",
+    params(
+        ("id" = String, Path, description = "Tag ID"),
+    ),
+    request_body = SetAutotagTargetRequest,
+    responses(
+        (status = 204, description = "Flag updated"),
+        (status = 404, description = "Tag not found", body = ApiErrorResponse),
+    ),
+    tag = "tags",
+)]
+pub async fn set_tag_autotag_target(
+    db: Db,
+    path: web::Path<String>,
+    body: web::Json<SetAutotagTargetRequest>,
+) -> HttpResponse {
+    let id = path.into_inner();
+    let value = body.into_inner().value;
+    let core = db.0;
+    match web::block(move || core.set_tag_autotag_target(&id, value)).await {
+        Ok(Ok(())) => HttpResponse::NoContent().finish(),
+        Ok(Err(e)) => crate::error::error_response(e),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+#[derive(Deserialize, Serialize, ToSchema)]
+pub struct ConfigureAutotagTargetsRequest {
+    /// Names of seeded default categories to keep flagged.
+    /// Any seeded default not in this list is unflagged.
+    pub keep_defaults: Vec<String>,
+    /// Names of new top-level tags to create with the flag set.
+    /// Existing top-level tags with matching names are flagged in place.
+    pub add_custom: Vec<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/tags/configure-autotag-targets",
+    request_body = ConfigureAutotagTargetsRequest,
+    responses(
+        (status = 200, description = "Newly created/flagged custom tags", body = Vec<Tag>),
+    ),
+    tag = "tags",
+)]
+pub async fn configure_autotag_targets(
+    db: Db,
+    body: web::Json<ConfigureAutotagTargetsRequest>,
+) -> HttpResponse {
+    let req = body.into_inner();
+    let core = db.0;
+    blocking_ok(move || core.configure_autotag_targets(&req.keep_defaults, &req.add_custom)).await
 }

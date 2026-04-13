@@ -1,0 +1,24 @@
+{
+  "name": "atomic",
+  "description": "Atomic knowledge base - semantic search, wiki synthesis, and chat with your personal notes",
+  "version": "1.21.4",
+  "type": "mcp",
+  "transport": "stdio",
+  "command": "atomic-mcp-bridge",
+  "args": [],
+  "env": {
+    "ATOMIC_HOST": "${ATOMIC_HOST:-127.0.0.1}",
+    "ATOMIC_PORT": "${ATOMIC_PORT:-44380}",
+    "ATOMIC_TOKEN": "${ATOMIC_TOKEN:-}"
+  },
+  "capabilities": {
+    "tools": [
+      "semantic_search",
+      "read_atom", 
+      "create_atom",
+      "list_atoms",
+      "search_wiki",
+      "chat_with_context"
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+# Goose Extension for Atomic
+# Model Context Protocol (MCP) integration
+
+[extension]
+name = "atomic"
+version = "1.21.4"
+description = "Atomic knowledge base MCP integration for Goose"
+author = "Toowiredd"
+
+[commands]
+# The MCP bridge binary - Goose will spawn this
+atomic-mcp = { path = "bin/atomic-mcp-bridge", description = "Atomic MCP Bridge" }
+
+[settings]
+# Optional: Set ATOMIC_TOKEN for authentication
+ATOMIC_TOKEN = { type = "string", description = "Atomic API token for authentication", required = false }
+ATOMIC_HOST = { type = "string", description = "Atomic server host", default = "127.0.0.1" }
+ATOMIC_PORT = { type = "number", description = "Atomic server port", default = 44380 }
